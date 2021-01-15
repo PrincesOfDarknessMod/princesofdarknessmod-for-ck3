@@ -1,8 +1,8 @@
-version="1.1"
+version="1.2.1"
 tags={
 	"Total Conversion"
 }
-name="Princes of Darkness"
-supported_version="1.1.*"
-path="C:/Users/YOURUSERNAME/Documents/Paradox Interactive/Crusader Kings III/mod/princesofdarkness"
-remote_file_id="2216659254"
+name="Development Princes of Darkness"
+picture="thumbnail.png"
+supported_version="1.2.*"
+path="mod/devprincesofdarkness"

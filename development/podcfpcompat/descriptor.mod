@@ -8,4 +8,4 @@ tags={
 name="Princes of Darkness and Community Flavor Pack Compatability"
 picture="thumbnail.png"
 supported_version="1.2.*"
-path="C:/Users/YOURUSERNAME/Documents/Paradox Interactive/Crusader Kings III/mod/podcfpcompat"
+path="mod/podcfpcompat"
