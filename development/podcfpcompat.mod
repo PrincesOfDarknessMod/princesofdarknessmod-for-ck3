@@ -1,4 +1,4 @@
-version="1.0"
+version="1.4.1"
 tags={
 	"Total Conversion"
 	"Historical"
@@ -7,5 +7,5 @@ tags={
 }
 name="Princes of Darkness and Community Flavor Pack Compatability"
 picture="thumbnail.png"
-supported_version="1.2.*"
+supported_version="1.4.*"
 path="mod/podcfpcompat"
