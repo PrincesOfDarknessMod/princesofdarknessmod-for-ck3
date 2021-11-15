@@ -16,3 +16,8 @@ October 4, 2021 Update:
 * Resolved issue with Character Record Window caused by conflict with update for EPE using cached portraits. Lore button will now work.
 * Removed invisibility for mistform because of floating female grey head and clothing hiccups. Will bring something more etheral in the future.
 * Various bug fixes.
+
+November 14, 2021 Update:
+* Updated for latest versions of CFP and EPE as of 11/14/2021. 
+* Added support for Ascalon's Anachronisms for the vampires that love ancient helmets.
+* Fixed issue with missing CFP ear rings, hands, necklaces, glasses, etc...
