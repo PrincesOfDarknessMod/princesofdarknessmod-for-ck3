@@ -1,4 +1,4 @@
-version="1.4.4.3"
+version="1.5.1"
 tags={
 	"Total Conversion"
 	"Historical"
@@ -7,5 +7,5 @@ tags={
 }
 name="POD-CFP-EPE Compatibility"
 picture="thumbnail.png"
-supported_version="1.4.*"
+supported_version="1.5.*"
 path="mod/podcfpcompat"
