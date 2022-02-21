@@ -3,7 +3,7 @@ POD-CFP-EPE Compatibility
 February 20, 2022
 * Updated for CK3 1.5.0.2
 * Compatible (and requiring) Ascalon's Anarchonisms
-* Turned out the sun on CFP's Norman, Goderlic, Andalusian, East African and West African Courts
+* Turned out the sun on CFP's Norman, Goidelic, Andalusian, East African and West African Courts
 * Enabled Monstorous Eyes selection 
 * Integration with latest additions from CFP and EPE
 
