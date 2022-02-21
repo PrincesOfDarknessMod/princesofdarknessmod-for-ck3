@@ -1,8 +1,17 @@
 POD-CFP-EPE Compatibility
 
-Nagaraja and some Nosferatu will have pointed Afar teeth.
-Low ranking Banu Haqim will wear tagelmust.
-Male members of the Order of the Black Cross will wear a new Teutonic surcoat.  Jurgen von Verden will wear a more elaborate Teutonic Grand Master surcoat.
+February 20, 2022
+* Updated for CK3 1.5.0.2
+* Compatible (and requiring) Ascalon's Anarchonisms
+* Turned out the sun on CFP's Norman, Goderlic, Andalusian, East African and West African Courts
+* Enabled Monstorous Eyes selection 
+* Integration with latest additions from CFP and EPE
+
+December 14, 2021
+
+* Some Nagaraja and some Nosferatu will have pointed Afar teeth.
+* Low ranking Banu Haqim will wear tagelmust.
+* Male members of the Order of the Black Cross will wear a new Teutonic surcoat.  Jurgen von Verden will wear a more elaborate Teutonic Grand Master surcoat.
 
 July 11, 2021 Update:
 * Added religious clothing and headgear.
