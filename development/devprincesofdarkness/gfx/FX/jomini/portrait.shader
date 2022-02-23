@@ -471,6 +471,10 @@ PixelShader =
 		{
 			static const int STATUE_MATERIAL_GOLD   = 0;
 			static const int STATUE_MATERIAL_MARBLE = 1;
+			static const int STATUE_MATERIAL_LIMESTONE = 2;
+			static const int STATUE_MATERIAL_STONE = 3;
+			static const int STATUE_MATERIAL_COPPER = 4;
+			static const int STATUE_MATERIAL_BLOOD = 5;
 
 			bool MustApplyStatueEffect = Light_Position_Radius[2].w < 0.001;
 			if (!MustApplyStatueEffect)
@@ -486,6 +490,26 @@ PixelShader =
 				break;
 
 			case STATUE_MATERIAL_MARBLE:
+				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
+				Properties = float4(0.0, 0.4, 0.25, 0.2);
+				break;
+
+			case STATUE_MATERIAL_LIMESTONE:
+				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
+				Properties = float4(0.0, 0.4, 0.25, 0.2);
+				break;
+
+			case STATUE_MATERIAL_STONE:
+				Diffuse    = float4(0.2, 0.2, 0.2, 0.4);
+				Properties = float4(0.0, 0.0, 0.0, 0.0);
+				break;
+				
+			case STATUE_MATERIAL_COPPER:
+				Diffuse    = float4(1.0, 0.8, 0.2, 1.0);
+				Properties = float4(0.0, 1.0, 1.0, 0.0);
+				break;
+			
+			case STATUE_MATERIAL_BLOOD:
 				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
 				Properties = float4(0.0, 0.4, 0.25, 0.2);
 				break;
