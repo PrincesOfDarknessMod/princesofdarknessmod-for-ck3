@@ -869,6 +869,12 @@ Effect portrait_skinShadow
 	RasterizerState = "ShadowRasterizerState"
 }
 
+Effect portrait_teeth
+{
+	VertexShader = "VS_portrait_blend_shapes"
+	PixelShader = "PS_skin"
+	Defines = { "FAKE_SSS_EMISSIVE" }
+}
 Effect portrait_skin_face
 {
 	VertexShader = "VS_portrait_blend_shapes"
