@@ -65,7 +65,7 @@ trigger = {
 	piety = 0
 }
 ```
-We have three checks in this event, and we start with 10 000 eligible characters. We have one player, so we remove it from the eligible pool, and go to the next check, with 9 999 eligible characters. Let us assume that around half have more than 0 prestige, and so we go onto the next check with about 5 000 eligible characters. From all these eligible characters, we are looking for character 790117, so the list of eligible characters drops to 1. This one character is then subject to another check, as to if they have more than 0 piety.
+We have four checks in this event, and we start with 10 000 eligible characters. We have one player, so we remove it from the eligible pool, and go to the next check, with 9 999 eligible characters. Let us assume that around half have more than 0 prestige, and so we go onto the next check with about 5 000 eligible characters. From all these eligible characters, we are looking for character 790117, so the list of eligible characters drops to 1. This one character is then subject to another check, as to if they have more than 0 piety.
 
 So four checks, generating 25 001 ticks. Whereas, if we rewrite this code to, instead, resemble this:
 
