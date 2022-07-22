@@ -1,11 +1,24 @@
 POD-CFP-EPE Compatibility
 
-February 20, 2022
+July 22, 2022
+* Mod version 1.6.1.2
+* Updated for CK3 1.6.1.2: Jun 29, 2022 @ 3PM CEST
+* Updated for CFP 3.1.3: Jun 21, 2022 @ 10:04am
+* Updated for EPE 1.0: Jun 29, 2022 @ 3:42pm
+* Updated for AA 0.2.1: Jun 30, 2022 @ 3:24pm
+* Shadow Inquisition has CFP Papal Courts
+* Darkened CFP HRE and Iberian courts
+* Added fang diversification
+* Better support for Full Screen Barbershop for Monster Portrait features.
+
+February 28, 2022
 * Updated for CK3 1.5.0.2
 * Compatible (and requiring) Ascalon's Anarchonisms
 * Turned out the sun on CFP's Norman, Goidelic, Andalusian, East African and West African Courts
-* Enabled Monstorous Eyes selection 
-* Integration with latest additions from CFP and EPE
+* Enabled Monstrous Eyes selection 
+* Integration with latest additions from CFP and EPE (as of 2/20/2022)
+* Known issues; some canon characters are not wearing ancient Greek/Roman clothing by default. 
+* Additional issues will be fixed sometime after Paradox's next patch for CK3, and the subsequent EPE, CFP and AA patches.
 
 December 14, 2021
 

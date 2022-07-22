@@ -1,4 +1,4 @@
-version="1.5.0.2"
+version="1.6.1.2"
 tags={
 	"Total Conversion"
 	"Historical"
@@ -7,5 +7,5 @@ tags={
 }
 name="POD Toredor Poseur Closet"
 picture="thumbnail.png"
-supported_version="1.5.*"
+supported_version="1.6.*"
 path="mod/podcfpcompat"
