@@ -8,4 +8,4 @@ tags={
 name="POD Toredor Poseur Closet"
 picture="thumbnail.png"
 supported_version="1.6.*"
-path="mod/podcfpcompat"
+path="mod/podcloset"
