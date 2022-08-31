@@ -11,6 +11,9 @@ Includes = {
 	"jomini/portrait_decals.fxh"
 	"jomini/portrait_user_data.fxh"
 	"constants.fxh"
+	# MOD(godherja)
+	"GH_portrait_effects.fxh"
+	# END MOD
 }
 
 PixelShader =
@@ -116,32 +119,9 @@ VertexStruct VS_OUTPUT_PDXMESHPORTRAIT
 	float2 	UV0				: TEXCOORD3;
 	float2 	UV1				: TEXCOORD4;
 	float3 	WorldSpacePos	: TEXCOORD5;
-	float4 	ShadowProj		: TEXCOORD6;	
 	# This instance index is used to fetch custom user data from the Data[] array (see pdxmesh.fxh)
-	uint 	InstanceIndex	: TEXCOORD7;
-
+	uint 	InstanceIndex	: TEXCOORD6;
 };
-
-VertexStruct VS_INPUT_PDXMESHSTANDARD_ID
-{
-    float3 Position			: POSITION;
-	float3 Normal      		: TEXCOORD0;
-	float4 Tangent			: TEXCOORD1;
-	float2 UV0				: TEXCOORD2;
-@ifdef PDX_MESH_UV1     	
-	float2 UV1				: TEXCOORD3;
-@endif
-
-	uint2 InstanceIndices 	: TEXCOORD4;
-	
-@ifdef PDX_MESH_SKINNED
-	uint4 BoneIndex 		: TEXCOORD5;
-	float3 BoneWeight		: TEXCOORD6;
-@endif
-
-	uint VertexID			: PDX_VertexID;
-};
-
 
 # Portrait constants
 ConstantBuffer( 5 )
@@ -196,8 +176,6 @@ VertexShader = {
 			return Out;
 		}
 	]]
-
-	
 	
 	MainCode VS_standard
 	{
@@ -357,62 +335,15 @@ PixelShader =
 			#endif
 		}
 
-		// MOD(bird-not-flying)
-		void TFETryApplyStatueEffect(inout float4 Diffuse, inout float4 Properties)
-		{
-			static const int STATUE_MATERIAL_GOLD   = 0;
-			static const int STATUE_MATERIAL_MARBLE = 1;
-			static const int STATUE_MATERIAL_LIMESTONE = 2;
-			static const int STATUE_MATERIAL_STONE = 3;
-			static const int STATUE_MATERIAL_COPPER = 4;
-			static const int STATUE_MATERIAL_BLOOD = 5;
-
-			bool MustApplyStatueEffect = Light_Position_Radius[2].w < 0.001;
-			if (!MustApplyStatueEffect)
-				return;
-
-			int StatueMaterial = int(Light_Color_Falloff[2].w);
-
-			switch (StatueMaterial)
-			{
-			case STATUE_MATERIAL_GOLD:
-				Diffuse    = float4(1.0, 0.8, 0.2, 1.0);
-				Properties = float4(0.0, 1.0, 1.0, 0.0);
-				break;
-
-			case STATUE_MATERIAL_MARBLE:
-				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
-				Properties = float4(0.0, 0.4, 0.25, 0.2);
-				break;
-
-			case STATUE_MATERIAL_LIMESTONE:
-				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
-				Properties = float4(0.0, 0.4, 0.25, 0.2);
-				break;
-
-			case STATUE_MATERIAL_STONE:
-				Diffuse    = float4(0.2, 0.2, 0.2, 0.4);
-				Properties = float4(0.0, 0.0, 0.0, 0.0);
-				break;
-				
-			case STATUE_MATERIAL_COPPER:
-				Diffuse    = float4(1.0, 0.8, 0.2, 1.0);
-				Properties = float4(0.0, 1.0, 1.0, 0.0);
-				break;
-			
-			case STATUE_MATERIAL_BLOOD:
-				Diffuse    = float4(1.0, 1.0, 1.0, 1.0);
-				Properties = float4(0.0, 0.4, 0.25, 0.2);
-				break;
-			}
-		}
+		// MOD(godherja)
+		//float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input )
+		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
 		// END MOD
-
-		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input )
 		{
-			// MOD(bird-not-flying)
-			TFETryApplyStatueEffect(Diffuse, Properties);
-			// END MOD		
+			// MOD(godherja)
+			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties);
+			// END MOD
+
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
 			float3 Normal = normalize( mul( NormalSample, TBN ) );
 			
@@ -437,7 +368,7 @@ PixelShader =
 				SssColor = HSVtoRGB(SkinColor) * SssMask * 0.5f * MaterialProps._DiffuseColor;
 				Color += SssColor;
 			#endif
-			
+
 			Color = ApplyDistanceFog( Color, Input.WorldSpacePos );
 			
 			DebugReturn( Color, MaterialProps, LightingProps, EnvironmentMap, SssColor, SssMask );			
@@ -519,14 +450,19 @@ PixelShader =
 				NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );
 			#endif
 				
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
 				
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorSkin.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, PreSkinColorDecalCount, DecalCount );
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input );
 				Out.Color = float4( Color, 1.0f );
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
@@ -556,12 +492,17 @@ PixelShader =
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+
 				Out.Color = float4( Color, 1.0f );
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorEyes.rgb;
-	
+
 				return Out;
 			}
 		]]
@@ -587,7 +528,11 @@ PixelShader =
 					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample );
 				#endif
 				
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
@@ -628,7 +573,11 @@ PixelShader =
 				float ColorMaskStrength = NormalSampleRaw.b;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 
 				#ifdef ALPHA_TO_COVERAGE
 					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, UV0, DiffuseMap );
@@ -679,7 +628,11 @@ PixelShader =
 				Properties *= vHairPropertyMult;
 				Diffuse.rgb *= vPaletteColorHair.rgb;
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 
 				Out.Color = float4( Color, Diffuse.a );
 				
@@ -909,7 +862,6 @@ Effect portrait_hair_opaque
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_hair"
-	
 	Defines = { "WRITE_ALPHA_ONE" "PDX_MESH_BLENDSHAPES" }
 }
 	

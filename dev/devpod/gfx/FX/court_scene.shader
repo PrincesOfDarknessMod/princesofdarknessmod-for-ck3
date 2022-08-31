@@ -12,6 +12,9 @@ Includes = {
 	"jomini/portrait_user_data.fxh"
 	"constants.fxh"
 	"standardfuncsgfx.fxh"
+	# MOD(godherja)
+	"GH_portrait_effects.fxh"
+	# END MOD
 }
 
 PixelShader =
@@ -646,8 +649,15 @@ PixelShader =
 			Color += HOVER_COLOR * HOVER_INTENSITY * FresnelFactor * HoverMult;
 		}
 
-		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, float HoverMult )
+		// MOD(godherja)
+		//float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, float HoverMult )
+		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect, float HoverMult )
+		// END MOD
 		{
+			// MOD(godherja)
+			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties);
+			// END MOD
+
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
 			float3 Normal = normalize( mul( NormalSample, TBN ) );
 			
@@ -817,6 +827,10 @@ PixelShader =
 				NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );
 			#endif
 
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
 
 				float ColorMaskStrength = Diffuse.a;
@@ -824,7 +838,7 @@ PixelShader =
 
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, PreSkinColorDecalCount, DecalCount );
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, HoverMult );
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 				Out.Color = float4( Color, 1.0f );
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
@@ -852,7 +866,11 @@ PixelShader =
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, 0.f );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, 0.f );
 
 				Out.Color = float4( Color, 1.0f );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
@@ -901,7 +919,11 @@ PixelShader =
 					#endif
 				#endif
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, AppliedHover );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, AppliedHover );
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
@@ -943,7 +965,11 @@ PixelShader =
 				float ColorMaskStrength = NormalSampleRaw.b;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, HoverMult );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 
 				#ifdef ALPHA_TO_COVERAGE
 					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, UV0, DiffuseMap );
@@ -994,7 +1020,11 @@ PixelShader =
 				Properties *= vHairPropertyMult;
 				Diffuse.rgb *= vPaletteColorHair.rgb;
 
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, HoverMult );
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
@@ -1107,7 +1137,15 @@ PixelShader =
 
 				Properties.g = 0.16f;	// Fixed specular mesh value /JR
 				float HoverMult = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).r;
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, HoverMult );
+
+				// MOD(godherja)
+				// Dummy portrait effect for court assets
+				GH_SPortraitEffect PortraitEffect;
+				PortraitEffect.Type  = GH_PORTRAIT_EFFECT_TYPE_NONE;
+				PortraitEffect.Param = float4(0.0f, 0.0f, 0.0f, 0.0f);
+				// END MOD
+
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 
 				#ifdef ALPHA_TO_COVERAGE
 					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, Input.UV0, DiffuseMap );
@@ -1128,28 +1166,6 @@ PixelShader =
 			}
 		]]
 	}
-
-	# MOD(court-skybox)
-	MainCode PS_SKYX_court_sky
-	{
-		Input = "VS_OUTPUT_PDXMESHPORTRAIT"
-		Output = "PS_COLOR_SSAO"
-		Code
-		[[
-			PDX_MAIN
-			{
-				float3 FromCameraDir = normalize(Input.WorldSpacePos - CameraPosition);
-				float3 CubemapSample = PdxTexCube(EnvironmentMap, FromCameraDir).rgb;
-
-				PS_COLOR_SSAO Out;
-				Out.Color     = float4(CubemapSample, 1.0);
-				Out.SSAOColor = float4(1.0, 1.0, 1.0, 1.0);
-
-				return Out;
-			}
-		]]
-	}
-	# END MOD
 
 	MainCode PS_noop
 	{
@@ -1918,59 +1934,3 @@ Effect sine_flag_animation
 	VertexShader = "VS_standard"
 	PixelShader = "PS_noop"
 }
-
-# MOD(court-skybox)
-Effect SKYX_court_sky
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_SKYX_court_sky"
-}
-
-Effect SKYX_court_sky_selection
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_SKYX_court_sky"
-}
-
-# Same as SKYX_court_sky, included for backwards compatibility
-Effect COOP_court_sky
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_SKYX_court_sky"
-}
-
-# Same as SKYX_court_sky_selection, included for backwards compatibility
-Effect COOP_court_sky_selection
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_SKYX_court_sky"
-}
-# END MOD
-
-# MOD(map-skybox)
-# The following effects are not used but need to be defined here to suppress errors
-
-Effect SKYX_sky
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_noop"
-}
-
-Effect SKYX_sky_selection
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_noop"
-}
-
-Effect SKYX_sky_mapobject
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_noop"
-}
-
-Effect SKYX_sky_selection_mapobject
-{
-	VertexShader = "VS_standard"
-	PixelShader = "PS_noop"
-}
-# END MOD
