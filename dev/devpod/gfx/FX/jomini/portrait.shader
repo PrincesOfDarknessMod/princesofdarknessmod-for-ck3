@@ -1037,7 +1037,7 @@ Effect portrait_hair_transparency_hack
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_hair"
-	// BlendState = "alpha_to_coverage"
+	#BlendState = "alpha_to_coverage"
 	BlendState = "hair_alpha_blend"
 	RasterizerState = "rasterizer_no_culling"
 	Defines = { "HAIR_TRANSPARENCY_HACK" "PDX_MESH_BLENDSHAPES" }
