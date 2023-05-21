@@ -23,6 +23,11 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_STONE       = float4(0.0f, 0.0f, 1.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_COPPER      = float4(1.0f, 0.0f, 1.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_COPPER_RUST = float4(0.0f, 1.0f, 1.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_BLOOD       = float4(1.0f, 1.0f, 1.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_OBSIDIAN    = float4(0.0f, 0.0f, 0.0f, 1.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_FLATBLACK   = float4(51.0f, 255.0f, 255.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_GREENJADE   = float4(255.0f, 255.0f, 51.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_FLATBLUE    = float4(255.0f, 51.0f, 255.0f, 0.0f)/255.0f;
 		// END SECTION
 
 		// ENUM: portrait effect type
@@ -74,13 +79,16 @@ PixelShader =
 			}
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_LIMESTONE))
 			{
+				// Diffuse    = float4(0.9, 0.8, 0.7, 0.8);
+				// Diffuse    = float4(0.0, 0.0, 0.0, 1.0); // BLACK Obsidian
+				//Diffuse    = float4(0.1, 0, 0, 1.0); // Dark Red
 				Diffuse    = float4(0.9, 0.8, 0.7, 0.8);
-				Properties = float4(0.0, 0.1, 0.0, 0.1);
+				Properties = float4(0.0, 0.1, 0.0, 0.8);
 			}
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_STONE))
 			{
 				Diffuse    = float4(0.2, 0.2, 0.2, 0.4);
-				Properties = float4(0.0, 0.0, 0.0, 0.0);
+				Properties = float4(0.0, 0.0, 0.0, 0.8);
 			}
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_COPPER))
 			{
@@ -90,6 +98,32 @@ PixelShader =
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_COPPER_RUST))
 			{
 				Diffuse    = float4(0.2, 1.0, 0.7, 1.0);
+				Properties = float4(0.0, 0.0, 0.0, 0.0);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_BLOOD))
+			{
+				Diffuse    = float4(0.1, 0, 0, 1.0); // Dark Red
+				Properties = float4(0.0, 0.1, 0.0, 0.1);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_OBSIDIAN))
+			{	
+				Diffuse    = float4(0.0, 0.0, 0.0, 0.5); // BLACK 
+				Properties = float4(0.0, 1.0, 1.0, 0.0);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_FLATBLACK))
+			{
+				Diffuse    = float4(0.0, 0.0, 0.0, 1.0); // BLACK
+				Properties = float4(1.0, 1.0, 1.0, 1.0);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_GREENJADE))
+			{
+				Diffuse    = float4(0.1, 0.18, 0.0, 1.0); // Dark Green
+				Properties = float4(0.0, 0.1, 0.0, 0.1);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_FLATBLUE))
+			{
+				//Diffuse    = float4(0.0, 0.0, 1.0, 1.0); // Blue
+				Diffuse    = float4(0.0, 0.75, 1.0, 1.0); // Blue
 				Properties = float4(0.0, 0.0, 0.0, 0.0);
 			}
 			// END SECTION
