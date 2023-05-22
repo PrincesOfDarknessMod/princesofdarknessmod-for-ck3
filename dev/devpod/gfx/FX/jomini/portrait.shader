@@ -526,6 +526,14 @@ PixelShader =
 				SssColor = HSVtoRGB(SkinColor) * SssMask * 0.5f * MaterialProps._DiffuseColor;
 				Color += SssColor;
 			#endif
+			
+			//MOD-EK2 Use for emissive in properties RED channel.
+			#ifdef EMISSIVE_PROPERTIES_RED
+				float EmissiveStrength = 1.0f;
+				float emissiveMask = Properties.r;
+				float3 emissiveColor = Diffuse.rgb * EmissiveStrength;
+				Color = lerp(Color, emissiveColor, emissiveMask);
+			#endif
 
 			Color = ApplyDistanceFog( Color, Input.WorldSpacePos );
 			
@@ -804,6 +812,67 @@ PixelShader =
 			}
 		]]
 	}
+
+		#MOD-HAIR-BLEND
+	MainCode PS_skin_hair_eye_blend
+	{
+		Input = "VS_OUTPUT_PDXMESHPORTRAIT"
+		Output = "PS_COLOR_SSAO"
+		Code
+		[[
+			PDX_MAIN
+			{
+				PS_COLOR_SSAO Out;
+
+				float2 UV0 = Input.UV0;
+				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );								
+				float4 Properties = PdxTex2D( PropertiesMap, UV0 );
+				Properties *= vHairPropertyMult;
+				float4 NormalSampleRaw = PdxTex2D( NormalMap, UV0 );
+				float3 NormalSample = UnpackRRxGNormal( NormalSampleRaw ) * ( PDX_IsFrontFace ? 1 : -1 );
+				float4 ColorMask = PdxTex2D( SSAOColorMap, UV0 );
+				float3 ColorPalette = float3(0.0f,0.0f,0.0f);
+
+				ColorPalette = lerp(ColorPalette,vPaletteColorSkin.rgb,ColorMask.r);
+				ColorPalette = lerp(ColorPalette,vPaletteColorHair.rgb,ColorMask.g);
+				ColorPalette = lerp(ColorPalette,vPaletteColorEyes.rgb,ColorMask.b);
+
+				ColorMask.a = max(max(ColorMask.r,ColorMask.g),ColorMask.b);
+
+				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, ColorPalette, Input.InstanceIndex, ColorMask.a );
+
+				// MOD(godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// END MOD
+				
+				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+
+				#ifdef ALPHA_TO_COVERAGE
+					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, UV0, DiffuseMap );
+
+					const float CUTOFF = 0.5f;
+					Diffuse.a = SharpenAlpha( Diffuse.a, CUTOFF );
+				#endif
+
+				#ifdef WRITE_ALPHA_ONE
+					Out.Color = float4( Color, 1.0f );
+				#else
+					#ifdef HAIR_TRANSPARENCY_HACK
+						// TODO [HL]: Hack to stop clothing fragments from being discarded by transparent hair,
+						// proper fix is to ensure that hair is drawn after clothes
+						// https://beta.paradoxplaza.com/browse/PSGE-3103
+						clip( Diffuse.a - 0.5f );
+					#endif
+
+					Out.Color = float4( Color, Diffuse.a );
+				#endif
+
+				Out.SSAOColor = float4(0.0f,0.0f,0.0f,0.0f);
+				return Out;
+			}
+		]]
+	}
+	#END-MOD
 }
 
 BlendState hair_alpha_blend
@@ -902,6 +971,7 @@ Effect portrait_eye
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_eye"
+	Defines = { "EMISSIVE_PROPERTIES_RED" }
 }
 
 Effect portrait_attachment
@@ -1017,7 +1087,8 @@ Effect portrait_hair_transparency_hack
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_hair"
-	BlendState = "alpha_to_coverage"
+	#BlendState = "alpha_to_coverage"
+	BlendState = "hair_alpha_blend"
 	RasterizerState = "rasterizer_no_culling"
 	Defines = { "HAIR_TRANSPARENCY_HACK" "PDX_MESH_BLENDSHAPES" }
 }
@@ -1087,3 +1158,15 @@ Effect portrait_hair_backside
 	PixelShader = "PS_portrait_hair_backface"
 	RasterizerState = "rasterizer_backfaces"
 }
+
+
+#MOD-HAIR-BLEND
+Effect portrait_color_blend
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_skin_hair_eye_blend"
+	BlendState = "alpha_to_coverage"
+	RasterizerState = "rasterizer_no_culling"
+	Defines = { "ALPHA_TO_COVERAGE" "PDX_MESH_BLENDSHAPES" "EMISSIVE_PROPERTIES_RED"}
+}
+#END-MOD
