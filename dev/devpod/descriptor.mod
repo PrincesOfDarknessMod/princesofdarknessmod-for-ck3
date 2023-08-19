@@ -4,5 +4,5 @@ tags={
 }
 name="Development Princes of Darkness"
 picture="thumbnail.png"
-supported_version="1.9.2.1"
+supported_version="1.10.*"
 path="mod/devpod"
