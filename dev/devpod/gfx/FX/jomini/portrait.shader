@@ -1170,3 +1170,11 @@ Effect portrait_color_blend
 	Defines = { "ALPHA_TO_COVERAGE" "PDX_MESH_BLENDSHAPES" "EMISSIVE_PROPERTIES_RED"}
 }
 #END-MOD
+
+Effect portrait_emissive
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_attachment"
+
+	Defines = { "EMISSIVE_PROPERTIES_RED" "PDX_MESH_BLENDSHAPES" }
+}

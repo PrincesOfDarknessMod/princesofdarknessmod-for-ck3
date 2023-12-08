@@ -2062,3 +2062,19 @@ Effect sine_flag_animation
 	VertexShader = "VS_standard"
 	PixelShader = "PS_noop"
 }
+
+Effect portrait_emissive
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_court"
+
+	Defines = { "EMISSIVE" "PDX_MESH_BLENDSHAPES" }
+}
+
+Effect portrait_emissive_selection
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_court_selection"
+
+	Defines = { "EMISSIVE" "PDX_MESH_BLENDSHAPES" }
+}
