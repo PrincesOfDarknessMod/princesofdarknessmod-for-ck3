@@ -808,6 +808,78 @@ PixelShader =
 			}
 		]]
 	}
+	MainCode PS_Fog
+	{	
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/7tsfWS
+			
+			float rand(float2 n) {
+				return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+			}
+
+			float noise(float2 n) {
+				const float2 d = float2(0.0, 1.0);
+				float2 b = floor(n), f = smoothstep(float2(0.0,0.0), float2(1.0,1.0), frac(n));
+				return lerp(lerp(rand(b), rand(b + d.yx), f.x), lerp(rand(b + d.xy), rand(b + d.yy), f.x), f.y);
+			}
+
+			float fbm(float2 n) {
+				float total = 0.0, amplitude = 1.0;
+				for (int i = 0; i < 4; i++) {
+					total += noise(n) * amplitude;
+					n += n;
+					amplitude *= 0.5;
+				}
+				return total;
+			}
+
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y;
+				
+				float2 TextureSize;
+				PdxTex2DSize(Texture, TextureSize);
+
+				float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+				coord.x *= TextureSize.x / TextureSize.y;
+				float time = GlobalTime * 1.0;
+
+				//const float3 c1 = float3(124.0/255.0, 0.0/255.0, 97.0/255.0);
+				//const float3 c2 = float3(173.0/255.0, 0.0/255.0, 161.4/255.0);
+				//const float3 c3 = float3(0.2, 0.0, 0.0);
+				//const float3 c4 = float3(164.0/255.0, 1.0/255.0, 214.4/255.0);
+				//const float3 c5 = float3(0.1, 0.1, 0.1);
+				//const float3 c6 = float3(0.9, 0.9, 0.9);
+
+				const float3 c1 = float3(0.0/255.0, 50.0/255.0, 50.0/255.0);
+				const float3 c2 = float3(0.0/255.0, 140.0/255.0, 173.0/255.0);
+				const float3 c3 = float3(0.2, 0.2, 0.2);
+				const float3 c4 = float3(0.0/255.0, 120.0/255.0, 160.0/255.0);
+				const float3 c5 = float3(0.1, 0.1, 0.1);
+				const float3 c6 = float3(0.9, 0.9, 0.9);
+
+				float2 speed = float2(0.1, 0.4);
+				float shift = 1.6;
+				float2 p = coord.xy * 8.0 / TextureSize.xx;
+				float q = fbm(p - time * 0.1);
+				float2 r = float2(fbm(p + q + time * speed.x - p.x - p.y), fbm(p + q - time * speed.y));
+				float3 c = lerp(c1, c2, fbm(p + r)) + lerp(c3, c4, r.x) - lerp(c5, c6, r.y);
+				float grad = uv.y;
+
+				float3 col = c * cos(shift * uv.y);
+				//col *= 1.0-grad;
+
+				float alpha = SampleImageSprite(Texture,Input.UV0).a * col.b;
+				alpha *= 1.0-grad;
+				alpha *= 0.7;
+				return float4(col,alpha);
+			}
+		]]
+	}
 }
 
 # SampleImageSprite( Texture, Input.UV0 );
@@ -940,6 +1012,19 @@ Effect SnowDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Snow"
+	
+	Defines = { "DISABLED" }
+}
+
+Effect Fog
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+}
+Effect FogDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
 	
 	Defines = { "DISABLED" }
 }
