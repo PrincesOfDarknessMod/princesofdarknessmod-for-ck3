@@ -880,6 +880,140 @@ PixelShader =
 			}
 		]]
 	}
+	MainCode PS_Hypertrip
+	{	
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/4tX3Rf
+			
+			// Particles + Noise Part 2
+			// By: Brandon Fogerty
+			// bfogerty at gmail dot com
+
+
+			#define Time					GlobalTime
+
+			#define HorizontalAmplitude		0.50
+			#define VerticleAmplitude		0.50
+			#define HorizontalSpeed			0.90
+			#define VerticleSpeed			0.30
+			#define ParticleMinSize			1.76
+			#define ParticleMaxSize			1.61
+			#define ParticleBreathingSpeed		0.10
+			#define ParticleColorChangeSpeed	0.70
+			#define ParticleCount			2.0
+			#define ParticleColor1			float3(1.5, 0.0, 0.5)
+			#define ParticleColor2			float3(1.5, 0.5, 0.0)
+
+
+			float hash( float x )
+			{
+				return frac( sin( x ) * 43758.5453 );
+			}
+
+			float noise( float2 uv )  // Thanks Inigo Quilez
+			{
+				float3 x = float3( uv.xy, 0.0 );
+				
+				float3 p = floor( x );
+				float3 f = frac( x );
+				
+				f = f*f*(3.0 - 2.0*f);
+				
+				float offset = 57.0;
+				
+				float n = dot( p, float3(1.0, offset, offset*2.0) );
+				
+				return lerp(lerp(	lerp( hash( n + 0.0 ), 	 	 hash( n + 1.0 ), f.x ),
+									lerp( hash( n + offset), 	 hash( n + offset+1.0), f.x ), f.y ),
+							lerp(	lerp( hash( n + offset*2.0), hash( n + offset*2.0+1.0), f.x),
+									lerp( hash( n + offset*3.0), hash( n + offset*3.0+1.0), f.x), f.y), f.z);
+			}
+
+			float snoise( float2 uv )
+			{
+				return noise( uv ) * 2.0 - 1.0;
+			}
+
+
+			float perlinNoise( float2 uv )
+			{   
+				float n = 	noise( uv * 1.0 ) 	* 128.0 +
+							noise( uv * 2.0 ) 	* 64.0 +
+							noise( uv * 4.0 ) 	* 32.0 +
+							noise( uv * 8.0 ) 	* 16.0 +
+							noise( uv * 16.0 ) 	* 8.0 +
+							noise( uv * 32.0 ) 	* 4.0 +
+							noise( uv * 64.0 ) 	* 2.0 +
+							noise( uv * 128.0 ) * 1.0;
+				
+				float noiseVal = n / ( 1.0 + 2.0 + 4.0 + 8.0 + 16.0 + 32.0 + 64.0 + 128.0 );
+				noiseVal = abs(noiseVal * 2.0 - 1.0);
+				
+				return 	noiseVal;
+			}
+
+			float fBm( float2 uv, float lacunarity, float gain )
+			{
+				float sum = 0.0;
+				float amp = 10.0;
+				
+				for( int i = 0; i < 2; ++i )
+				{
+					sum += ( perlinNoise( uv ) ) * amp;
+					amp *= gain;
+					uv *= lacunarity;
+				}
+				
+				return sum;
+			}
+
+			float3 particles( float2 pos )
+			{
+				
+				float3 c = float3( 0, 0, 0 );
+				
+				float noiseFactor = fBm( pos, 0.01, 0.1);
+				
+				for( float i = 1.0; i < ParticleCount+1.0; ++i )
+				{
+					float cs = cos( Time * HorizontalSpeed * (i/ParticleCount) + noiseFactor ) * HorizontalAmplitude;
+					float ss = sin( Time * VerticleSpeed   * (i/ParticleCount) + noiseFactor ) * VerticleAmplitude;
+					float2 origin = float2( cs , ss );
+					
+					float t = sin( Time * ParticleBreathingSpeed * i ) * 0.5 + 0.5;
+					float particleSize = lerp( ParticleMinSize, ParticleMaxSize, t );
+					float d = clamp( sin( length( pos - origin )  + particleSize ), 0.0, particleSize);
+					
+					float t2 = sin( Time * ParticleColorChangeSpeed * i ) * 0.5 + 0.5;
+					float3 color = lerp( ParticleColor1, ParticleColor2, t2 );
+					c += color * pow( d, 10.0 );
+				}
+				
+				return c;
+			}
+
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y;
+				
+				float2 TextureSize;
+				PdxTex2DSize(Texture, TextureSize);
+
+				uv = uv * 2.0 - 1.0;
+				uv.x *= TextureSize.x / TextureSize.y * 1.4;
+				uv.x -= 0.8;
+
+				float3 finalColor = particles( sin( abs(uv) ) );
+				finalColor.r += (1.0-uv.y)*0.15;
+				
+				return float4( finalColor, SampleImageSprite(Texture,Input.UV0).a );
+			}
+		]]
+	}
 }
 
 # SampleImageSprite( Texture, Input.UV0 );
@@ -1025,6 +1159,19 @@ Effect FogDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
+	
+	Defines = { "DISABLED" }
+}
+
+Effect Hypertrip
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Hypertrip"
+}
+Effect HypertripDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Hypertrip"
 	
 	Defines = { "DISABLED" }
 }
