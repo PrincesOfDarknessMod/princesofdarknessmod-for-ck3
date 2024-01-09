@@ -28,6 +28,7 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_FLATBLACK   = float4(51.0f, 255.0f, 255.0f, 0.0f)/255.0f;
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_GREENJADE   = float4(255.0f, 255.0f, 51.0f, 0.0f)/255.0f;
 		static const float4 GH_MARKER_TOP_RIGHT_STATUE_FLATBLUE    = float4(255.0f, 51.0f, 255.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_STATUE_WATER       = float4(255.0f, 51.0f,  51.0f, 0.0f)/255.0f;
 		// END SECTION
 
 		// ENUM: portrait effect type
@@ -79,9 +80,6 @@ PixelShader =
 			}
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_LIMESTONE))
 			{
-				// Diffuse    = float4(0.9, 0.8, 0.7, 0.8);
-				// Diffuse    = float4(0.0, 0.0, 0.0, 1.0); // BLACK Obsidian
-				//Diffuse    = float4(0.1, 0, 0, 1.0); // Dark Red
 				Diffuse    = float4(0.9, 0.8, 0.7, 0.8);
 				Properties = float4(0.0, 0.1, 0.0, 0.8);
 			}
@@ -122,9 +120,13 @@ PixelShader =
 			}
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_FLATBLUE))
 			{
-				//Diffuse    = float4(0.0, 0.0, 1.0, 1.0); // Blue
 				Diffuse    = float4(0.0, 0.75, 1.0, 1.0); // Blue
 				Properties = float4(0.0, 0.0, 0.0, 0.0);
+			}
+			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_WATER))
+			{
+				Diffuse    = float4(0.0, 0.5,  1.0, 1.0); // Blue
+				Properties = float4(0.1, 0.15, 0.6, 0.0);
 			}
 			// END SECTION
 			else // Unrecognized material param
