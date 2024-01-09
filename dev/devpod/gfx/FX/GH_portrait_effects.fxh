@@ -126,7 +126,8 @@ PixelShader =
 			else if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_WATER))
 			{
 				Diffuse    = float4(0.0, 0.5,  1.0, 1.0); // Blue
-				Properties = float4(0.1, 0.15, 0.6, 0.0);
+				Properties = float4(0.2, 0.15, 0.6, 0.0); // increased SSS for wavy shader
+				//Properties = float4(0.1, 0.15, 0.6, 0.0);
 			}
 			// END SECTION
 			else // Unrecognized material param
