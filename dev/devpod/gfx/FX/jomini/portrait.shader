@@ -15,6 +15,9 @@ Includes = {
 	# MOD(godherja)
 	"GH_portrait_effects.fxh"
 	# END MOD
+	# MOD - POD
+	"standardfuncsgfx.fxh"
+	# END MOD
 }
 
 PixelShader =
@@ -500,6 +503,20 @@ PixelShader =
 		{
 			// MOD(godherja)
 			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties);
+			// END MOD
+
+			// MOD-POD
+			// Effects for Water shaders
+			if (GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_WATER)) {
+				float iTime = GlobalTime * 2.0;
+
+				float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
+
+				float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
+
+				Properties.r = 0.2;         // increased SSS
+				Properties.b *= pulseDepth; // metalness
+			}
 			// END MOD
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
