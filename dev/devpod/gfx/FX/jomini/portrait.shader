@@ -16,7 +16,7 @@ Includes = {
 	"GH_portrait_effects.fxh"
 	# END MOD
 	# MOD - POD
-	"standardfuncsgfx.fxh"
+	"cw/pdxgui.fxh"
 	# END MOD
 }
 
@@ -508,14 +508,14 @@ PixelShader =
 			// MOD-POD
 			// Wavy effects for liquid shaders (water/blood)
 			if ( GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_WATER) ) {
-				float iTime = GlobalTime * 2.0;
+				float iTime = GuiTime * 2.0;
 				float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
 				float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
 
 				Properties.b *= pulseDepth; // metalness
 			}
 			else if ( GH_MarkerTexelEquals(PortraitEffect.Param, GH_MARKER_TOP_RIGHT_STATUE_BLOOD) ) {
-				float iTime = GlobalTime * 2.0;
+				float iTime = GuiTime * 2.0;
 				float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
 				float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
 
