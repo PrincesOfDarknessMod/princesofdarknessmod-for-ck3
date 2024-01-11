@@ -1,6 +1,4 @@
 Includes = {
-	"jomini/texture_decals_base.fxh"
-	"jomini/portrait_user_data.fxh"
 	"jomini/portrait_decals.fxh"
 	"cw/camera.fxh"
 	"cw/pdxgui.fxh"
