@@ -1122,6 +1122,7 @@ PixelShader =
 					#endif
 				#endif
 
+
 				#if defined( COA ) || defined( USER_COLOR )
 					static const int USER_DATA_PRIMARY_COLOR = 0;
 					static const int USER_DATA_SECONDARY_COLOR = 1;
