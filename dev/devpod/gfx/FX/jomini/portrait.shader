@@ -633,6 +633,10 @@ PixelShader =
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorSkin.rgb;
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -668,6 +672,10 @@ PixelShader =
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorEyes.rgb;
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -705,6 +713,10 @@ PixelShader =
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -771,6 +783,10 @@ PixelShader =
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
 
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
+
 				return Out;
 			}
 		]]
@@ -807,6 +823,10 @@ PixelShader =
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
+
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -868,6 +888,11 @@ PixelShader =
 				#endif
 
 				Out.SSAOColor = float4(0.0f,0.0f,0.0f,0.0f);
+
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
+
 				return Out;
 			}
 		]]

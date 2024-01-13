@@ -2,6 +2,7 @@ Includes = {
 	"jomini/portrait_decals.fxh"
 	"cw/camera.fxh"
 	"cw/pdxgui.fxh"
+	"GH_portrait_constants.fxh"
 }
 
 PixelShader =
@@ -11,90 +12,8 @@ PixelShader =
 		// is adapted from a much more sophisticated implementation made by shader wizard Buck for EK2.
 
 		//
-		// Constants
-		//
-
-		// Marker enabling various effects is encoded via reserved RGBA values for top-left
-		// and top-right pixels at this mip level of relevant decals' diffuse textures.
-		static const int GH_MARKER_MIP_LEVEL = 6;
-
-		static const float GH_MARKER_CHECK_TOLERANCE = 0.01f;
-
-		static const float4 GH_MARKER_TOP_LEFT_ALPHA  = float4(1.0f, 0.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_LEFT_STATUE = float4(0.0f, 1.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_LEFT_ANIM   = float4(0.0f, 0.0f, 1.0f, 0.0f);
-
-		// SECTION: Statue material markers
-		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_R              = float4(1.0f, 0.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_G              = float4(0.0f, 1.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_B              = float4(0.0f, 0.0f, 1.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_SSS         = float4(1.0f, 0.0f, 1.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_SPECULARITY = float4(0.0f, 1.0f, 1.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_METALNESS   = float4(1.0f, 1.0f, 1.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_ROUGHNESS   = float4(1.0f, 1.0f, 0.0f, 0.0f);
-		
-		static const float4 GH_MARKER_TOP_RIGHT_ANIM_CONCENTRIC_METAL = float4(1.0f, 0.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_ANIM_VERTICAL_SHINIES = float4(0.0f, 1.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_ANIM_SMOKE            = float4(0.0f, 0.0f, 1.0f, 0.0f);
-		// END SECTION
-
-		// ENUM: animated shaders for portraits
-		static const uint GH_PORTRAIT_ANIM_NONE             = 1;
-		static const uint GH_PORTRAIT_ANIM_CONCENTRIC_METAL = 2;
-		static const uint GH_PORTRAIT_ANIM_VERTICAL_SHINIES = 3;
-		static const uint GH_PORTRAIT_ANIM_SMOKE            = 4;
-		// END ENUM
-
-		//
-		// Types
-		//
-
-		struct GH_SMarkerTexels
-		{
-			float4 TopLeftTexel;
-			float4 TopRightTexel;
-		};
-
-		struct GH_SPortraitEffect
-		{
-			uint  Anim;
-			float Alpha;
-			float DiffuseR;
-			float DiffuseG;
-			float DiffuseB;
-			float PropertiesSSS;
-			float PropertiesSpecularity;
-			float PropertiesMetalness;
-			float PropertiesRoughness;
-		};
-
-		GH_SPortraitEffect GH_GetDefaultPortraitEffect()
-		{
-			GH_SPortraitEffect Effect;
-
-			Effect.Anim  = GH_PORTRAIT_ANIM_NONE;
-			Effect.Alpha = 1.0f;
-
-			// using negative values tells the shader to skip these
-			Effect.DiffuseR              = -1.0f;
-			Effect.DiffuseG              = -1.0f;
-			Effect.DiffuseB              = -1.0f;
-			Effect.PropertiesSSS         = -1.0f;
-			Effect.PropertiesSpecularity = -1.0f;
-			Effect.PropertiesMetalness   = -1.0f;
-			Effect.PropertiesRoughness   = -1.0f;
-
-			return Effect;
-		}
-
-		//
 		// Interface
 		//
-
-		bool GH_MarkerTexelEquals(float4 MarkerTexel0, float4 MarkerTexel1)
-		{
-			return distance(MarkerTexel0, MarkerTexel1) < GH_MARKER_CHECK_TOLERANCE;
-		}
 
 		void GH_TryApplyStatueEffect(in GH_SPortraitEffect PortraitEffect, inout float4 Diffuse, inout float4 Properties, in VS_OUTPUT_PDXMESHPORTRAIT Input)
 		{
@@ -106,28 +25,42 @@ PixelShader =
 			if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
 			if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
 
-			if ( PortraitEffect.Anim = GH_PORTRAIT_ANIM_NONE ) {
-				return;
-			}
-			else if ( PortraitEffect.Anim = GH_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
-				float iTime = GuiTime * 2.0;
+			if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
+				// the value of the gene controls animation speed
+				float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+
 				float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
 				float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
 
 				Properties.b *= pulseDepth; // metalness
 			}
-			else if ( PortraitEffect.Anim = GH_PORTRAIT_ANIM_VERTICAL_SHINIES ) {
-				float iTime = GuiTime * 2.0;
+			else if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_VERTICAL_SHINIES ) {
+				// the value of the gene controls animation speed
+				float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+
 				float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
 				float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
 
 				Properties.g *= pulseHeight * 2.0; // specularity
 			}
 		}
+
+		void POD_RemapColorsForPostEffect(inout PS_COLOR_SSAO Out, in GH_SPortraitEffect PortraitEffect)
+		{
+			if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_SMOKE ) {
+				Out.Color.r += POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+			}
+		}
 		
 		//
 		// Service
 		//
+
+		bool GH_MarkerTexelEquals(float4 MarkerTexel0, float4 MarkerTexel1)
+		{
+			return distance(MarkerTexel0, MarkerTexel1) < GH_MARKER_CHECK_TOLERANCE;
+		}
 
 		float2 GH_ToDecalUV(DecalData Data, float U, float V)
 		{
@@ -170,7 +103,7 @@ PixelShader =
 			float2 TopRightDecalUV = GH_ToDecalUV(Data, 1.0f, 0.0f);
 
 			GH_SMarkerTexels MarkerTexels;
-			MarkerTexels.TopLeftTexel  = PdxTex2DLod(DecalDiffuseArray, float3(TopLeftDecalUV, Data._DiffuseIndex), MarkerLod);
+			MarkerTexels.TopLeftTexel  = PdxTex2DLod(DecalDiffuseArray, float3(TopLeftDecalUV,  Data._DiffuseIndex), MarkerLod);
 			MarkerTexels.TopRightTexel = PdxTex2DLod(DecalDiffuseArray, float3(TopRightDecalUV, Data._DiffuseIndex), MarkerLod);
 
 			return MarkerTexels;
@@ -207,10 +140,7 @@ PixelShader =
 
 				GH_SMarkerTexels MarkerTexels = GH_ExtractMarkerTexels(Data);
 
-				if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_ALPHA)) {
-					Effect.Alpha = Data._Weight;
-				}
-				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_STATUE))
+				if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_STATUE))
 				{
 					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_DIFFUSE_R)) {
 						Effect.DiffuseR = Data._Weight;
@@ -235,7 +165,18 @@ PixelShader =
 					}
 				}
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_ANIM)) {
-					// TODO
+					Effect.AnimValue = Data._Weight;
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_ANIM_CONCENTRIC_METAL)) {
+						Effect.AnimType = POD_PORTRAIT_ANIM_CONCENTRIC_METAL;
+					}
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_ANIM_VERTICAL_SHINIES)) {
+						Effect.AnimType = POD_PORTRAIT_ANIM_VERTICAL_SHINIES;
+					}
+				}
+				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_POSTPROCESS)) {
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE)) {
+						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_SMOKE;
+					}
 				}
 			}
 
