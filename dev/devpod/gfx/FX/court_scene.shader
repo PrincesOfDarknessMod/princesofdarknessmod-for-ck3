@@ -684,7 +684,7 @@ PixelShader =
 		// END MOD
 		{
 			// MOD(godherja)
-			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties);
+			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Input);
 			// END MOD
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
@@ -1122,6 +1122,7 @@ PixelShader =
 					#endif
 				#endif
 
+
 				#if defined( COA ) || defined( USER_COLOR )
 					static const int USER_DATA_PRIMARY_COLOR = 0;
 					static const int USER_DATA_SECONDARY_COLOR = 1;
@@ -1180,9 +1181,7 @@ PixelShader =
 
 				// MOD(godherja)
 				// Dummy portrait effect for court assets
-				GH_SPortraitEffect PortraitEffect;
-				PortraitEffect.Type  = GH_PORTRAIT_EFFECT_TYPE_NONE;
-				PortraitEffect.Param = float4(0.0f, 0.0f, 0.0f, 0.0f);
+				GH_SPortraitEffect PortraitEffect = GH_GetDefaultPortraitEffect();
 				// END MOD
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );

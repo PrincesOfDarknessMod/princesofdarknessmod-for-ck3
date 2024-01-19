@@ -218,123 +218,7 @@ VertexShader = {
 		}
 	]]
 	
-	MainCode VS_portrait_blend_shapes
-	{
-		Input = "VS_INPUT_PDXMESHSTANDARD_ID"
-		Output = "VS_OUTPUT_PDXMESHPORTRAIT"
-		Code
-		[[
-			PDX_MAIN
-			{
-			  	VS_OUTPUT_PDXMESHPORTRAIT Out;
-				
-				float4 vPosition = float4( Input.Position.xyz, 1.0f );
-				float3 vBlendPositionDiff;
-				float3 vBlendNormalDiff;
-				float3 vBlendTangentDiff;
-				ProcessBlendShapes( vBlendPositionDiff, vBlendNormalDiff, vBlendTangentDiff, Input.VertexID );
-				vPosition.xyz += vBlendPositionDiff;
-				
-				float4x4 WorldMatrix = PdxMeshGetWorldMatrix( Input.InstanceIndices.y );
-			#ifdef PDX_MESH_SKINNED
-				float4 vSkinnedPosition = float4( 0, 0, 0, 0 );
-				float3 vSkinnedNormal = float3( 0, 0, 0 );
-				float3 vSkinnedTangent = float3( 0, 0, 0 );
-				float3 vSkinnedBitangent = float3( 0, 0, 0 );
-			
-				float4 vWeight = float4( Input.BoneWeight.xyz, 1.0f - Input.BoneWeight.x - Input.BoneWeight.y - Input.BoneWeight.z );
-			
-				for( int i = 0; i < PDXMESH_MAX_INFLUENCE; ++i )
-			    {
-					int nIndex = int( Input.BoneIndex[i] );
-					float4x4 mat = BoneMatrices[nIndex + Input.InstanceIndices.x];
-					vSkinnedPosition += mul( mat, vPosition ) * vWeight[i];
-
-					float3x3 NormalTransform = CastTo3x3( BoneNormalMatrices[ nIndex + Input.InstanceIndices.x ] );
-			
-					float3 vNormal = mul( NormalTransform, Input.Normal + vBlendNormalDiff );
-					float3 vTangent = mul( NormalTransform, Input.Tangent.xyz + vBlendTangentDiff );
-					float3 vBitangent = cross( vNormal, vTangent ) * Input.Tangent.w;
-			
-					vSkinnedNormal += vNormal * vWeight[i];
-					vSkinnedTangent += vTangent * vWeight[i];
-					vSkinnedBitangent += vBitangent * vWeight[i];
-				}
-			
-				Out.Position = mul( WorldMatrix, vSkinnedPosition );
-				
-				Out.Normal = normalize( mul( CastTo3x3(WorldMatrix), normalize( vSkinnedNormal ) ) );
-				Out.Tangent = normalize( mul( CastTo3x3(WorldMatrix), normalize( vSkinnedTangent ) ) );
-				Out.Bitangent = normalize( mul( CastTo3x3(WorldMatrix), normalize( vSkinnedBitangent ) ) );
-			#else
-				Out.Position = mul( WorldMatrix, vPosition );
-				
-				Out.Normal = normalize( mul( CastTo3x3( WorldMatrix ), Input.Normal + vBlendNormalDiff ) );
-				Out.Tangent = normalize( mul( CastTo3x3( WorldMatrix ), Input.Tangent.xyz + vBlendTangentDiff ) );
-				Out.Bitangent = normalize( cross( Out.Normal, Out.Tangent ) * Input.Tangent.w);
-			#endif
-			
-				Out.WorldSpacePos.xyz = Out.Position.xyz;
-				Out.WorldSpacePos /= WorldMatrix[3][3];
-				Out.Position = FixProjectionAndMul( ViewProjectionMatrix, Out.Position );
-				
-				Out.ShadowProj = mul( ShadowMapTextureMatrix, float4( Out.WorldSpacePos, 1.0 ) );
-				
-				Out.UV0 = Input.UV0;
-			#ifdef PDX_MESH_UV1
-				Out.UV1 = Input.UV1;
-			#else
-				Out.UV1 = vec2( 0.0 );
-			#endif
-			#ifdef PDX_MESH_UV2
-				Out.UV2 = Input.UV2;
-			#else
-				Out.UV2 = vec2( 0.0 );
-			#endif
-				Out.InstanceIndex = Input.InstanceIndices.y;
-				return Out;
-			}
-		]]
-	}
-
-	MainCode VS_portrait_blend_shapes_shadow
-	{
-		Input = "VS_INPUT_PDXMESHSTANDARD_ID"
-		Output = "VS_OUTPUT_PDXMESHSHADOWSTANDARD"
-		Code
-		[[
-			PDX_MAIN
-			{
-			  	VS_OUTPUT_PDXMESHSHADOWSTANDARD Out;
-				
-				float4 vPosition = float4( Input.Position.xyz, 1.0 );
-				float3 vBlendPositionDiff;
-				ProcessBlendShapesPositionOnly( vBlendPositionDiff, Input.VertexID );
-				vPosition.xyz += vBlendPositionDiff;
-				
-				float4x4 WorldMatrix = PdxMeshGetWorldMatrix( Input.InstanceIndices.y );
-			#ifdef PDX_MESH_SKINNED
-				float4 vSkinnedPosition = float4( 0, 0, 0, 0 );
-			
-				float4 vWeight = float4( Input.BoneWeight.xyz, 1.0f - Input.BoneWeight.x - Input.BoneWeight.y - Input.BoneWeight.z );
-				for( int i = 0; i < PDXMESH_MAX_INFLUENCE; ++i )
-			    {
-					int nIndex = int( Input.BoneIndex[i] );
-					float4x4 mat = BoneMatrices[nIndex + Input.InstanceIndices.x];
-					vSkinnedPosition += mul( mat, vPosition ) * vWeight[i];
-				}
-				Out.Position = mul( WorldMatrix, vSkinnedPosition );
-			#else
-				Out.Position = mul( WorldMatrix, vPosition );
-			#endif
-			
-				Out.Position = FixProjectionAndMul( ViewProjectionMatrix, Out.Position );
-				Out.UV_InstanceIndex = float3( Input.UV0, Input.InstanceIndices.y );
-				return Out;
-			}
-		]]
-	}
-	
+		
 	MainCode VS_standard
 	{
 		Input = "VS_INPUT_PDXMESHSTANDARD"
@@ -499,7 +383,7 @@ PixelShader =
 		// END MOD
 		{
 			// MOD(godherja)
-			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties);
+			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Input);
 			// END MOD
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
@@ -633,6 +517,10 @@ PixelShader =
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorSkin.rgb;
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -668,6 +556,10 @@ PixelShader =
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorEyes.rgb;
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -705,6 +597,10 @@ PixelShader =
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
+				
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -771,6 +667,10 @@ PixelShader =
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
 
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
+
 				return Out;
 			}
 		]]
@@ -807,6 +707,10 @@ PixelShader =
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
+
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
 
 				return Out;
 			}
@@ -868,6 +772,11 @@ PixelShader =
 				#endif
 
 				Out.SSAOColor = float4(0.0f,0.0f,0.0f,0.0f);
+
+				// MOD(POD)
+				POD_RemapColorsForPostEffect( Out, PortraitEffect );
+				// END MOD
+
 				return Out;
 			}
 		]]
