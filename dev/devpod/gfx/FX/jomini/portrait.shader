@@ -12,9 +12,9 @@ Includes = {
 	"jomini/portrait_decals.fxh"
 	"jomini/portrait_user_data.fxh"
 	"constants.fxh"
-	# MOD(godherja)
+	# CfV (godherja)
 	"GH_portrait_effects.fxh"
-	# END MOD
+	# CfV end
 }
 
 PixelShader =
@@ -377,14 +377,14 @@ PixelShader =
 			#endif
 		}
 
-		// MOD(godherja)
+		// CfV (godherja)
 		//float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input )
 		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
-		// END MOD
+		// CfV end
 		{
-			// MOD(godherja)
+			// CfV (godherja)
 			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Input);
-			// END MOD
+			// CfV end
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
 			float3 Normal = normalize( mul( NormalSample, TBN ) );
@@ -411,7 +411,7 @@ PixelShader =
 				Color += SssColor;
 			#endif
 			
-			//MOD-EK2 Use for emissive in properties RED channel.
+			// CfV - EK2 Use for emissive in properties RED channel.
 			#ifdef EMISSIVE_PROPERTIES_RED
 				float EmissiveStrength = 1.0f;
 				float emissiveMask = Properties.r;
@@ -500,9 +500,9 @@ PixelShader =
 				NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );
 			#endif
 				
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
+				// CfV end
 
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
 				
@@ -511,16 +511,18 @@ PixelShader =
 				
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, PreSkinColorDecalCount, DecalCount );
 
+				// CfV (godherja)
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 				
 				Out.Color = float4( Color, 1.0f );
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorSkin.rgb;
 				
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
@@ -546,20 +548,20 @@ PixelShader =
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 
 				Out.Color = float4( Color, 1.0f );
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorEyes.rgb;
 				
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
@@ -583,24 +585,26 @@ PixelShader =
 				Properties.r = 1.0; // wipe this clean now, ready to be modified later
 				
 				#ifdef VARIATIONS_ENABLED
+					// CfV (POD)
 					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample );
+					// CfV end
 				#endif
 				#ifdef COA_ENABLED
 					ApplyCoa( Input, Diffuse, CoaColor1, CoaColor2, CoaColor3, CoaOffsetAndScale.xy, CoaOffsetAndScale.zw, CoaTexture, Properties.r );
 				#endif
 				
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
 				
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
@@ -638,11 +642,11 @@ PixelShader =
 				float ColorMaskStrength = NormalSampleRaw.b;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 
 				#ifdef ALPHA_TO_COVERAGE
 					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, UV0, DiffuseMap );
@@ -667,9 +671,9 @@ PixelShader =
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
 
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
@@ -697,27 +701,27 @@ PixelShader =
 				Properties *= vHairPropertyMult;
 				Diffuse.rgb *= vPaletteColorHair.rgb;
 
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 
 				Out.Color = float4( Color, Diffuse.a );
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
 				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
 
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
 		]]
 	}
 
-		#MOD-HAIR-BLEND
+		# CfV HAIR-BLEND
 	MainCode PS_skin_hair_eye_blend
 	{
 		Input = "VS_OUTPUT_PDXMESHPORTRAIT"
@@ -745,11 +749,11 @@ PixelShader =
 
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, ColorPalette, Input.InstanceIndex, ColorMask.a );
 
-				// MOD(godherja)
+				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-				// END MOD
 				
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				// CfV end
 
 				#ifdef ALPHA_TO_COVERAGE
 					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, UV0, DiffuseMap );
@@ -773,15 +777,15 @@ PixelShader =
 
 				Out.SSAOColor = float4(0.0f,0.0f,0.0f,0.0f);
 
-				// MOD(POD)
+				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// END MOD
+				// CfV end
 
 				return Out;
 			}
 		]]
 	}
-	#END-MOD
+	# CfV end
 }
 
 BlendState hair_alpha_blend
@@ -1069,7 +1073,7 @@ Effect portrait_hair_backside
 }
 
 
-#MOD-HAIR-BLEND
+# CfV HAIR-BLEND
 Effect portrait_color_blend
 {
 	VertexShader = "VS_standard"
@@ -1078,7 +1082,7 @@ Effect portrait_color_blend
 	RasterizerState = "rasterizer_no_culling"
 	Defines = { "ALPHA_TO_COVERAGE" "PDX_MESH_BLENDSHAPES" "EMISSIVE_PROPERTIES_RED"}
 }
-#END-MOD
+# CfV end
 
 Effect portrait_emissive
 {

@@ -6,9 +6,9 @@ Includes = {
 	#// TODO: REMOVE
 	"jomini/jomini_dof.fxh"
 
-	# MOD(POD)
+	# CfV (POD)
 	"POD_portrait_postprocess_effects.fxh"
-	# END MOD
+	# CfV end
 }
 
 
@@ -148,9 +148,9 @@ PixelShader =
 			{
 				float4 color = PdxTex2DLod0( MainScene, Input.uv );
 
-				// MOD(POD)
+				// CfV (POD)
 				POD_TryApplyPostEffect(color, Input.uv);
-				// END MOD
+				// CfV end
 				
 			#ifdef DOF_ENABLED
 				float4 DofColor = PdxTex2DLod0( DepthOfFieldTexture, Input.uv );
