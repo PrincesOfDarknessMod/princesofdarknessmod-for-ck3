@@ -14,11 +14,15 @@ PixelShader =
 
 		static const float GH_MARKER_CHECK_TOLERANCE = 0.01f;
 
+
 		static const float4 GH_MARKER_TOP_LEFT_POSTPROCESS = float4(1.0f, 0.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_LEFT_STATUE      = float4(0.0f, 1.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_LEFT_ANIM        = float4(0.0f, 0.0f, 1.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_LEFT_CLOTHING    = float4(1.0f, 0.0f, 1.0f, 0.0f);
 		
+
 		static const float4 GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE = float4(1.0f, 0.0f, 0.0f, 0.0f);
+
 
 		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_R              = float4(1.0f, 0.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_G              = float4(0.0f, 1.0f, 0.0f, 0.0f);
@@ -28,9 +32,40 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_METALNESS   = float4(1.0f, 1.0f, 1.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_RIGHT_PROPERTIES_ROUGHNESS   = float4(1.0f, 1.0f, 0.0f, 0.0f);
 		
+
 		static const float4 GH_MARKER_TOP_RIGHT_ANIM_CONCENTRIC_METAL = float4(1.0f, 0.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_RIGHT_ANIM_VERTICAL_SHINIES = float4(0.0f, 1.0f, 0.0f, 0.0f);
 		
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_1_R = float4(1.0f, 0.0f, 0.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_1_G = float4(0.0f, 1.0f, 0.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_1_B = float4(0.0f, 0.0f, 1.0f, 0.0f);
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_2_R = float4(50.0f, 0.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_2_G = float4(0.0f, 50.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_2_B = float4(0.0f, 0.0f, 50.0f, 0.0f)/255.0f;
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_3_R = float4(100.0f, 0.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_3_G = float4(0.0f, 100.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_3_B = float4(0.0f, 0.0f, 100.0f, 0.0f)/255.0f;
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_4_R = float4(150.0f, 0.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_4_G = float4(0.0f, 150.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_4_B = float4(0.0f, 0.0f, 150.0f, 0.0f)/255.0f;
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_5_R = float4(200.0f, 0.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_5_G = float4(0.0f, 200.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_5_B = float4(0.0f, 0.0f, 200.0f, 0.0f)/255.0f;
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_6_R = float4(1.0f, 1.0f, 0.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_6_G = float4(0.0f, 1.0f, 1.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_6_B = float4(1.0f, 0.0f, 1.0f, 0.0f);
+
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_7_R = float4(50.0f, 50.0f, 0.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_7_G = float4(0.0f, 50.0f, 50.0f, 0.0f)/255.0f;
+		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_7_B = float4(50.0f, 0.0f, 50.0f, 0.0f)/255.0f;
+		
+
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN = -1.02f;
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX = -0.02f;
 
@@ -55,18 +90,22 @@ PixelShader =
 			float4 TopRightTexel;
 		};
 
+		static const int POD_CLOTHING_CHANNELS = 7;
+
 		struct GH_SPortraitEffect
 		{
-			uint  Postprocess;
-			uint  AnimType;
-			float AnimValue;
-			float DiffuseR;
-			float DiffuseG;
-			float DiffuseB;
-			float PropertiesSSS;
-			float PropertiesSpecularity;
-			float PropertiesMetalness;
-			float PropertiesRoughness;
+			uint   Postprocess;
+			uint   AnimType;
+			float  AnimValue;
+			float  DiffuseR;
+			float  DiffuseG;
+			float  DiffuseB;
+			float  PropertiesSSS;
+			float  PropertiesSpecularity;
+			float  PropertiesMetalness;
+			float  PropertiesRoughness;
+			// only the first 7 channels are used by the game
+			float3 ClothingColors[7];
 		};
 
 		GH_SPortraitEffect GH_GetDefaultPortraitEffect()
@@ -86,6 +125,14 @@ PixelShader =
 			Effect.PropertiesSpecularity = -1.0f;
 			Effect.PropertiesMetalness   = -1.0f;
 			Effect.PropertiesRoughness   = -1.0f;
+
+			Effect.ClothingColors[0] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[1] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[2] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[3] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[4] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[5] = float3(-1.0f, -1.0f, -1.0f);
+			Effect.ClothingColors[6] = float3(-1.0f, -1.0f, -1.0f);
 
 			return Effect;
 		}

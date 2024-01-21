@@ -52,6 +52,21 @@ PixelShader =
 				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 			}
 		}
+
+		void POD_SetScriptedClothingColors(inout float3 Sample, in int index, in GH_SPortraitEffect PortraitEffect)
+		{
+			if (index < POD_CLOTHING_CHANNELS) {
+				if ( PortraitEffect.ClothingColors[index].r != -1.0f ) {
+					Sample.r = PortraitEffect.ClothingColors[index].r;
+				}
+				if ( PortraitEffect.ClothingColors[index].g != -1.0f ) {
+					Sample.g = PortraitEffect.ClothingColors[index].g;
+				}
+				if ( PortraitEffect.ClothingColors[index].b != -1.0f ) {
+					Sample.b = PortraitEffect.ClothingColors[index].b;
+				}
+			}
+		}
 		
 		//
 		// Service
@@ -176,6 +191,71 @@ PixelShader =
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_POSTPROCESS)) {
 					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE)) {
 						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_SMOKE;
+					}
+				}
+				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_CLOTHING)) {
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_R)) {
+						Effect.ClothingColors[0].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_G)) {
+						Effect.ClothingColors[0].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_B)) {
+						Effect.ClothingColors[0].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_R)) {
+						Effect.ClothingColors[1].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_G)) {
+						Effect.ClothingColors[1].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_B)) {
+						Effect.ClothingColors[1].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_R)) {
+						Effect.ClothingColors[2].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_G)) {
+						Effect.ClothingColors[2].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_B)) {
+						Effect.ClothingColors[2].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_R)) {
+						Effect.ClothingColors[3].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_G)) {
+						Effect.ClothingColors[3].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_B)) {
+						Effect.ClothingColors[3].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_R)) {
+						Effect.ClothingColors[4].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_G)) {
+						Effect.ClothingColors[4].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_B)) {
+						Effect.ClothingColors[4].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_R)) {
+						Effect.ClothingColors[5].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_G)) {
+						Effect.ClothingColors[5].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_B)) {
+						Effect.ClothingColors[5].b = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_R)) {
+						Effect.ClothingColors[6].r = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_G)) {
+						Effect.ClothingColors[6].g = Data._Weight;
+					}
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_B)) {
+						Effect.ClothingColors[6].b = Data._Weight;
 					}
 				}
 			}

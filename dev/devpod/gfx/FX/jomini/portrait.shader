@@ -584,18 +584,20 @@ PixelShader =
 				float3 NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );		
 				Properties.r = 1.0; // wipe this clean now, ready to be modified later
 				
+				// CfV (godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// CfV end
+				
 				#ifdef VARIATIONS_ENABLED
 					// CfV (POD)
-					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample );
+					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, PortraitEffect );
 					// CfV end
 				#endif
 				#ifdef COA_ENABLED
 					ApplyCoa( Input, Diffuse, CoaColor1, CoaColor2, CoaColor3, CoaOffsetAndScale.xy, CoaOffsetAndScale.zw, CoaTexture, Properties.r );
 				#endif
-				
-				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
 
+				// CfV (godherja)
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
 

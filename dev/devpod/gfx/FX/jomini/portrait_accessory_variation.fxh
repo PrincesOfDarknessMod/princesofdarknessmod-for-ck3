@@ -3,7 +3,7 @@ Includes = {
 	"jomini/portrait_user_data.fxh"
 
 	# CfV (POD)
-	"GH_portrait_constants.fxh"
+	"GH_portrait_effects.fxh"
 	# CfV end
 }
 
@@ -72,7 +72,9 @@ PixelShader =
 				float3	_Normal;
 			};
 
-			SPatternOutput ApplyPattern( float2 UV, SPatternDesc Desc, float RandomNumber, int MaskIndex )
+			// CfV (POD)
+			SPatternOutput ApplyPattern( float2 UV, SPatternDesc Desc, float RandomNumber, int MaskIndex, GH_SPortraitEffect PortraitEffect )
+			// CfV end
 			{
 				// Rotate and scale around (0.5,0.5)
 				float2 Rotate = float2( cos( Desc._Rotation ), sin( Desc._Rotation ) );
@@ -105,6 +107,9 @@ PixelShader =
 							HorizontalSample = ( HorizontalSample + 0.5f ) / 16.0f;
 							Sample = PdxTex2D( PatternColorPalette, float2( HorizontalSample, RandomNumber ) ).rgb;
 						}
+						// CfV (POD)
+						POD_SetScriptedClothingColors(Sample, MaskIndex + i, PortraitEffect);
+						// CfV end
 						PatternColor.rgb = lerp( PatternColor.rgb, Sample, ColorMask[i] );
 						PatternColor.a = max( PatternColor.a, ColorMask[i] );
 					}
@@ -119,7 +124,9 @@ PixelShader =
 				return PatternOutput;
 			}
 
-			void ApplyVariationPatterns( in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float4 Diffuse, inout float4 Properties, inout float3 NormalSample )
+			// CfV (POD)
+			void ApplyVariationPatterns( in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float4 Diffuse, inout float4 Properties, inout float3 NormalSample, GH_SPortraitEffect PortraitEffect )
+			// CfV end
 			{
 				float4 Mask = PdxTex2D( PatternMask, Input.UV0 );
 				float4 PatternDiffuse = float4( 1.0f, 1.0f, 1.0f, 1.0f );
@@ -131,7 +138,7 @@ PixelShader =
 				{
 					if( Mask[i] > 0.0f )
 					{
-						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i );
+						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i, PortraitEffect );
 
 						PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, Mask[i] );
 						PatternNormal = lerp( PatternNormal, PatternOutput._Normal.rgb, Mask[i] );

@@ -927,8 +927,14 @@ PixelShader =
 				Properties.r = 1.0; // wipe this clean now, ready to be modified later
 				Diffuse.a = PdxMeshApplyOpacity( Diffuse.a, Input.Position.xy, PdxMeshGetOpacity( Input.InstanceIndex ) );
 
+				// CfV (godherja)
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				// CfV end
+
 				#ifdef VARIATIONS_ENABLED
-					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample );
+					// CfV (POD)
+					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, PortraitEffect );
+					// CfV end
 				#endif
 				
 				#ifdef COA_ENABLED
@@ -954,8 +960,6 @@ PixelShader =
 				#endif
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
-
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, AppliedHover );
 				// CfV end
 
