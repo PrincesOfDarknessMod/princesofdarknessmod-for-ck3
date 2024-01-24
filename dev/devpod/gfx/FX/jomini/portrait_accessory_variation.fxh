@@ -138,7 +138,9 @@ PixelShader =
 				{
 					if( Mask[i] > 0.0f )
 					{
+						// CfV (POD)
 						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i, PortraitEffect );
+						// CfV end
 
 						PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, Mask[i] );
 						PatternNormal = lerp( PatternNormal, PatternOutput._Normal.rgb, Mask[i] );
