@@ -106,10 +106,10 @@ PixelShader =
 							float HorizontalSample = ( MaskIndex * 4.0f ) + i;
 							HorizontalSample = ( HorizontalSample + 0.5f ) / 16.0f;
 							Sample = PdxTex2D( PatternColorPalette, float2( HorizontalSample, RandomNumber ) ).rgb;
+							// CfV (POD)
+							POD_SetScriptedClothingColors(Sample, MaskIndex + i, PortraitEffect);
+							// CfV end
 						}
-						// CfV (POD)
-						POD_SetScriptedClothingColors(Sample, MaskIndex + i, PortraitEffect);
-						// CfV end
 						PatternColor.rgb = lerp( PatternColor.rgb, Sample, ColorMask[i] );
 						PatternColor.a = max( PatternColor.a, ColorMask[i] );
 					}
