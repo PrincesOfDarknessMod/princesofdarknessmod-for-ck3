@@ -154,6 +154,23 @@ PixelShader =
 				NormalSample = normalize( OverlayNormal( NormalSample, PatternNormal ) );
 				Properties = PatternProperties;
 			}
+			void ApplyClothFresnel( in VS_OUTPUT_PDXMESHPORTRAIT Input,in float3  CameraPosition, in float3  Normal, inout float3 Color )
+			{
+				float4 Mask = PdxTex2D( PatternMask, Input.UV0 );
+				for( int i = 0; i < 4; ++i )
+				{
+					if( Mask[i] > 0.0f )
+					{
+						SPatternDesc Desc = GetPatternDesc( Input.InstanceIndex, i );
+						float3 ViewVector = normalize( CameraPosition - Input.WorldSpacePos );
+						float VdotN = saturate( dot( Normal, ViewVector ) ) + 1e-5;
+						float CottonLike = pow( 1 - VdotN, Desc._InnerExp ) * Desc._InnerScale;
+						float SilkLike = pow( VdotN, Desc._RimExp ) * Desc._RimScale;
+						float ClothFresnel = CottonLike + SilkLike;
+						Color = Color * max( 0, ClothFresnel );
+					}
+				}
+			}
 		#endif
 	]]
 }
