@@ -295,9 +295,15 @@ PixelShader =
 
 			#define PARTICLE_SIZE 0.005
 
-			#define SPARK_COLOR float3(1.0, 0.4, 0.05) * 1.5
-			#define BLOOM_COLOR float3(1.0, 0.4, 0.05) * 0.8
-			#define SMOKE_COLOR float3(0.8, 0.7, 0.7) * 1.0
+			#ifdef BALEFIRE
+				#define SPARK_COLOR float3(0.5, 1.0, 0.05) * 1.5
+				#define BLOOM_COLOR float3(0.2, 1.0, 0.05) * 0.8
+				#define SMOKE_COLOR float3(0.7, 0.8, 0.5) * 1.0
+			#else
+				#define SPARK_COLOR float3(1.0, 0.4, 0.05) * 1.5
+				#define BLOOM_COLOR float3(1.0, 0.4, 0.05) * 0.8
+				#define SMOKE_COLOR float3(0.8, 0.7, 0.7) * 1.0
+			#endif
 
 			#define SIZE_MOD 1.08
 			#define ALPHA_MOD 0.9
@@ -510,7 +516,11 @@ PixelShader =
 				
 				col = smoothstep(-0.08, 1.0, col);
 
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#ifdef BALEFIRE
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.g;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#endif
 
 				return float4(col, alpha);
 			}
@@ -721,7 +731,11 @@ PixelShader =
 				//
 				float f = ypartClippedFalloff*pow(1.0-flames*flames*flames,8.0);
 				float fff = f*f*f;
-				float3 fire = 1.5*float3(f, fff, fff*fff);
+				#ifdef BALEFIRE
+					float3 fire = 1.5*float3(pow(f,1.7), f, fff*fff);
+				#else
+					float3 fire = 1.5*float3(f, fff, fff*fff);
+				#endif
 				//
 				// smoke
 				float smokeNoise = 0.5+snoise(0.4*position+timing*float3(1.0,1.0,0.2))/2.0;
@@ -746,11 +760,19 @@ PixelShader =
 					float2 sparkModulus = mod(sparkCoord+sparkOffset,sparkGridSize) - 0.5*float2(sparkGridSize,sparkGridSize);
 					float sparkLength = length(sparkModulus);
 					float sparksGray = max(0.0, 1.0 - sparkLength/(sparkSize*sparkGridSize));
-					sparks = sparkLife*sparksGray*float3(1.0,0.3,0.0);
+					#ifdef BALEFIRE
+						sparks = sparkLife*sparksGray*float3(0.7,1.0,0.0);
+					#else
+						sparks = sparkLife*sparksGray*float3(1.0,0.3,0.0);
+					#endif
 				}
 				//
 				float3 color = max(fire,sparks) + smoke;
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * color.r;
+				#ifdef BALEFIRE
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * color.g;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * color.r;
+				#endif
 				return float4(color, alpha);
 			}
 		]]
@@ -1124,6 +1146,21 @@ Effect SparksDisabled
 	Defines = { "DISABLED" }
 }
 
+Effect BalefireSparks
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Sparks"
+	
+	Defines = { "BALEFIRE" }
+}
+Effect BalefireSparksDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Sparks"
+	
+	Defines = { "BALEFIRE" "DISABLED" }
+}
+
 Effect Fire
 {
 	VertexShader = "VS_Default"
@@ -1135,6 +1172,21 @@ Effect FireDisabled
 	PixelShader = "PS_Fire"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect Balefire
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fire"
+	
+	Defines = { "BALEFIRE" }
+}
+Effect BalefireDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fire"
+	
+	Defines = { "BALEFIRE" "DISABLED" }
 }
 
 Effect Snow
