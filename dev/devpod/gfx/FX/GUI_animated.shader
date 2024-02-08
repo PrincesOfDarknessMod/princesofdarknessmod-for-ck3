@@ -862,13 +862,30 @@ PixelShader =
 			{
 				float2 uv = Input.UV0;
 				uv.y = 1.0 - uv.y;
-				
-				float2 TextureSize;
-				PdxTex2DSize(Texture, TextureSize);
 
-				float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
-				coord.x *= TextureSize.x / TextureSize.y;
-				float time = GlobalTime * 1.0;
+				#ifdef HEIST
+					float2 TextureSize = float2(1300.0, 600.0);
+
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+				#else
+					float2 TextureSize;
+					PdxTex2DSize(Texture, TextureSize);
+
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+					coord.x *= TextureSize.x / TextureSize.y;
+				#endif
+
+				#if defined(SUSPICION1)
+					float time = GlobalTime * 0.5;
+				#elif defined(SUSPICION2)
+					float time = GlobalTime * 0.7;
+				#elif defined(SUSPICION3)
+					float time = GlobalTime * 0.9;
+				#elif defined(SUSPICION4)
+					float time = GlobalTime * 1.1;
+				#else
+					float time = GlobalTime * 1.0;
+				#endif
 
 				//const float3 c1 = float3(124.0/255.0, 0.0/255.0, 97.0/255.0);
 				//const float3 c2 = float3(173.0/255.0, 0.0/255.0, 161.4/255.0);
@@ -877,10 +894,25 @@ PixelShader =
 				//const float3 c5 = float3(0.1, 0.1, 0.1);
 				//const float3 c6 = float3(0.9, 0.9, 0.9);
 
-				const float3 c1 = float3(0.0/255.0, 50.0/255.0, 50.0/255.0);
-				const float3 c2 = float3(0.0/255.0, 140.0/255.0, 173.0/255.0);
+				#if defined(SUSPICION2)
+					const float3 c1 = float3(30.0/255.0, 40.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(130.0/255.0, 140.0/255.0, 155.0/255.0);
+					const float3 c4 = float3(120.0/255.0, 130.0/255.0, 140.0/255.0);
+				#elif defined(SUSPICION3)
+					const float3 c1 = float3(50.0/255.0, 40.0/255.0, 10.0/255.0);
+					const float3 c2 = float3(170.0/255.0, 140.0/255.0, 60.0/255.0);
+					const float3 c4 = float3(150.0/255.0, 120.0/255.0, 20.0/255.0);
+				#elif defined(SUSPICION4)
+					const float3 c1 = float3(50.0/255.0, 0.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(200.0/255.0, 100.0/255.0, 0.0/255.0);
+					const float3 c4 = float3(170.0/255.0, 60.0/255.0, 0.0/255.0);
+				#else
+					const float3 c1 = float3(0.0/255.0, 50.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(0.0/255.0, 140.0/255.0, 173.0/255.0);
+					const float3 c4 = float3(0.0/255.0, 120.0/255.0, 160.0/255.0);
+				#endif
+				
 				const float3 c3 = float3(0.2, 0.2, 0.2);
-				const float3 c4 = float3(0.0/255.0, 120.0/255.0, 160.0/255.0);
 				const float3 c5 = float3(0.1, 0.1, 0.1);
 				const float3 c6 = float3(0.9, 0.9, 0.9);
 
@@ -895,7 +927,14 @@ PixelShader =
 				float3 col = c * cos(shift * uv.y);
 				//col *= 1.0-grad;
 
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * col.b;
+				#if defined(SUSPICION3)
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#elif defined(SUSPICION4)
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.b;
+				#endif
+
 				alpha *= 1.0-grad;
 				alpha *= 0.7;
 				return float4(col,alpha);
@@ -1213,6 +1252,66 @@ Effect FogDisabled
 	PixelShader = "PS_Fog"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect FogHeist1
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION1" }
+}
+Effect FogHeist1Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION1" "DISABLED" }
+}
+
+Effect FogHeist2
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION2" }
+}
+Effect FogHeist2Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION2" "DISABLED" }
+}
+
+Effect FogHeist3
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION3" }
+}
+Effect FogHeist3Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION3" "DISABLED" }
+}
+
+Effect FogHeist4
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION4" }
+}
+Effect FogHeist4Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST" "SUSPICION4" "DISABLED" }
 }
 
 Effect Hypertrip
