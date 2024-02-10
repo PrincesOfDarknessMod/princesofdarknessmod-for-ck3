@@ -863,9 +863,11 @@ PixelShader =
 				float2 uv = Input.UV0;
 				uv.y = 1.0 - uv.y;
 
-				#ifdef HEIST
+				#if defined(HEIST_MAP)
 					float2 TextureSize = float2(1300.0, 600.0);
-
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+				#elif defined(SUSPICION_BUTTON)
+					float2 TextureSize = float2(500.0, 105.0);
 					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
 				#else
 					float2 TextureSize;
@@ -1259,14 +1261,14 @@ Effect FogHeist1
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION1" }
+	Defines = { "HEIST_MAP" "SUSPICION1" }
 }
 Effect FogHeist1Disabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION1" "DISABLED" }
+	Defines = { "HEIST_MAP" "SUSPICION1" "DISABLED" }
 }
 
 Effect FogHeist2
@@ -1274,14 +1276,14 @@ Effect FogHeist2
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION2" }
+	Defines = { "HEIST_MAP" "SUSPICION2" }
 }
 Effect FogHeist2Disabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION2" "DISABLED" }
+	Defines = { "HEIST_MAP" "SUSPICION2" "DISABLED" }
 }
 
 Effect FogHeist3
@@ -1289,14 +1291,14 @@ Effect FogHeist3
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION3" }
+	Defines = { "HEIST_MAP" "SUSPICION3" }
 }
 Effect FogHeist3Disabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION3" "DISABLED" }
+	Defines = { "HEIST_MAP" "SUSPICION3" "DISABLED" }
 }
 
 Effect FogHeist4
@@ -1304,14 +1306,74 @@ Effect FogHeist4
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION4" }
+	Defines = { "HEIST_MAP" "SUSPICION4" }
 }
 Effect FogHeist4Disabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Fog"
 	
-	Defines = { "HEIST" "SUSPICION4" "DISABLED" }
+	Defines = { "HEIST_MAP" "SUSPICION4" "DISABLED" }
+}
+
+Effect FogSuspicion1
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION1" }
+}
+Effect FogSuspicion1Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION1" "DISABLED" }
+}
+
+Effect FogSuspicion2
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION2" }
+}
+Effect FogSuspicion2Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION2" "DISABLED" }
+}
+
+Effect FogSuspicion3
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION3" }
+}
+Effect FogSuspicion3Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION3" "DISABLED" }
+}
+
+Effect FogSuspicion4
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION4" }
+}
+Effect FogSuspicion4Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION4" "DISABLED" }
 }
 
 Effect Hypertrip
