@@ -295,9 +295,15 @@ PixelShader =
 
 			#define PARTICLE_SIZE 0.005
 
-			#define SPARK_COLOR float3(1.0, 0.4, 0.05) * 1.5
-			#define BLOOM_COLOR float3(1.0, 0.4, 0.05) * 0.8
-			#define SMOKE_COLOR float3(0.8, 0.7, 0.7) * 1.0
+			#ifdef BALEFIRE
+				#define SPARK_COLOR float3(0.5, 1.0, 0.05) * 1.5
+				#define BLOOM_COLOR float3(0.2, 1.0, 0.05) * 0.8
+				#define SMOKE_COLOR float3(0.7, 0.8, 0.5) * 1.0
+			#else
+				#define SPARK_COLOR float3(1.0, 0.4, 0.05) * 1.5
+				#define BLOOM_COLOR float3(1.0, 0.4, 0.05) * 0.8
+				#define SMOKE_COLOR float3(0.8, 0.7, 0.7) * 1.0
+			#endif
 
 			#define SIZE_MOD 1.08
 			#define ALPHA_MOD 0.9
@@ -510,7 +516,11 @@ PixelShader =
 				
 				col = smoothstep(-0.08, 1.0, col);
 
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#ifdef BALEFIRE
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.g;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#endif
 
 				return float4(col, alpha);
 			}
@@ -721,7 +731,11 @@ PixelShader =
 				//
 				float f = ypartClippedFalloff*pow(1.0-flames*flames*flames,8.0);
 				float fff = f*f*f;
-				float3 fire = 1.5*float3(f, fff, fff*fff);
+				#ifdef BALEFIRE
+					float3 fire = 1.5*float3(pow(f,1.7), f, fff*fff);
+				#else
+					float3 fire = 1.5*float3(f, fff, fff*fff);
+				#endif
 				//
 				// smoke
 				float smokeNoise = 0.5+snoise(0.4*position+timing*float3(1.0,1.0,0.2))/2.0;
@@ -746,11 +760,19 @@ PixelShader =
 					float2 sparkModulus = mod(sparkCoord+sparkOffset,sparkGridSize) - 0.5*float2(sparkGridSize,sparkGridSize);
 					float sparkLength = length(sparkModulus);
 					float sparksGray = max(0.0, 1.0 - sparkLength/(sparkSize*sparkGridSize));
-					sparks = sparkLife*sparksGray*float3(1.0,0.3,0.0);
+					#ifdef BALEFIRE
+						sparks = sparkLife*sparksGray*float3(0.7,1.0,0.0);
+					#else
+						sparks = sparkLife*sparksGray*float3(1.0,0.3,0.0);
+					#endif
 				}
 				//
 				float3 color = max(fire,sparks) + smoke;
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * color.r;
+				#ifdef BALEFIRE
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * color.g;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * color.r;
+				#endif
 				return float4(color, alpha);
 			}
 		]]
@@ -840,13 +862,32 @@ PixelShader =
 			{
 				float2 uv = Input.UV0;
 				uv.y = 1.0 - uv.y;
-				
-				float2 TextureSize;
-				PdxTex2DSize(Texture, TextureSize);
 
-				float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
-				coord.x *= TextureSize.x / TextureSize.y;
-				float time = GlobalTime * 1.0;
+				#if defined(HEIST_MAP)
+					float2 TextureSize = float2(1300.0, 600.0);
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+				#elif defined(SUSPICION_BUTTON)
+					float2 TextureSize = float2(500.0, 105.0);
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+				#else
+					float2 TextureSize;
+					PdxTex2DSize(Texture, TextureSize);
+
+					float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
+					coord.x *= TextureSize.x / TextureSize.y;
+				#endif
+
+				#if defined(SUSPICION1)
+					float time = GlobalTime * 0.5;
+				#elif defined(SUSPICION2)
+					float time = GlobalTime * 0.7;
+				#elif defined(SUSPICION3)
+					float time = GlobalTime * 0.9;
+				#elif defined(SUSPICION4)
+					float time = GlobalTime * 1.1;
+				#else
+					float time = GlobalTime * 1.0;
+				#endif
 
 				//const float3 c1 = float3(124.0/255.0, 0.0/255.0, 97.0/255.0);
 				//const float3 c2 = float3(173.0/255.0, 0.0/255.0, 161.4/255.0);
@@ -855,10 +896,25 @@ PixelShader =
 				//const float3 c5 = float3(0.1, 0.1, 0.1);
 				//const float3 c6 = float3(0.9, 0.9, 0.9);
 
-				const float3 c1 = float3(0.0/255.0, 50.0/255.0, 50.0/255.0);
-				const float3 c2 = float3(0.0/255.0, 140.0/255.0, 173.0/255.0);
+				#if defined(SUSPICION2)
+					const float3 c1 = float3(30.0/255.0, 40.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(130.0/255.0, 140.0/255.0, 155.0/255.0);
+					const float3 c4 = float3(120.0/255.0, 130.0/255.0, 140.0/255.0);
+				#elif defined(SUSPICION3)
+					const float3 c1 = float3(50.0/255.0, 40.0/255.0, 10.0/255.0);
+					const float3 c2 = float3(170.0/255.0, 140.0/255.0, 60.0/255.0);
+					const float3 c4 = float3(150.0/255.0, 120.0/255.0, 20.0/255.0);
+				#elif defined(SUSPICION4)
+					const float3 c1 = float3(50.0/255.0, 0.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(200.0/255.0, 100.0/255.0, 0.0/255.0);
+					const float3 c4 = float3(170.0/255.0, 60.0/255.0, 0.0/255.0);
+				#else
+					const float3 c1 = float3(0.0/255.0, 50.0/255.0, 50.0/255.0);
+					const float3 c2 = float3(0.0/255.0, 140.0/255.0, 173.0/255.0);
+					const float3 c4 = float3(0.0/255.0, 120.0/255.0, 160.0/255.0);
+				#endif
+				
 				const float3 c3 = float3(0.2, 0.2, 0.2);
-				const float3 c4 = float3(0.0/255.0, 120.0/255.0, 160.0/255.0);
 				const float3 c5 = float3(0.1, 0.1, 0.1);
 				const float3 c6 = float3(0.9, 0.9, 0.9);
 
@@ -873,7 +929,14 @@ PixelShader =
 				float3 col = c * cos(shift * uv.y);
 				//col *= 1.0-grad;
 
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * col.b;
+				#if defined(SUSPICION3)
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#elif defined(SUSPICION4)
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.r;
+				#else
+					float alpha = SampleImageSprite(Texture,Input.UV0).a * col.b;
+				#endif
+
 				alpha *= 1.0-grad;
 				alpha *= 0.7;
 				return float4(col,alpha);
@@ -1124,6 +1187,21 @@ Effect SparksDisabled
 	Defines = { "DISABLED" }
 }
 
+Effect BalefireSparks
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Sparks"
+	
+	Defines = { "BALEFIRE" }
+}
+Effect BalefireSparksDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Sparks"
+	
+	Defines = { "BALEFIRE" "DISABLED" }
+}
+
 Effect Fire
 {
 	VertexShader = "VS_Default"
@@ -1135,6 +1213,21 @@ Effect FireDisabled
 	PixelShader = "PS_Fire"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect Balefire
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fire"
+	
+	Defines = { "BALEFIRE" }
+}
+Effect BalefireDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fire"
+	
+	Defines = { "BALEFIRE" "DISABLED" }
 }
 
 Effect Snow
@@ -1161,6 +1254,126 @@ Effect FogDisabled
 	PixelShader = "PS_Fog"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect FogHeist1
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION1" }
+}
+Effect FogHeist1Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION1" "DISABLED" }
+}
+
+Effect FogHeist2
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION2" }
+}
+Effect FogHeist2Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION2" "DISABLED" }
+}
+
+Effect FogHeist3
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION3" }
+}
+Effect FogHeist3Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION3" "DISABLED" }
+}
+
+Effect FogHeist4
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION4" }
+}
+Effect FogHeist4Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "HEIST_MAP" "SUSPICION4" "DISABLED" }
+}
+
+Effect FogSuspicion1
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION1" }
+}
+Effect FogSuspicion1Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION1" "DISABLED" }
+}
+
+Effect FogSuspicion2
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION2" }
+}
+Effect FogSuspicion2Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION2" "DISABLED" }
+}
+
+Effect FogSuspicion3
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION3" }
+}
+Effect FogSuspicion3Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION3" "DISABLED" }
+}
+
+Effect FogSuspicion4
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION4" }
+}
+Effect FogSuspicion4Disabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Fog"
+	
+	Defines = { "SUSPICION_BUTTON" "SUSPICION4" "DISABLED" }
 }
 
 Effect Hypertrip
