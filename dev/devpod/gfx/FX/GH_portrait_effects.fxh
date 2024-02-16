@@ -146,7 +146,7 @@ PixelShader =
 
 			for (int i = FromDataTexel; i <= ToDataTexel; i += TEXEL_COUNT_PER_DECAL)
 			{
-				DecalData Data = GetDecalData(i, MAX_VALUE);
+				DecalData Data = GetDecalData(i);;
 
 				// TODO: Filter by bodypart index for an early continue?
 
