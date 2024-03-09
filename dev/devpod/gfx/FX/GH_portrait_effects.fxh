@@ -17,31 +17,34 @@ PixelShader =
 
 		void GH_TryApplyStatueEffect(in GH_SPortraitEffect PortraitEffect, inout float4 Diffuse, inout float4 Properties, in VS_OUTPUT_PDXMESHPORTRAIT Input)
 		{
-			if ( PortraitEffect.DiffuseR              != -1.0f ) { Diffuse.r    = PortraitEffect.DiffuseR;              }
-			if ( PortraitEffect.DiffuseG              != -1.0f ) { Diffuse.g    = PortraitEffect.DiffuseG;              }
-			if ( PortraitEffect.DiffuseB              != -1.0f ) { Diffuse.b    = PortraitEffect.DiffuseB;              }
-			if ( PortraitEffect.PropertiesSSS         != -1.0f ) { Properties.r = PortraitEffect.PropertiesSSS;         }
-			if ( PortraitEffect.PropertiesSpecularity != -1.0f ) { Properties.g = PortraitEffect.PropertiesSpecularity; }
-			if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
-			if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
+			if (PortraitEffect.isEnabled)
+			{
+				if ( PortraitEffect.DiffuseR              != -1.0f ) { Diffuse.r    = PortraitEffect.DiffuseR;              }
+				if ( PortraitEffect.DiffuseG              != -1.0f ) { Diffuse.g    = PortraitEffect.DiffuseG;              }
+				if ( PortraitEffect.DiffuseB              != -1.0f ) { Diffuse.b    = PortraitEffect.DiffuseB;              }
+				if ( PortraitEffect.PropertiesSSS         != -1.0f ) { Properties.r = PortraitEffect.PropertiesSSS;         }
+				if ( PortraitEffect.PropertiesSpecularity != -1.0f ) { Properties.g = PortraitEffect.PropertiesSpecularity; }
+				if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
+				if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
 
-			if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
-				// the value of the gene controls animation speed
-				float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
+					// the value of the gene controls animation speed
+					float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
 
-				float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
-				float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
+					float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
+					float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
 
-				Properties.b *= pulseDepth; // metalness
-			}
-			else if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_VERTICAL_SHINIES ) {
-				// the value of the gene controls animation speed
-				float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+					Properties.b *= pulseDepth; // metalness
+				}
+				else if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_VERTICAL_SHINIES ) {
+					// the value of the gene controls animation speed
+					float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
 
-				float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
-				float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
+					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
+					float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
 
-				Properties.g *= pulseHeight * 2.0; // specularity
+					Properties.g *= pulseHeight * 2.0; // specularity
+				}
 			}
 		}
 
@@ -140,7 +143,7 @@ PixelShader =
 		// Interface
 		//
 
-		GH_SPortraitEffect GH_ScanMarkerDecals(int DecalsCount)
+		GH_SPortraitEffect GH_ScanMarkerDecals(int DecalsCount, bool isAttachment, bool isSkin)
 		{
 			int From = 0;
 			int To   = DecalsCount;
@@ -209,65 +212,74 @@ PixelShader =
 					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_R)) {
 						Effect.ClothingColors[0].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_G)) {
 						Effect.ClothingColors[0].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_B)) {
 						Effect.ClothingColors[0].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_R)) {
 						Effect.ClothingColors[1].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_G)) {
 						Effect.ClothingColors[1].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_2_B)) {
 						Effect.ClothingColors[1].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_R)) {
 						Effect.ClothingColors[2].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_G)) {
 						Effect.ClothingColors[2].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_3_B)) {
 						Effect.ClothingColors[2].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_R)) {
 						Effect.ClothingColors[3].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_G)) {
 						Effect.ClothingColors[3].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_4_B)) {
 						Effect.ClothingColors[3].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_R)) {
 						Effect.ClothingColors[4].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_G)) {
 						Effect.ClothingColors[4].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_5_B)) {
 						Effect.ClothingColors[4].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_R)) {
 						Effect.ClothingColors[5].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_G)) {
 						Effect.ClothingColors[5].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_6_B)) {
 						Effect.ClothingColors[5].b = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_R)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_R)) {
 						Effect.ClothingColors[6].r = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_G)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_G)) {
 						Effect.ClothingColors[6].g = Data._Weight;
 					}
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_B)) {
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_7_B)) {
 						Effect.ClothingColors[6].b = Data._Weight;
+					}
+				}
+				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_CONDITIONAL))
+				{
+					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING)) {
+						Effect.isEnabled = !isAttachment;
+					}
+					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY)) {
+						Effect.isEnabled = isSkin;
 					}
 				}
 			}

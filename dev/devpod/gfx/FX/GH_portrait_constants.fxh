@@ -19,6 +19,7 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_LEFT_STATUE      = float4(0.0f, 1.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_LEFT_ANIM        = float4(0.0f, 0.0f, 1.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_LEFT_CLOTHING    = float4(1.0f, 0.0f, 1.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_LEFT_CONDITIONAL = float4(0.0f, 1.0f, 1.0f, 0.0f);
 		
 
 		static const float4 GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE = float4(1.0f, 0.0f, 0.0f, 0.0f);
@@ -66,6 +67,10 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_7_B = float4(50.0f, 0.0f, 50.0f, 0.0f)/255.0f;
 		
 
+		static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING = float4(1.0f, 0.0f, 0.0f, 0.0f);
+		static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY       = float4(0.0f, 1.0f, 0.0f, 0.0f);
+		
+
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN = -1.02f;
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX = -0.02f;
 
@@ -94,6 +99,7 @@ PixelShader =
 
 		struct GH_SPortraitEffect
 		{
+			bool   isEnabled;
 			uint   Postprocess;
 			uint   AnimType;
 			float  AnimValue;
@@ -111,6 +117,8 @@ PixelShader =
 		GH_SPortraitEffect GH_GetDefaultPortraitEffect()
 		{
 			GH_SPortraitEffect Effect;
+
+			Effect.isEnabled = true;
 
 			Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_NONE;
 

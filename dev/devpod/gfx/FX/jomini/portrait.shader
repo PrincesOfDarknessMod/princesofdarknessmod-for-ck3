@@ -505,7 +505,7 @@ PixelShader =
 			#endif
 				
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true);
 				// CfV end
 
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
@@ -553,7 +553,7 @@ PixelShader =
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
@@ -596,7 +596,7 @@ PixelShader =
 				Properties.r = 1.0; // wipe this clean now, ready to be modified later
 				
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false);
 				// CfV end
 				
 				#ifdef VARIATIONS_ENABLED
@@ -656,7 +656,7 @@ PixelShader =
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
@@ -715,7 +715,7 @@ PixelShader =
 				Diffuse.rgb *= vPaletteColorHair.rgb;
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
@@ -763,7 +763,7 @@ PixelShader =
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, ColorPalette, Input.InstanceIndex, ColorMask.a );
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true);
 				
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
