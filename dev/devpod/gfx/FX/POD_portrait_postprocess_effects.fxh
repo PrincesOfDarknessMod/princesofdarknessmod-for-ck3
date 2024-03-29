@@ -43,10 +43,12 @@ PixelShader =
 			float2 p = coord.xy * 8.0 / TextureSize.xx;
 			float q = POD_SmokeFBM(p - time * 0.1);
 			float2 r = float2(POD_SmokeFBM(p + q + time * speed.x - p.x - p.y), POD_SmokeFBM(p + q - time * speed.y));
-			float c = lerp(0.0, 1.0, POD_SmokeFBM(p + r)) + lerp(0.0, 0.5, r.x) - lerp(0.0, 1.0, r.y);
+			//float c = lerp(0.0, 1.0, POD_SmokeFBM(p + r)) + lerp(0.0, 0.5, r.x) - lerp(0.0, 1.0, r.y);
+			float c = lerp(0.2, 1.0, POD_SmokeFBM(p + r)) + lerp(0.0, 0.5, r.x) - lerp(0.0, 1.2, r.y);
 
 			c = clamp(c, 0.0, 1.0);
-			float alpha = 1.0 - (c * 0.8);
+			//float alpha = 1.0 - (c * 0.8);
+			float alpha = 1.0 - c;
 			return alpha;
 		}
 
