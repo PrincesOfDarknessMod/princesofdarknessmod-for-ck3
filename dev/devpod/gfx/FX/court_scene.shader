@@ -960,7 +960,7 @@ PixelShader =
 					// we append hover value after _BodyPartIndex, so
 					// it's a float under index 1 in float4 element of Data array
 					// if portrait accessory use data layout changes, this will also break
-					static const int USER_DATA_HOVER_SLOT = 9;
+					static const int USER_DATA_HOVER_SLOT = 13;
 					float AppliedHover = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).g;
 					#else
 					// if the effect doesn't have variations and is intended for a court artifact on a pedestal,
