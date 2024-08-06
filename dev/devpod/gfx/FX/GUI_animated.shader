@@ -86,10 +86,10 @@ PixelShader =
 				float v = 0.0;
 				float freq = 9.5;
 				float amp = .75;
-				float z = (20. * sin(GlobalTime * .2)) + 30.;
+				float z = (20. * sin(GuiTime * .2)) + 30.;
 			
 				for (int i = 0; i < 10; ++i) {
-					v += valueNoise(uv + (z * uv * .05) + (GlobalTime * .1)) * amp;
+					v += valueNoise(uv + (z * uv * .05) + (GuiTime * .1)) * amp;
 					uv *= 3.25;        
 					amp *= .5;
 				}
@@ -105,7 +105,7 @@ PixelShader =
 				float2 oldUV = uv;
 				uv.x *= TextureSize.x / TextureSize.y;
 
-				uv = mul(uv, rot(GlobalTime * .02));
+				uv = mul(uv, rot(GuiTime * .02));
 				float2x2 angle = rot(fbm(uv));
 
 				float4 fragColor = float4(float3(
@@ -181,7 +181,7 @@ PixelShader =
 			PDX_MAIN
 			{
 				float2 uv = Input.UV0;
-				float time = GlobalTime * 1.1;
+				float time = GuiTime * 1.1;
 				uv = (uv-.5)*3.;
 				
 				float2 TextureSize;
@@ -323,7 +323,7 @@ PixelShader =
 				#define INTENSITY1 (NN * INTERVAL - t) / (NN * INTERVAL)
 				#define INTENSITY float3(INTENSITY1, INTENSITY1, INTENSITY1)
 				
-				float time = GlobalTime * 0.4;
+				float time = GuiTime * 0.4;
 
 				for(int i = 0; i < N; i++) {
 					float t;
@@ -468,7 +468,7 @@ PixelShader =
 					offset += hash2_2(float2(alpha, size)) * 10.0;
 					
 					//Adding noise with movement
-					noise += noise1_2(uv * size + GlobalTime * animation * 8.0 * MOVEMENT_DIRECTION * MOVEMENT_SPEED + offset) * alpha;
+					noise += noise1_2(uv * size + GuiTime * animation * 8.0 * MOVEMENT_DIRECTION * MOVEMENT_SPEED + offset) * alpha;
 					alpha *= alphaMod;
 					size *= sizeMod;
 				}
@@ -499,7 +499,7 @@ PixelShader =
 			//Voronoi cell point rotation degrees
 			float degFromRootUV(in float2 uv)
 			{
-				return GlobalTime * ANIMATION_SPEED * (hash1_2(uv) - 0.5) * 2.0;   
+				return GuiTime * ANIMATION_SPEED * (hash1_2(uv) - 0.5) * 2.0;   
 			}
 
 			float2 randomAround2_2(in float2 coord, in float2 range, in float2 uv)
@@ -519,7 +519,7 @@ PixelShader =
 			
 				//UV manipulation for the faster particle movement
 				float2 tempUV = uv + (noise2_2(uv * 2.0) - 0.5) * 0.1;
-				tempUV += -(noise2_2(uv * 3.0 + GlobalTime) - 0.5) * 0.07;
+				tempUV += -(noise2_2(uv * 3.0 + GuiTime) - 0.5) * 0.07;
 
 				//Sparks sdf
 				dist = length(rotate(tempUV - pointUV, 0.7) * randomAround2_2(PARTICLE_SCALE, PARTICLE_SCALE_VAR, rootUV));
@@ -561,7 +561,7 @@ PixelShader =
 					noiseOffset = (noise2_2(uv * size * 2.0 + 0.5) - 0.5) * 0.15;
 					
 					//UV with applied movement
-					bokehUV = (uv * size + GlobalTime * MOVEMENT_DIRECTION * MOVEMENT_SPEED) + offset + noiseOffset; 
+					bokehUV = (uv * size + GuiTime * MOVEMENT_DIRECTION * MOVEMENT_SPEED) + offset + noiseOffset; 
 					
 					//Adding particles								if there is more smoke, remove smaller particles
 					particles += fireParticles(bokehUV, uv) * alpha * (1.0 - smoothstep(0.0, 1.0, smoke) * (float(i) / float(layers)));
@@ -591,13 +591,13 @@ PixelShader =
 				
 				uv *= 1.8;
 				
-				float smokeIntensity = layeredNoise1_2(uv * 10.0 + GlobalTime * 4.0 * MOVEMENT_DIRECTION * MOVEMENT_SPEED, 1.7, 0.7, 6, 0.2);
+				float smokeIntensity = layeredNoise1_2(uv * 10.0 + GuiTime * 4.0 * MOVEMENT_DIRECTION * MOVEMENT_SPEED, 1.7, 0.7, 6, 0.2);
 				smokeIntensity *= pow(1.0 - smoothstep(-1.0, 1.6, uv.y), 2.0); 
 				float3 smoke = smokeIntensity * SMOKE_COLOR * 0.8;
 				//float3 smoke = smokeIntensity * SMOKE_COLOR * 0.8 * vignette;
 				
 				//Cutting holes in smoke
-				smoke *= pow(layeredNoise1_2(uv * 4.0 + GlobalTime * 0.5 * MOVEMENT_DIRECTION * MOVEMENT_SPEED, 1.8, 0.5, 3, 0.2), 2.0) * 1.5;
+				smoke *= pow(layeredNoise1_2(uv * 4.0 + GuiTime * 0.5 * MOVEMENT_DIRECTION * MOVEMENT_SPEED, 1.8, 0.5, 3, 0.2), 2.0) * 1.5;
 				
 				float3 particles = layeredParticles(uv, SIZE_MOD, ALPHA_MOD, LAYERS_COUNT, smokeIntensity);
 				
@@ -775,7 +775,7 @@ PixelShader =
 
 			PDX_MAIN
 			{
-				float time = GlobalTime;
+				float time = GuiTime;
 				float2 uv = Input.UV0;
 				uv.y = 1.0 - uv.y;
 
@@ -887,7 +887,7 @@ PixelShader =
 
 				float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
 				coord.x *= TextureSize.x / TextureSize.y;
-				float time = GlobalTime;
+				float time = GuiTime;
 
 				float snow = 0.0;
 				float random = frac(sin(dot(coord.xy,float2(12.9898,78.233)))* 43758.5453);
@@ -968,15 +968,15 @@ PixelShader =
 				#endif
 
 				#if defined(SUSPICION1)
-					float time = GlobalTime * 0.5;
+					float time = GuiTime * 0.5;
 				#elif defined(SUSPICION2)
-					float time = GlobalTime * 0.7;
+					float time = GuiTime * 0.7;
 				#elif defined(SUSPICION3)
-					float time = GlobalTime * 0.9;
+					float time = GuiTime * 0.9;
 				#elif defined(SUSPICION4)
-					float time = GlobalTime * 1.1;
+					float time = GuiTime * 1.1;
 				#else
-					float time = GlobalTime * 1.0;
+					float time = GuiTime * 1.0;
 				#endif
 
 				//const float3 c1 = float3(124.0/255.0, 0.0/255.0, 97.0/255.0);
@@ -1046,7 +1046,7 @@ PixelShader =
 			// bfogerty at gmail dot com
 
 
-			#define Time					GlobalTime
+			#define Time					GuiTime
 
 			#define HorizontalAmplitude		0.50
 			#define VerticleAmplitude		0.50
