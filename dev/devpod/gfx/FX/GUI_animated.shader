@@ -1167,6 +1167,72 @@ PixelShader =
 			}
 		]]
 	}
+	MainCode PS_Flowyblood
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/ftd3zX
+			
+			float rand(float2 p) {
+				return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+			}
+
+			float noise(float2 p) {
+				float2 f = frac(p);
+				f = f * f * f * f * (3. - 2. * f) * (3. - 2. * f);
+				float2 i = floor(p);
+				return lerp(lerp(rand(i + float2(0, 0)), 
+							rand(i + float2(1, 0)), f.x),
+						lerp(rand(i + float2(0, 1)), 
+							rand(i + float2(1, 1)), f.x), f.y);
+			}
+
+			float fbm(float2 p) {
+				float v = 0.;
+				float a = 1.;
+				for(int i = 0; i < 4; ++i) {
+					p = 1.5 * p + 15.;
+					a *= 0.5;
+					v += a * noise(p);
+				}
+				return v;
+			}
+
+			PDX_MAIN
+			{
+				float2 TextureSize;
+				PdxTex2DSize(Texture, TextureSize);
+
+				float2 uv = Input.UV0;
+				uv.x = 1.0 - uv.x;
+				uv.x *= 1.6;
+				float2 p = 3.5 * uv;
+
+				float time = GuiTime * 2.5;
+				
+				float2 r1 = float2(fbm(p + 0.02 * time), fbm(p + 0.005 * time));
+				float2 r2 = float2(fbm(p + 0.15 * time + 10. * r1), fbm(p + 0.12 * time + 12. * r1));
+
+				float col = 1.8 * pow(fbm(p + r2), 2.) + 0.03;
+
+				#if defined(GOLD)
+					float3 finalColor = float3(col, pow(col, 1.8)*0.9, col*col*col*col*col*0.25);
+				#elif defined(GREY)
+					float3 finalColor = float3(col*0.4, col*0.45, col*0.5);
+				#elif defined(RITUALGREEN)
+					float3 finalColor = float3(col*col*0.4, col*0.9, col*col);
+				#else
+					float3 finalColor = float3(col, 0.0, col*col*col*col*col*0.25);
+				#endif
+
+				float alpha = SampleImageSprite(Texture,Input.UV0).a * col * 1.2;
+
+				return float4( finalColor, alpha );
+			}
+		]]
+	}
 }
 
 # SampleImageSprite( Texture, Input.UV0 );
@@ -1490,4 +1556,62 @@ Effect HypertripDisabled
 	PixelShader = "PS_Hypertrip"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect FlowyBlood
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+}
+Effect FlowyBloodDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "DISABLED" }
+}
+
+Effect FlowyGold
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "GOLD" }
+}
+Effect FlowyGoldDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "GOLD" "DISABLED" }
+}
+
+Effect FlowyGrey
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "GREY" }
+}
+Effect FlowyGreyDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "GREY" "DISABLED" }
+}
+
+Effect FlowyRitual
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "RITUALGREEN" }
+}
+Effect FlowyRitualDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "RITUALGREEN" "DISABLED" }
 }
