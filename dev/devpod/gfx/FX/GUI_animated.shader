@@ -1167,6 +1167,123 @@ PixelShader =
 			}
 		]]
 	}
+	MainCode PS_DeepUmbra
+	{	
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/Mll3zj
+			
+			// Star Nest by Pablo RomÃ¡n Andrioli
+
+			// This content is under the MIT License.
+
+			// Original post by Kali https://www.shadertoy.com/view/XlfGRj
+
+			#define iterations 17
+			#define formuparam 0.53
+
+			#define volsteps 20
+			#define stepsize 0.1
+
+			#define zoom   0.800
+			#define tile   0.850
+			#define speed  0.004
+
+			#define brightness 0.0016
+			#define darkmatter 0.300
+			#define distfading 0.750
+			#define saturation 1.000
+
+			float SCurve (float value) {
+
+				if (value < 0.5)
+				{
+					return value * value * value * value * value * 16.0; 
+				}
+				
+				value -= 1.0;
+				
+				return value * value * value * value * value * 16.0 + 1.0;
+			}
+
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				//uv = float2(1.0,1.0) - uv;
+				uv.x = 1.0 - uv.x;
+
+				float2 TextureSize;
+				PdxTex2DSize(Texture, TextureSize);
+
+				//get coords and direction
+				uv = uv - 0.5;
+				uv.y *= TextureSize.y/TextureSize.x;
+				float3 dir=float3(uv*zoom,1.);
+				float time=GuiTime*speed+.25;
+
+				//mouse rotation (mouse input disabled for POD)
+				float a1=.5+1.0/TextureSize.x*2.;
+				float a2=.8+1.0/TextureSize.y*2.;
+				float2x2 rot1=float2x2(cos(a1),sin(a1),-sin(a1),cos(a1));
+				float2x2 rot2=float2x2(cos(a2),sin(a2),-sin(a2),cos(a2));
+				dir.xz=mul(dir.xz,rot1);
+				dir.xy=mul(dir.xy,rot2);
+				float3 from=float3(1.,.5,0.5);
+				from+=float3(time*2.,time,-2.);
+				from.xz=mul(from.xz,rot1);
+				from.xy=mul(from.xy,rot2);
+				//disappearing stars (happy accident?)
+				//from.xz*=mul(from.xz,rot1);
+				//from.xy*=mul(from.xy,rot2);
+				
+				//volumetric rendering
+				float s=0.1,fade=1.;
+				float3 v=float3(0.,0.,0.);
+				for (int r=0; r<volsteps; r++) {
+					float3 p=from+s*dir*.5;
+					p = abs(float3(tile,tile,tile)-mod(p,float3(tile*2.,tile*2.,tile*2.))); // tiling fold
+					float pa,a=pa=0.;
+					for (int i=0; i<iterations; i++) { 
+						p=abs(p)/dot(p,p)-formuparam; // the magic formula
+						a+=abs(length(p)-pa); // absolute sum of average change
+						pa=length(p);
+					}
+					float dm=max(0.,darkmatter-a*a*.001); //dark matter
+					a = pow(a, 2.5); // add contrast
+					if (r>6) fade*=1.-dm; // dark matter, don't render near
+					//v+=float3(dm,dm*.5,0.);
+					v+=fade;
+					v+=float3(s,s*s,s*s*s*s)*a*brightness*fade; // coloring based on distance
+					fade*=distfading; // distance fading
+					s+=stepsize;
+				}
+				
+				v=lerp(float3(length(v),length(v),length(v)),v,saturation); //color adjust
+				
+				float4 C = float4(v*.01,1.);
+				
+					C.r = pow(C.r, 0.35); 
+					C.g = pow(C.g, 0.36); 
+					C.b = pow(C.b, 0.4); 
+				
+				float4 L = C;   	
+				
+					C.r = lerp(L.r, SCurve(C.r), 1.0); 
+					C.g = lerp(L.g, SCurve(C.g), 0.9); 
+					C.b = lerp(L.b, SCurve(C.b), 0.6);     	
+				
+				float alpha = SampleImageSprite(Texture,Input.UV0).a;
+
+				//vignette
+				float vig = 1.0-length(uv);
+				C.rgb = lerp(C.rgb,C.rgb*float3(vig,vig,vig),0.8);
+				alpha = lerp(alpha,alpha*vig,0.6);
+				return float4(C.rgb, alpha);
+			}
+		]]
+	}
 }
 
 # SampleImageSprite( Texture, Input.UV0 );
@@ -1488,6 +1605,19 @@ Effect HypertripDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Hypertrip"
+	
+	Defines = { "DISABLED" }
+}
+
+Effect DeepUmbra
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
+}
+Effect DeepUmbraDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
 	
 	Defines = { "DISABLED" }
 }
