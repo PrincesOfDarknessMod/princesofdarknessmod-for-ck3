@@ -14,6 +14,8 @@ PixelShader =
 
 		static const float GH_MARKER_CHECK_TOLERANCE = 0.01f;
 
+		static const float POD_PORTRAIT_GENE_CHECK_TOLERANCE = 0.01f;
+
 
 		static const float4 GH_MARKER_TOP_LEFT_POSTPROCESS = float4(1.0f, 0.0f, 0.0f, 0.0f);
 		static const float4 GH_MARKER_TOP_LEFT_STATUE      = float4(0.0f, 1.0f, 0.0f, 0.0f);
@@ -22,7 +24,7 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_LEFT_CONDITIONAL = float4(0.0f, 1.0f, 1.0f, 0.0f);
 		
 
-		static const float4 GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE = float4(1.0f, 0.0f, 0.0f, 0.0f);
+		//static const float4 GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE = float4(1.0f, 0.0f, 0.0f, 0.0f);
 
 
 		static const float4 GH_MARKER_TOP_RIGHT_DIFFUSE_R              = float4(1.0f, 0.0f, 0.0f, 0.0f);
@@ -67,23 +69,35 @@ PixelShader =
 		static const float4 GH_MARKER_TOP_RIGHT_CLOTHING_7_B = float4(50.0f, 0.0f, 50.0f, 0.0f)/255.0f;
 		
 
-		static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING = float4(1.0f, 0.0f, 0.0f, 0.0f);
-		static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY       = float4(0.0f, 1.0f, 0.0f, 0.0f);
+		//static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING = float4(1.0f, 0.0f, 0.0f, 0.0f);
+		//static const float4 GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY       = float4(0.0f, 1.0f, 0.0f, 0.0f);
 		
 
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN = -1.02f;
 		static const float POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX = -0.02f;
 
-		// ENUM: postprocessing effects for portraits
-		static const uint POD_PORTRAIT_POSTPROCESS_NONE  = 1;
-		static const uint POD_PORTRAIT_POSTPROCESS_SMOKE = 2;
+		// ENUM: postprocessing effects for portraits (2d)
+		static const uint POD_PORTRAIT_POSTPROCESS_NONE      = 1;
+		static const uint POD_PORTRAIT_POSTPROCESS_FOGOFWAR  = 2;
+		static const uint POD_PORTRAIT_POSTPROCESS_INVISIBLE = 3;
+		static const uint POD_PORTRAIT_POSTPROCESS_SMOKE     = 4;
+		static const uint POD_PORTRAIT_POSTPROCESS_FIRE      = 5;
 		// END ENUM
 
-		// ENUM: animated shaders for portraits
+		// ENUM: animated shaders for portraits (3d)
 		static const uint POD_PORTRAIT_ANIM_NONE             = 1;
 		static const uint POD_PORTRAIT_ANIM_CONCENTRIC_METAL = 2;
 		static const uint POD_PORTRAIT_ANIM_VERTICAL_SHINIES = 3;
 		// END ENUM
+
+		static const float POD_GENE_WEIGHT_POSTPROCESS_FOGOFWAR  = 0.1f;
+		static const float POD_GENE_WEIGHT_POSTPROCESS_INVISIBLE = 0.2f;
+		static const float POD_GENE_WEIGHT_POSTPROCESS_SMOKE     = 0.3f;
+		static const float POD_GENE_WEIGHT_POSTPROCESS_FIRE      = 0.4f;
+
+		static const float POD_GENE_WEIGHT_CONDITIONAL_IGNORECLOTHING = 0.1f;
+		static const float POD_GENE_WEIGHT_CONDITIONAL_CLOTHINGONLY   = 0.2f;
+		static const float POD_GENE_WEIGHT_CONDITIONAL_JURATA         = 0.3f;
 
 		//
 		// Types
@@ -100,6 +114,8 @@ PixelShader =
 		struct GH_SPortraitEffect
 		{
 			bool   isEnabled;
+			float  ColorLerp;
+			float  PropertiesLerp;
 			uint   Postprocess;
 			uint   AnimType;
 			float  AnimValue;
@@ -119,6 +135,9 @@ PixelShader =
 			GH_SPortraitEffect Effect;
 
 			Effect.isEnabled = true;
+
+			Effect.ColorLerp      = 1.0f;
+			Effect.PropertiesLerp = 1.0f;
 
 			Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_NONE;
 
