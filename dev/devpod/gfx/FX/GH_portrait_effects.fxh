@@ -19,13 +19,35 @@ PixelShader =
 		{
 			if (PortraitEffect.isEnabled)
 			{
-				if ( PortraitEffect.DiffuseR              != -1.0f ) { Diffuse.r    = PortraitEffect.DiffuseR;              }
-				if ( PortraitEffect.DiffuseG              != -1.0f ) { Diffuse.g    = PortraitEffect.DiffuseG;              }
-				if ( PortraitEffect.DiffuseB              != -1.0f ) { Diffuse.b    = PortraitEffect.DiffuseB;              }
-				if ( PortraitEffect.PropertiesSSS         != -1.0f ) { Properties.r = PortraitEffect.PropertiesSSS;         }
-				if ( PortraitEffect.PropertiesSpecularity != -1.0f ) { Properties.g = PortraitEffect.PropertiesSpecularity; }
-				if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
-				if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
+				if ( PortraitEffect.DiffuseR != -1.0f ) {
+					Diffuse.r = lerp(Diffuse.r, PortraitEffect.DiffuseR, PortraitEffect.ColorLerp );
+				}
+				if ( PortraitEffect.DiffuseG != -1.0f ) {
+					Diffuse.g = lerp(Diffuse.g, PortraitEffect.DiffuseG, PortraitEffect.ColorLerp );
+				}
+				if ( PortraitEffect.DiffuseB != -1.0f ) {
+					Diffuse.b = lerp(Diffuse.b, PortraitEffect.DiffuseB, PortraitEffect.ColorLerp );
+				}
+				if ( PortraitEffect.PropertiesSSS != -1.0f ) {
+					Properties.r = lerp(Properties.r, PortraitEffect.PropertiesSSS, PortraitEffect.PropertiesLerp );
+				}
+				if ( PortraitEffect.PropertiesSpecularity != -1.0f ) {
+					Properties.g = lerp(Properties.g, PortraitEffect.PropertiesSpecularity, PortraitEffect.PropertiesLerp );
+				}
+				if ( PortraitEffect.PropertiesMetalness != -1.0f ) {
+					Properties.b = lerp(Properties.b, PortraitEffect.PropertiesMetalness, PortraitEffect.PropertiesLerp );
+				}
+				if ( PortraitEffect.PropertiesRoughness != -1.0f ) {
+					Properties.a = lerp(Properties.a, PortraitEffect.PropertiesRoughness, PortraitEffect.PropertiesLerp );
+				}
+
+				// if ( PortraitEffect.DiffuseR              != -1.0f ) { Diffuse.r    = PortraitEffect.DiffuseR;              }
+				// if ( PortraitEffect.DiffuseG              != -1.0f ) { Diffuse.g    = PortraitEffect.DiffuseG;              }
+				// if ( PortraitEffect.DiffuseB              != -1.0f ) { Diffuse.b    = PortraitEffect.DiffuseB;              }
+				// if ( PortraitEffect.PropertiesSSS         != -1.0f ) { Properties.r = PortraitEffect.PropertiesSSS;         }
+				// if ( PortraitEffect.PropertiesSpecularity != -1.0f ) { Properties.g = PortraitEffect.PropertiesSpecularity; }
+				// if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
+				// if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
 
 				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
 					// the value of the gene controls animation speed
@@ -52,6 +74,14 @@ PixelShader =
 		{
 			if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_SMOKE ) {
 				Out.Color.r += POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+			}
+			else if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_FOGOFWAR ) {
+				Out.Color = float4(0.0f, 0.0f, 0.0f, Out.Color.a / 2.0f);
+				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+			}
+			else if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_INVISIBLE ) {
+				Out.Color.a = 0.0f;
 				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 			}
 		}
@@ -84,6 +114,11 @@ PixelShader =
 		//
 		// Service
 		//
+
+		bool POD_GeneWeightEquals(float GeneToCheck, float TargetWeight)
+		{
+			return abs(GeneToCheck - TargetWeight) <= POD_PORTRAIT_GENE_CHECK_TOLERANCE;
+		}
 
 		bool GH_MarkerTexelEquals(float4 MarkerTexel0, float4 MarkerTexel1)
 		{
@@ -204,9 +239,22 @@ PixelShader =
 					}
 				}
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_POSTPROCESS)) {
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE)) {
+					float PostprocessGeneWeight = Data._Weight;
+					if (POD_GeneWeightEquals(PostprocessGeneWeight, POD_GENE_WEIGHT_POSTPROCESS_FOGOFWAR)) {
+						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_FOGOFWAR;
+					}
+					else if (POD_GeneWeightEquals(PostprocessGeneWeight, POD_GENE_WEIGHT_POSTPROCESS_INVISIBLE)) {
+						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_INVISIBLE;
+					}
+					else if (POD_GeneWeightEquals(PostprocessGeneWeight, POD_GENE_WEIGHT_POSTPROCESS_SMOKE)) {
 						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_SMOKE;
 					}
+					else if (POD_GeneWeightEquals(PostprocessGeneWeight, POD_GENE_WEIGHT_POSTPROCESS_FIRE)) {
+						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_FIRE;
+					}
+					/*if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE)) {
+						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_SMOKE;
+					}*/
 				}
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_CLOTHING)) {
 					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_R)) {
@@ -275,12 +323,23 @@ PixelShader =
 				}
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_CONDITIONAL))
 				{
-					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING)) {
+					float ConditionalGeneWeight = Data._Weight;
+					if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_IGNORECLOTHING)) {
+						Effect.isEnabled = !isAttachment;
+					}
+					else if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_CLOTHINGONLY)) {
+						Effect.isEnabled = isAttachment;
+					}
+					else if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_JURATA)) {
+						Effect.isEnabled = isSkin;
+						Effect.ColorLerp = 0.4f;
+					}
+					/*if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING)) {
 						Effect.isEnabled = !isAttachment;
 					}
 					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY)) {
 						Effect.isEnabled = isSkin;
-					}
+					}*/
 				}
 			}
 
