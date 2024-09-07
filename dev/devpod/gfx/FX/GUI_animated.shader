@@ -1286,6 +1286,9 @@ PixelShader =
 				//get coords and direction
 				uv = uv - 0.5;
 				uv.y *= TextureSize.y/TextureSize.x;
+				#ifdef EVENT
+				uv.x *= 1.4;
+				#endif
 				float3 dir=float3(uv*zoom,1.);
 				float time=GuiTime*speed+.25;
 
@@ -1343,9 +1346,11 @@ PixelShader =
 				float alpha = SampleImageSprite(Texture,Input.UV0).a;
 
 				//vignette
+				#ifndef EVENT
 				float vig = 1.0-length(uv);
 				C.rgb = lerp(C.rgb,C.rgb*float3(vig,vig,vig),0.8);
 				alpha = lerp(alpha,alpha*vig,0.6);
+				#endif
 				return float4(C.rgb, alpha);
 			}
 		]]
@@ -1744,4 +1749,19 @@ Effect DeepUmbraDisabled
 	PixelShader = "PS_DeepUmbra"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect DeepUmbraEvent
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
+	
+	Defines = { "EVENT" }
+}
+Effect DeepUmbraEventDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
+	
+	Defines = { "EVENT" "DISABLED" }
 }
