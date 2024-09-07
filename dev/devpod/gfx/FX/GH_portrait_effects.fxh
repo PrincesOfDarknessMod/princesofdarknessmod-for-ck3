@@ -70,6 +70,26 @@ PixelShader =
 			}
 		}
 
+		void POD_AdjustPortraitNormals(in GH_SPortraitEffect PortraitEffect, in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float3 Normal)
+		{
+			if ( PortraitEffect.isEnabled ) {
+				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
+					// the value of the gene controls animation speed
+					float iTime = GuiTime * 1.2 / PortraitEffect.AnimValue;
+
+					float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
+					float pulseDepth  = (sin( adjustedDepth - iTime ) - 1.0);
+					pulseDepth -= 0.1 - (pulseDepth * 0.1);
+
+					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
+					float pulseHeight = (sin( adjustedHeight + iTime ) + 3.0) / 4.0; // value between 0.5 and 1.0
+
+					float3 Normal2 = normalize( float3(Normal.x, Normal.y, pulseDepth) );
+					Normal = normalize(lerp(Normal,Normal2,pulseHeight));
+				}
+			}
+		}
+
 		void POD_RemapColorsForPostEffect(inout PS_COLOR_SSAO Out, in GH_SPortraitEffect PortraitEffect)
 		{
 			if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_SMOKE ) {
