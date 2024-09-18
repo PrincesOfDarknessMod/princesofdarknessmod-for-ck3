@@ -1,10 +1,33 @@
-﻿##################
+﻿#############
+# Debugging #
+#############
+POD_umbra_adventure_edit_effect = {
+	var:umbra_adventure = {
+		set_variable = {
+			name = $VAR$
+			value = {
+				value = var:$VAR$
+				add = $DELTA$
+			}
+		}
+	}
+
+	save_temporary_scope_value_as = {
+		name = $VAR$
+		value = var:umbra_adventure.var:$VAR$
+	}
+}
+
+##################
 # Map Generation #
 ##################
 # TODO: More efficient to get by index but cut down on number of stories by doing it this way
 # Need to see if performance is bad here
 POD_umbra_adventure_get_node_by_row_and_column = {
-	clear_saved_scope = $SAVE_AS$
+	if = {
+		limit = { exists = scope:$SAVE_AS$ }
+		clear_saved_scope = $SAVE_AS$
+	}
 	$MAP$ = {
 		every_in_list = {
 			variable = nodes
@@ -71,7 +94,7 @@ POD_umbra_adventure_create_node = {
 		value = {
 			value = { 0 1 }
 			multiply = {
-				value = scope:quadrant_size_x
+				value = scope:quadrant_size_y
 				subtract = {
 					value = $PADDING$
 					multiply = 2
@@ -108,11 +131,16 @@ POD_umbra_adventure_create_node = {
 #	MAP = the node map
 #	ROWS = the number of rows in the map
 #	COLUMNS = the number of columns in the map
-#	SAVE_AS = name of the saved list (NOT a variable list)
+#	SAVE_AS = name of the saved local variable list
 POD_umbra_adventure_get_neighbors = {
-	saved_scope_value_as = {
-		name = current_node
-		value = $NODE$
+	if = {
+		limit = {
+			has_local_variable_list = $SAVE_AS$
+		}
+		clear_local_variable_list = $SAVE_AS$
+	}
+	$NODE$ = {
+		save_scope_as = current_node
 	}
 	save_scope_value_as = {
 		name = row_idx
@@ -127,7 +155,6 @@ POD_umbra_adventure_get_neighbors = {
 		value = {
 			value = scope:current_node.var:row
 			add = 2
-			max = $ROWS$
 		}
 	}
 	save_scope_value_as = {
@@ -135,7 +162,6 @@ POD_umbra_adventure_get_neighbors = {
 		value = {
 			value = scope:current_node.var:column
 			add = 2
-			max = $COLUMNS$
 		}
 	}
 	while = {
@@ -167,8 +193,9 @@ POD_umbra_adventure_get_neighbors = {
 						scope:neighbor_node != scope:current_node
 					}
 				}
-				scope:neighbor_node = {
-					add_to_list = $SAVE_AS$
+				add_to_local_variable_list = {
+					name = $SAVE_AS$
+					target = scope:neighbor_node
 				}
 			}
 			POD_increment_scope_value = {
@@ -181,13 +208,37 @@ POD_umbra_adventure_get_neighbors = {
 	}
 }
 
-# POD_umbra_adventure_generate_grid_lines
+# POD_umbra_adventure_generate_neighbor_lines
+#	MAP = the node map
+POD_umbra_adventure_generate_neighbor_lines = {
+	$MAP$ = {
+		every_in_list = {
+			variable = nodes
+			save_scope_as = current_node
+			POD_umbra_adventure_get_neighbors = {
+				NODE = scope:current_node
+				MAP = $MAP$
+				SAVE_AS = neighbors
+			}
+			every_in_local_list = {
+				variable = neighbors
+				# prevent dupes
+				limit = { NOT = { POD_line_exists_between_nodes = { NODE1 = this NODE2 = scope:current_node} } }
+				save_scope_as = neighbor
+				POD_create_line = {
+					MAP = scope:node_map
+					START = scope:current_node
+					END = scope:neighbor
+					SAVE_AS = created_line
+				}
+			}
+		}
+	}
+}
+
+# POD_umbra_adventure_generate_spanning_tree
 #	MAP = the node map
 POD_umbra_adventure_generate_spanning_tree = {
-	save_scope_value_as = {
-		name = idx
-		value = 0
-	}
 	$MAP$ = {
 		ordered_in_list = {
 			variable = nodes
@@ -199,12 +250,18 @@ POD_umbra_adventure_generate_spanning_tree = {
 			add_to_temporary_list = spanned_nodes
 		}
 		while = {
-			limit = { variable_list_size = { name = nodes value > scope:idx } }
+			limit = {
+				any_in_list = {
+					variable = nodes
+					NOT = { var:spanned ?= yes }
+				}
+			 }
 			clear_saved_scope = best_distance
-			# Prims Algorithm
-			# Note that this implementation is very likely exponential, which is fine for small, sparse graphs
-			# but which also scales horribly for large dense graphs, use carefully
-			# Find the optimal lowest weight edge to the spanned nodes
+			# Pathfinding
+			# Note that this implementation is exponential due to difficulties in implementing a more efficient
+			# aglorithm with the limited data structures available to us. This will be fine for small graphs,
+			# but for extremely large graphs find a better approach.
+			# Step 1: Find the optimal lowest weight edge to the spanned nodes
 			every_in_list = {
 				list = spanned_nodes
 
@@ -243,8 +300,9 @@ POD_umbra_adventure_generate_spanning_tree = {
 						save_scope_as = candidate_node
 					}
 				}
-				# Recalculate squared distance for spanned_node -> candidate
+				# Step 2: Recalculate squared distance for spanned_node -> candidate
 				POD_node_squared_distance = { NODE1 = scope:spanned_node NODE2 = scope:candidate_node SAVE_AS = spanned_node_to_candidate_distance }
+				# Step 3: Pick this edge as a candidate if it is an improvement on the current best distance
 				if = {
 					limit = { 
 						OR = {
@@ -276,9 +334,6 @@ POD_umbra_adventure_generate_spanning_tree = {
 					value = yes
 				}
 				add_to_temporary_list = spanned_nodes
-			}			
-			POD_increment_scope_value = {
-				SCOPE = idx
 			}
 		}
 	}
@@ -381,14 +436,15 @@ POD_umbra_adventure_generate_grid_lines = {
 # Algorithm:
 #	The map is broken into quandrants of equal size (by the given row and column size)
 # 	Each quadrant has a 50% chance at a node, where x = random(0,quadrant_size_x-padding*2) + padding and y = random(0,quadrant_size_y-padding*2)
-#	Each quadrant with a node gets a line between itself and any adjacent quadrant with a node
-#	Orphan nodes are then connected to their 2 nearest neighbors (TBD on this step, might be distance based if you get a second line)
+#	Run pathfinding to generate a minimum spanning tree to ensure no node is orphaned (guarantees a single path to visit all nodes)
+#	Each quadrant with a node gets a line between itself and any adjacent quadrant with a node (ignoring duplicates)
 # POD_umbra_adventure_generate_map
 #	WIDTH = width of the entire map
 #	HEIGHT = height of the entire map
 #	ROWS = number of rows to subdivide the map
 #	COLUMNS = number of columns to subdivide the map
 #	PADDING = internal padding of the node (to prevent it from being right on the edges of the quadrant)
+#	ICON_SIZE = the icon size to increase padding
 #	SAVE_AS = saved scope of the created map
 POD_umbra_adventure_generate_map = {
 	POD_create_node_map = {
@@ -414,7 +470,7 @@ POD_umbra_adventure_generate_map = {
 				scope:column_idx < $COLUMNS$
 			}
 			random_list = {
-				50 = {
+				2 = {
 					POD_umbra_adventure_create_node = {
 						WIDTH = $WIDTH$
 						HEIGHT = $HEIGHT$
@@ -426,7 +482,7 @@ POD_umbra_adventure_generate_map = {
 						MAP = scope:node_map
 					}
 				}
-				50 = {
+				1 = {
 					# no-op
 				}
 			}
@@ -438,46 +494,12 @@ POD_umbra_adventure_generate_map = {
 			SCOPE = row_idx
 		}
 	}
-	# scope:node_map = {
-	# 	every_in_list = {
-	# 		variable = nodes
-	# 		save_scope_as = current_node
-	# 		POD_umbra_adventure_get_neighbors = {
-	# 			NODE = scope:current_node
-	# 			MAP = scope:node_map
-	# 			ROWS = $ROWS$
-	# 			COLUMNS = $COLUMNS$
-	# 			SAVE_AS = neighbors
-	# 		}
-	# 		every_in_list = {
-	# 			list = neighbors
-	# 			# prevent dupes
-	# 			limit = {
-	# 				has_variable_list = lines
-	# 				NOT = {
-	# 					any_in_list = {
-	# 						variable = lines
-	# 						OR = {
-	# 							var:start_node = scope:current_node
-	# 							var:end_node = scope:current_node
-	# 						}
-	# 					}
-	# 				}
-	# 			}
-	# 			save_scope_as = neighbor
-	# 			POD_create_line = {
-	# 				MAP = scope:node_map
-	# 				START = scope:current_node
-	# 				END = scope:neighbor
-	# 				SAVE_AS = created_line
-	# 			}
-	# 		}
-	# 	}
-	# }
 	POD_umbra_adventure_generate_spanning_tree = {
 		MAP = scope:node_map
 	}
-
+	POD_umbra_adventure_generate_neighbor_lines = {
+		MAP = scope:node_map
+	}
 	POD_umbra_adventure_generate_grid_lines = {
 		WIDTH = $WIDTH$
 		HEIGHT = $HEIGHT$
