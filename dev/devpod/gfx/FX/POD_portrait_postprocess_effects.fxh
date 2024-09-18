@@ -52,6 +52,49 @@ PixelShader =
 			return alpha;
 		}
 
+		// adapted from https://www.shadertoy.com/view/ls2Xzd
+		// there is no good way to make this only apply to specific characters :(
+		// Algorithm found in https://medium.com/community-play-3d/god-rays-whats-that-5a67f26aeac2
+		float4 crepuscular_rays(float2 texCoords, float2 pos) {
+			float decay = 0.92;
+			float density = 1.0;
+			float weight = 0.58767;
+			/// NUM_SAMPLES will describe the rays quality, you can play with
+			const int nsamples = 50;
+
+			float2 tc = texCoords.xy;
+			float2 deltaTexCoord = tc - pos.xy;
+			deltaTexCoord *= (1.0 / float(nsamples) * density);
+			float illuminationDecay = 1.0;
+
+			float4 color = PdxTex2DLod0(MainScene, tc.xy) * float4(0.4,0.4,0.4,0.4);
+
+			// float4 color = PdxTex2DLod0(MainScene, tc.xy);
+			// if ( color.r >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && color.r <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX ) {
+			// 	color.r -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+			// }
+			// color *= float4(0.4,0.4,0.4,0.4);
+			
+			tc += deltaTexCoord * frac( sin(dot(texCoords.xy+frac(GuiTime), float2(12.9898, 78.233))) * 43758.5453 );
+			for (int i = 0; i < nsamples; i++)
+			{
+				tc -= deltaTexCoord;
+				float4 sampl = PdxTex2DLod0(MainScene, tc.xy) * float4(0.4,0.4,0.4,0.4);
+
+				// float4 sampl = PdxTex2DLod0(MainScene, tc.xy);
+				// if ( sampl.r >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && sampl.r <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX ) {
+				// 	sampl.r -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				// }
+				// sampl *= float4(0.4,0.4,0.4,0.4);
+
+				sampl *= illuminationDecay * weight;
+				color += sampl;
+				illuminationDecay *= decay;
+			}
+			
+			return color;
+		}
+
 		void POD_TryApplyPostEffect(inout float4 Color, in float2 uv)
 		{
 			// Smoke
@@ -64,6 +107,7 @@ PixelShader =
 				}
 				Color.a *= POD_GetSmokeAlpha(uv);
 			}
+			//Color = crepuscular_rays(uv, float2(0.5,0.5));
 		}
 	]]
 }
