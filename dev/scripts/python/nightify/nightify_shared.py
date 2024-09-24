@@ -271,7 +271,7 @@ nightify_illustrations = {
 	"event_scenes/desert_settlement.dds":				"event_scenes/fp4_legendary_oasis_night.dds",
 	"event_scenes/ep3_adventurer_background.dds":		"event_scenes/market_tribal_night.dds",
 	"event_scenes/ep3_byzantine_throne_room.dds":		"event_scenes/fp3_throneroom_night.dds",
-	"event_scenes/ep3_camp_arid_terrain.dds":			"event_scenes/fp4_legendary_oasis_night.dds",
+	"event_scenes/ep3_camp_arid_terrain.dds":			"event_scenes/genericcamp_night.dds",
 	"event_scenes/ep3_chariots_track.dds":				"event_scenes/fp4_legendary_spring_night.dds",
 	"event_scenes/ep3_city_gate.dds":					"event_scenes/fp2_courtyard_night.dds",
 	"event_scenes/ep3_constantinople.dds":				"event_scenes/bp2_courtyard_night.dds",
