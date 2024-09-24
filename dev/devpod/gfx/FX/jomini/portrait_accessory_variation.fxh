@@ -73,7 +73,7 @@ PixelShader =
 			};
 
 			// CfV (POD)
-			SPatternOutput ApplyPattern( float2 UV, SPatternDesc Desc, float RandomNumber, int MaskIndex, GH_SPortraitEffect PortraitEffect )
+			SPatternOutput ApplyPattern( float2 UV, SPatternDesc Desc, float RandomNumber, int MaskIndex, inout float OpacityMask, GH_SPortraitEffect PortraitEffect )
 			// CfV end
 			{
 				// Rotate and scale around (0.5,0.5)
@@ -121,6 +121,7 @@ PixelShader =
 				PatternOutput._Normal = UnpackDecalNormal( PatternNormalSample, PatternColor.a );
 				PatternOutput._Properties = PatternProperties;
 
+				OpacityMask = min( ( ColorMask[0] + ColorMask[1] + ColorMask[2] + ColorMask[3] ), 1 );
 				return PatternOutput;
 			}
 
@@ -138,13 +139,14 @@ PixelShader =
 				{
 					if( Mask[i] > 0.0f )
 					{
+						float OpacityMask = 0;
 						// CfV (POD)
-						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i, PortraitEffect );
+						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i, OpacityMask, PortraitEffect );
 						// CfV end
 
-						PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, Mask[i] );
-						PatternNormal = lerp( PatternNormal, PatternOutput._Normal.rgb, Mask[i] );
-						PatternProperties = lerp( PatternProperties, PatternOutput._Properties, Mask[i] );
+						PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, Mask[i] * OpacityMask);
+						PatternNormal = lerp( PatternNormal, PatternOutput._Normal.rgb, Mask[i] * OpacityMask);
+						PatternProperties = lerp( PatternProperties, PatternOutput._Properties, Mask[i] * OpacityMask);
 					}
 				}
 
