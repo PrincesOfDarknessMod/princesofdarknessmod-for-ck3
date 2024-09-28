@@ -159,6 +159,11 @@ for bg_index, background in enumerate(results_list):
     if not isinstance(background, list): # if an entry isn't a list it means it's whitespace or a comment
         continue
 
+    # skip religion_interior in ingame.txt since its root scope type isn't character
+    # (leads to errors when using POD_day_background_trigger)
+    if background[0] == "religion_interior":
+        continue
+
     output_sbg_index = -1 # make sure to start at 0 in the loop
 
     for sbg_index, subbackground in enumerate(background[2]): # element 2 of the statement array is the actual block
