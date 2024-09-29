@@ -867,59 +867,6 @@ PixelShader =
 			}
 		]]
 	}
-	MainCode PS_Snow
-	{	
-		Input = "VS_OUTPUT_PDX_GUI"
-		Output = "PDX_COLOR"
-		Code
-		[[
-			// adapted from https://www.shadertoy.com/view/Mdt3Df
-			
-			#define SIZE_MOD 3.5
-
-			PDX_MAIN
-			{
-				float2 uv = Input.UV0;
-				uv.y = 1.0 - uv.y;
-				
-				float2 TextureSize;
-				PdxTex2DSize(Texture, TextureSize);
-
-				float2 coord = float2(uv.x * TextureSize.x, uv.y * TextureSize.y);
-				coord.x *= TextureSize.x / TextureSize.y;
-				float time = GuiTime;
-
-				float snow = 0.0;
-				float random = frac(sin(dot(coord.xy,float2(12.9898,78.233)))* 43758.5453);
-
-				for(int k=0;k<6;k++){
-					for(int i=0;i<12;i++){
-						float cellSize = 2.0 + (float(i)*3.0);
-						float downSpeed = 0.3+(sin(time*0.4+float(k+i*20))+1.0)*0.00008;
-						float2 snowUV = (coord.xy / TextureSize.x)+float2(0.01*sin((time+float(k*6185))*0.6+float(i))*(5.0/float(i)),downSpeed*(time+float(k*1352))*(1.0/float(i)));
-						float2 uvStep = (ceil((snowUV)*cellSize-float2(0.5,0.5))/cellSize);
-						float x = frac(sin(dot(uvStep.xy,float2(12.9898+float(k)*12.0,78.233+float(k)*315.156)))* 43758.5453+float(k)*12.0)-0.5;
-						float y = frac(sin(dot(uvStep.xy,float2(62.2364+float(k)*23.0,94.674+float(k)*95.0)))* 62159.8432+float(k)*12.0)-0.5;
-
-						float randomMagnitude1 = sin(time*2.5)*0.7/cellSize;
-						float randomMagnitude2 = cos(time*2.5)*0.7/cellSize;
-
-						float d = SIZE_MOD*distance((uvStep.xy + float2(x*sin(y),y)*randomMagnitude1 + float2(y,x)*randomMagnitude2),snowUV.xy);
-
-						float omiVal = frac(sin(dot(uvStep.xy,float2(32.4691,94.615)))* 31572.1684);
-						if(omiVal<0.08){
-							float newd = (x+1.0)*0.4*clamp(1.9-d*(15.0+(x*6.3))*(cellSize/1.4),0.0,1.0);
-							snow += newd;
-						}
-					}
-				}
-				
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * snow;
-				float3 col = float3(1.,1.,1.);
-				return float4(col,alpha);
-			}
-		]]
-	}
 	MainCode PS_Fog
 	{	
 		Input = "VS_OUTPUT_PDX_GUI"
@@ -1519,19 +1466,6 @@ Effect BalefireDisabled
 	PixelShader = "PS_Fire"
 	
 	Defines = { "BALEFIRE" "DISABLED" }
-}
-
-Effect Snow
-{
-	VertexShader = "VS_Default"
-	PixelShader = "PS_Snow"
-}
-Effect SnowDisabled
-{
-	VertexShader = "VS_Default"
-	PixelShader = "PS_Snow"
-	
-	Defines = { "DISABLED" }
 }
 
 Effect Fog
