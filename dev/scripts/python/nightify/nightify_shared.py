@@ -1,5 +1,7 @@
 
-night_trigger = "POD_day_background_trigger = no"
+night_trigger = "POD_use_nighttime_event_bg = yes"
+night_trigger_activity = "POD_use_nighttime_event_bg_activity = yes"
+night_trigger_scripted = "POD_day_background_trigger = no"
 
 bg_path_prefix = "gfx/interface/illustrations/"
 video_path_prefix = "gfx/interface/video/"
