@@ -145,7 +145,9 @@ unknown_bgs  = []
 unknown_environments = []
 
 if args.activity:
-    night_trigger = "scope:host = { " + nightify_shared.night_trigger + " }"
+    night_trigger = nightify_shared.night_trigger_activity
+elif args.scripted:
+    night_trigger = nightify_shared.night_trigger_scripted
 else:
     night_trigger = nightify_shared.night_trigger
 
