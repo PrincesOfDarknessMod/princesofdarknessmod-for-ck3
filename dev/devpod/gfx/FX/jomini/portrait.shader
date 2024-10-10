@@ -1098,6 +1098,15 @@ Effect portrait_hair_alpha
 	Defines = { "PDX_MESH_BLENDSHAPES" }
 }
 
+Effect portrait_hair_decrease_specular_light_alpha
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_hair"
+	BlendState = "hair_alpha_blend"
+	DepthStencilState = "hair_alpha_blend"
+	Defines = { "PDX_MESH_BLENDSHAPES" "PDX_DECREASE_SPECULAR_LIGHT" }
+}
+
 Effect portrait_hair_opaque
 {
 	VertexShader = "VS_standard"
