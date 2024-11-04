@@ -1,8 +1,8 @@
-version="1.13.1.2"
+version="1.14.0.1"
 tags={
 	"Total Conversion"
 }
 name="Development Princes of Darkness"
 picture="thumbnail.png"
-supported_version="1.13.*"
+supported_version="1.14.*"
 path="mod/devpod"
