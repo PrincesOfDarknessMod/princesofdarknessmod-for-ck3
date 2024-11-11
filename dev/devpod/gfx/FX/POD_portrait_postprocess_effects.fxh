@@ -8,6 +8,8 @@ PixelShader =
 	Code [[
 		// adapted from https://www.shadertoy.com/view/7tsfWS
 		
+		// TODO: put hash/noise/FBM/domainwarp functions in shared shader file
+		
 		float POD_SmokeRand(float2 n) {
 			return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
 		}
@@ -64,6 +66,7 @@ PixelShader =
 				}
 				Color.a *= POD_GetSmokeAlpha(uv);
 			}
+			//Color = crepuscular_rays(uv, float2(0.5,0.5));
 		}
 	]]
 }

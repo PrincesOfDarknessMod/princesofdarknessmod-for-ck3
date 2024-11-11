@@ -41,14 +41,6 @@ PixelShader =
 					Properties.a = lerp(Properties.a, PortraitEffect.PropertiesRoughness, PortraitEffect.PropertiesLerp );
 				}
 
-				// if ( PortraitEffect.DiffuseR              != -1.0f ) { Diffuse.r    = PortraitEffect.DiffuseR;              }
-				// if ( PortraitEffect.DiffuseG              != -1.0f ) { Diffuse.g    = PortraitEffect.DiffuseG;              }
-				// if ( PortraitEffect.DiffuseB              != -1.0f ) { Diffuse.b    = PortraitEffect.DiffuseB;              }
-				// if ( PortraitEffect.PropertiesSSS         != -1.0f ) { Properties.r = PortraitEffect.PropertiesSSS;         }
-				// if ( PortraitEffect.PropertiesSpecularity != -1.0f ) { Properties.g = PortraitEffect.PropertiesSpecularity; }
-				// if ( PortraitEffect.PropertiesMetalness   != -1.0f ) { Properties.b = PortraitEffect.PropertiesMetalness;   }
-				// if ( PortraitEffect.PropertiesRoughness   != -1.0f ) { Properties.a = PortraitEffect.PropertiesRoughness;   }
-
 				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
 					// the value of the gene controls animation speed
 					float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
@@ -66,6 +58,26 @@ PixelShader =
 					float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
 
 					Properties.g *= pulseHeight * 2.0; // specularity
+				}
+			}
+		}
+
+		void POD_AdjustPortraitNormals(in GH_SPortraitEffect PortraitEffect, in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float3 Normal)
+		{
+			if ( PortraitEffect.isEnabled ) {
+				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
+					// the value of the gene controls animation speed
+					float iTime = GuiTime * 1.2 / PortraitEffect.AnimValue;
+
+					float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
+					float pulseDepth  = (sin( adjustedDepth - iTime ) - 1.0);
+					pulseDepth -= 0.1 - (pulseDepth * 0.1);
+
+					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
+					float pulseHeight = (sin( adjustedHeight + iTime ) + 3.0) / 4.0; // value between 0.5 and 1.0
+
+					float3 Normal2 = normalize( float3(Normal.x, Normal.y, pulseDepth) );
+					Normal = normalize(lerp(Normal,Normal2,pulseHeight));
 				}
 			}
 		}

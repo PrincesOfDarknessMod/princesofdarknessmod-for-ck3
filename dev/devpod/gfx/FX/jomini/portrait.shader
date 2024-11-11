@@ -11,6 +11,8 @@ Includes = {
 	"jomini/portrait_coa.fxh"
 	"jomini/portrait_decals.fxh"
 	"jomini/portrait_user_data.fxh"
+	"jomini/portrait_hair_lighting.fxh"
+	"jomini/portrait_lighting.fxh"
 	"constants.fxh"
 	# CfV (godherja)
 	"GH_portrait_effects.fxh"
@@ -101,6 +103,15 @@ PixelShader =
 		SampleModeU = "Clamp"
 		SampleModeV = "Clamp"
 	}
+	TextureSampler AnisotropyHairMap
+	{
+		Index = 13
+		MagFilter = "Linear"
+		MinFilter = "Linear"
+		MipFilter = "Linear"
+		SampleModeU = "Wrap"
+		SampleModeV = "Wrap"
+	}
 	TextureSampler ShadowTexture
 	{
 		Ref = PdxShadowmap
@@ -189,14 +200,6 @@ ConstantBuffer( 5 )
 	float		HasNormalMapOverride;
 	float		HasPropertiesMapOverride;
 };
-Code
-[[
-	#define LIGHT_COUNT 3
-	#define LIGHT_TYPE_NONE 0
-	#define LIGHT_TYPE_DIRECTIONAL 1
-	#define LIGHT_TYPE_SPOTLIGHT 2
-	#define LIGHT_TYPE_POINTLIGHT 3
-]]
 
 VertexShader = {
 
@@ -217,8 +220,8 @@ VertexShader = {
 			return Out;
 		}
 	]]
+
 	
-		
 	MainCode VS_standard
 	{
 		Input = "VS_INPUT_PDXMESHSTANDARD"
@@ -239,141 +242,16 @@ PixelShader =
 {
 	Code
 	[[
-		struct SPortraitPointLight
+		void DebugReturn( inout float3 Out, SMaterialProperties MaterialProps, SLightingProperties LightingProps, PdxTextureSamplerCube EnvironmentMap, float3 ScatteringColor, float ScatteringMask, float3 DiffuseTranslucency )
 		{
-			float3 _Position;
-			float _Radius;
-			float3 _Color;
-			float _Falloff;
-		};
-		struct SPortraitSpotLight
-		{
-			SPortraitPointLight	_PointLight;
-			float3 _ConeDirection;
-			float _ConeInnerCosAngle;
-			float _ConeOuterCosAngle;
-		};
-
-		SPortraitPointLight GetPortraitPointLight( float4 PositionAndRadius, float4 ColorAndFalloff )
-		{
-			SPortraitPointLight PointLight;
-			PointLight._Position = PositionAndRadius.xyz;
-			PointLight._Radius = PositionAndRadius.w;
-			PointLight._Color = ColorAndFalloff.xyz;
-			PointLight._Falloff = ColorAndFalloff.w;
-			return PointLight;
-		}
-	
-		SPortraitSpotLight GetPortraitSpotLight( float4 PositionAndRadius, float4 ColorAndFalloff, float3 Direction, float InnerCosAngle, float OuterCosAngle )
-		{
-			SPortraitSpotLight Ret;
-			Ret._PointLight = GetPortraitPointLight( PositionAndRadius, ColorAndFalloff );
-			Ret._ConeDirection = Direction;
-			Ret._ConeInnerCosAngle = InnerCosAngle;
-			Ret._ConeOuterCosAngle = OuterCosAngle;
-			return Ret;
-		}
-		
-		void GGXPointLight( SPortraitPointLight Pointlight, float3 WorldSpacePos, float ShadowTerm, SMaterialProperties MaterialProps, inout float3 DiffuseLightOut, inout float3 SpecularLightOut )
-		{
-			float3 PosToLight = Pointlight._Position - WorldSpacePos;
-			float DistanceToLight = length( PosToLight );
-
-			float LightIntensity = CalcLightFalloff( Pointlight._Radius, DistanceToLight, Pointlight._Falloff );
-			if ( LightIntensity > 0.0 )
-			{
-				SLightingProperties LightingProps;
-				LightingProps._ToCameraDir = normalize( CameraPosition - WorldSpacePos );
-				LightingProps._ToLightDir = PosToLight / DistanceToLight;
-				LightingProps._LightIntensity = Pointlight._Color * LightIntensity;
-				LightingProps._ShadowTerm = ShadowTerm;
-				LightingProps._CubemapIntensity = 0.0;
-				LightingProps._CubemapYRotation = Float4x4Identity();
-				
-				float3 DiffuseLight;
-				float3 SpecularLight;
-				CalculateLightingFromLight( MaterialProps, LightingProps, DiffuseLight, SpecularLight );
-				DiffuseLightOut += DiffuseLight;
-				SpecularLightOut += SpecularLight;
-			}
-		}
-		
-		void GGXSpotLight( SPortraitSpotLight Spot, float3 WorldSpacePos, float ShadowTerm, SMaterialProperties MaterialProps, inout float3 DiffuseLightOut, inout float3 SpecularLightOut )
-		{
-			float3 	PosToLight = Spot._PointLight._Position - WorldSpacePos;
-			float 	DistanceToLight = length(PosToLight);
-			float3	ToLightDir = PosToLight / DistanceToLight;
-			
-			float LightIntensity = CalcLightFalloff( Spot._PointLight._Radius, DistanceToLight, Spot._PointLight._Falloff );
-			float PdotL = dot( -ToLightDir, Spot._ConeDirection );
-			LightIntensity *= smoothstep( Spot._ConeOuterCosAngle, Spot._ConeInnerCosAngle, PdotL );
-			if ( LightIntensity > 0.0 )
-			{
-				SLightingProperties LightingProps;
-				LightingProps._ToCameraDir = normalize( CameraPosition - WorldSpacePos );
-				LightingProps._ToLightDir = ToLightDir;
-				LightingProps._LightIntensity = Spot._PointLight._Color * LightIntensity;
-				LightingProps._ShadowTerm = ShadowTerm;
-				LightingProps._CubemapIntensity = 0.0;
-				LightingProps._CubemapYRotation = Float4x4Identity();
-				
-				float3 DiffuseLight;
-				float3 SpecularLight;
-				CalculateLightingFromLight( MaterialProps, LightingProps, DiffuseLight, SpecularLight );
-				DiffuseLightOut += DiffuseLight;
-				SpecularLightOut += SpecularLight;
-			}
-		}
-
-		void CalculatePortraitLights( float3 WorldSpacePos, float ShadowTerm, SMaterialProperties MaterialProps, inout float3 DiffuseLightOut, inout float3 SpecularLightOut )
-		{
-			for( int i = 0; i < LIGHT_COUNT; ++i )
-			{
-				float3 DiffuseLight = vec3(0);
-				float3 SpecularLight = vec3(0);
-				
-				//Scale color by ShadowTerm
-				float4 Color_Fallof = Light_Color_Falloff[i];
-				float LightShadowTerm = Light_InnerCone_OuterCone_AffectedByShadows[i].z > 0.5 ? ShadowTerm : 1.0;
-				
-				if( Light_Direction_Type[i].w == LIGHT_TYPE_SPOTLIGHT )
-				{
-					float InnerAngle = Light_InnerCone_OuterCone_AffectedByShadows[i].x;
-					float OuterAngle = Light_InnerCone_OuterCone_AffectedByShadows[i].y;
-					SPortraitSpotLight Spot = GetPortraitSpotLight( Light_Position_Radius[i], Color_Fallof, Light_Direction_Type[i].xyz, InnerAngle, OuterAngle );
-					GGXSpotLight( Spot, WorldSpacePos, LightShadowTerm, MaterialProps, DiffuseLight, SpecularLight );
-				}
-				else if( Light_Direction_Type[i].w == LIGHT_TYPE_POINTLIGHT )
-				{
-					SPortraitPointLight Light = GetPortraitPointLight( Light_Position_Radius[i], Color_Fallof );
-					GGXPointLight( Light, WorldSpacePos, LightShadowTerm, MaterialProps, DiffuseLight, SpecularLight );
-				}
-				else if( Light_Direction_Type[i].w == LIGHT_TYPE_DIRECTIONAL )
-				{
-					SLightingProperties LightingProps;
-					LightingProps._ToCameraDir = normalize( CameraPosition - WorldSpacePos );
-					LightingProps._ToLightDir = -Light_Direction_Type[i].xyz;
-					LightingProps._LightIntensity = Color_Fallof.rgb;
-					LightingProps._ShadowTerm = LightShadowTerm;
-					LightingProps._CubemapIntensity = 0.0;
-					LightingProps._CubemapYRotation = Float4x4Identity();
-
-					CalculateLightingFromLight( MaterialProps, LightingProps, DiffuseLight, SpecularLight );
-				}
-				
-				DiffuseLightOut += DiffuseLight;
-				SpecularLightOut += SpecularLight;
-			}
-		}
-
-		void DebugReturn( inout float3 Out, SMaterialProperties MaterialProps, SLightingProperties LightingProps, PdxTextureSamplerCube EnvironmentMap, float3 SssColor, float SssMask )
-		{
-			#if defined(PDX_DEBUG_PORTRAIT_SSS_MASK)
-			Out = SssMask;
-			#elif defined(PDX_DEBUG_PORTRAIT_SSS_COLOR)
-			Out = SssColor;
+			#if defined( PDX_DEBUG_PORTRAIT_SCATTERING_MASK )
+				Out = ScatteringMask;
+			#elif defined( PDX_DEBUG_PORTRAIT_SCATTERING_COLOR )
+				Out = ScatteringColor;
+			#elif defined( PDX_DEBUG_TRANSLUCENCY )
+				Out = DiffuseTranslucency;
 			#else
-			DebugReturn( Out, MaterialProps, LightingProps, EnvironmentMap );
+				DebugReturn( Out, MaterialProps, LightingProps, EnvironmentMap );
 			#endif
 		}
 
@@ -388,6 +266,10 @@ PixelShader =
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
 			float3 Normal = normalize( mul( NormalSample, TBN ) );
+
+			// CfV (POD)
+			POD_AdjustPortraitNormals(PortraitEffect, Input, Normal);
+			// CfV end
 			
 			SMaterialProperties MaterialProps = GetMaterialProperties( Diffuse.rgb, Normal, saturate( Properties.a ), Properties.g, Properties.b );
 			SLightingProperties LightingProps = GetSunLightingProperties( Input.WorldSpacePos, ShadowTexture );
@@ -406,13 +288,30 @@ PixelShader =
 				ApplyClothFresnel( Input, CameraPosition, Normal, Color );
 			#endif
 			
-			float3 SssColor = vec3(0.0f);
-			float SssMask = Properties.r;
-			#ifdef FAKE_SSS_EMISSIVE
+			float3 ScatteringColor = vec3(0.0f);
+			float ScatteringMask = Properties.r;
+			#ifdef FAKE_SCATTERING_EMISSIVE
 				float3 SkinColor = RGBtoHSV( Diffuse.rgb );
 				SkinColor.z = 1.0f;
-				SssColor = HSVtoRGB(SkinColor) * SssMask * 0.5f * MaterialProps._DiffuseColor;
-				Color += SssColor;
+				ScatteringColor = HSVtoRGB(SkinColor) * ScatteringMask * 0.5f * MaterialProps._DiffuseColor;
+				Color += ScatteringColor;
+			#endif
+
+			float3 DiffuseTranslucency = vec3( 0.0f );
+			#ifdef TRANSLUCENCY
+				STranslucencyProperties TranslucencyProps;
+				#if defined( SKIN_SCATTERING )
+					float3 SkinColor = RGBtoHSV( Diffuse.rgb );
+					SkinColor.z = 1.0f;
+					ScatteringColor = HSVtoRGB( SkinColor ) * MaterialProps._DiffuseColor;
+					TranslucencyProps = GetTranslucencyProperties( 0.3f, 2.0f, 1.0f, 1.0f, 0.2f, ScatteringMask, ScatteringColor );
+				#elif defined( THICKNESS_MAP )
+					TranslucencyProps = GetTranslucencyProperties( 0.3f, 1.5f, 1.0f, 1.0f, 0.2f, Properties.r, Diffuse.rgb );
+				#else
+					TranslucencyProps = GetTranslucencyProperties( 0.3f, 1.5f, 1.0f, 1.0f, 0.2f, 0.5f, Diffuse.rgb );
+				#endif
+				DiffuseTranslucency = CalculatePortraitTranslucentLights( Input.WorldSpacePos, LightingProps._ShadowTerm, MaterialProps, TranslucencyProps, DiffuseIBL );
+				Color += DiffuseTranslucency;
 			#endif
 			
 			// CfV - EK2 Use for emissive in properties RED channel.
@@ -422,10 +321,10 @@ PixelShader =
 				float3 emissiveColor = Diffuse.rgb * EmissiveStrength;
 				Color = lerp(Color, emissiveColor, emissiveMask);
 			#endif
-
+			
 			Color = ApplyDistanceFog( Color, Input.WorldSpacePos );
 			
-			DebugReturn( Color, MaterialProps, LightingProps, EnvironmentMap, SssColor, SssMask );			
+			DebugReturn( Color, MaterialProps, LightingProps, EnvironmentMap, ScatteringColor, ScatteringMask, DiffuseTranslucency );
 			return Color;
 		}
 
@@ -507,18 +406,17 @@ PixelShader =
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true);
 				// CfV end
-
+				
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
 				
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorSkin.rgb, Input.InstanceIndex, ColorMaskStrength );
 				
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, PreSkinColorDecalCount, DecalCount );
-
+				
 				// CfV (godherja)
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
-				
 				Out.Color = float4( Color, 1.0f );
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
@@ -557,7 +455,6 @@ PixelShader =
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
-
 				Out.Color = float4( Color, 1.0f );
 				
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
@@ -566,7 +463,7 @@ PixelShader =
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
 				// CfV end
-
+	
 				return Out;
 			}
 		]]
@@ -583,22 +480,24 @@ PixelShader =
 				PS_COLOR_SSAO Out;
 
 				float2 UV0 = Input.UV0;
-				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );								
+				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );
 				float4 Properties = PdxTex2D( PropertiesMap, UV0 );
-
+				
 				#ifdef DOUBLE_SIDED_ENABLED
 					float4 NormalSampleRaw = PdxTex2D( NormalMap, UV0 );
 					float3 NormalSample = UnpackRRxGNormal( NormalSampleRaw ) * ( PDX_IsFrontFace ? 1 : -1 );
 				#else
-				float3 NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );		
-#endif
+					float3 NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );
+				#endif
 
-				Properties.r = 1.0; // wipe this clean now, ready to be modified later
+				#if defined( VARIATIONS_ENABLED ) || defined ( COA_ENABLED )
+					Properties.r = 1.0; // wipe this clean now, ready to be modified later
+				#endif
 				
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false);
 				// CfV end
-				
+
 				#ifdef VARIATIONS_ENABLED
 					// CfV (POD)
 					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, PortraitEffect );
@@ -608,6 +507,8 @@ PixelShader =
 					ApplyCoa( Input, Diffuse, CoaColor1, CoaColor2, CoaColor3, CoaOffsetAndScale.xy, CoaOffsetAndScale.zw, CoaTexture, Properties.r );
 				#endif
 
+
+				
 				// CfV (godherja)
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
 				// CfV end
@@ -734,7 +635,120 @@ PixelShader =
 		]]
 	}
 
-		# CfV HAIR-BLEND
+	MainCode PS_anisotropic_hair
+	{
+		Input = "VS_OUTPUT_PDXMESHPORTRAIT"
+		Output = "PS_COLOR_SSAO"
+		Code
+		[[
+			#ifndef DIFFUSE_UV_SET
+			#define DIFFUSE_UV_SET Input.UV0
+			#endif
+			#ifndef NORMAL_UV_SET
+			#define NORMAL_UV_SET Input.UV0
+			#endif
+			#ifndef PROPERTIES_UV_SET
+			#define PROPERTIES_UV_SET Input.UV0
+			#endif	
+			#ifndef ANISOTROPY_UV_SET
+			#define ANISOTROPY_UV_SET Input.UV0
+			#endif
+			#ifndef FLOWMAP_UV_SET
+			#define FLOWMAP_UV_SET Input.UV0
+			#endif
+			
+			SCharacterHairSettings GetCharacterHairSettings()
+			{
+				SCharacterHairSettings HairSettings;
+				HairSettings._EdgeColor = float4( vPaletteColorHair.rgb * 0.1f, 1.0f );
+				HairSettings._StrandDirection = float3( 0.0f, -1.0f, 0.0f );
+				HairSettings._PrimaryHighlightShift = -0.5f;
+				HairSettings._AnisotropyShiftScale = float2( 1.0f, 1.0f );
+				HairSettings._AnisotropySmoothnessMin = 0.0f;
+				HairSettings._AnisotropySmoothnessMax = 1.0f;
+				HairSettings._SecondaryHighlightShift = -0.9f;
+				HairSettings._NormalStrength = 1.0f;
+				float SpecularPowerScale = ( vPaletteColorHair.r + vPaletteColorHair.g + vPaletteColorHair.b ) / 3;
+				SpecularPowerScale = lerp( 1.0f ,3.0f , SpecularPowerScale );
+				HairSettings._SpecularPower = 5.0f * SpecularPowerScale;
+				HairSettings._AlphaCutoffTreshold = 0.5f;
+				HairSettings._RoughnessMin = 0.0f;
+				HairSettings._RoughnessMax = 1.0f;
+				return HairSettings;
+			}
+
+			PDX_MAIN
+			{
+				float4 NormalSampleRaw = PdxTex2D( NormalMap, NORMAL_UV_SET );
+				float3 UnpackedNormal = UnpackRRxGNormal( NormalSampleRaw ) * ( PDX_IsFrontFace ? 1 : -1 );
+				float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
+				float3 Normal = normalize( mul( UnpackedNormal, TBN ) );
+
+				SCharacterHairSettings HairSettings = GetCharacterHairSettings();
+
+				float4 Diffuse = PdxTex2D( DiffuseMap, DIFFUSE_UV_SET );
+
+				float3 HairBaseDiffuse;
+
+				float ColorMaskStrength = NormalSampleRaw.b;
+				HairBaseDiffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
+
+				float4 Properties = PdxTex2D( PropertiesMap, PROPERTIES_UV_SET );
+				Properties *= vHairPropertyMult;
+				float AnisotropyShift = PdxTex2D( AnisotropyHairMap, ANISOTROPY_UV_SET * HairSettings._AnisotropyShiftScale ).b;
+				AnisotropyShift = lerp( HairSettings._AnisotropySmoothnessMin, HairSettings._AnisotropySmoothnessMax, AnisotropyShift );
+
+				SMaterialProperties MaterialProps = GetMaterialProperties( HairBaseDiffuse, Normal, saturate( lerp( HairSettings._RoughnessMin, HairSettings._RoughnessMax, Properties.a ) ), Properties.g + 0.01f, Properties.b );
+				SLightingProperties LightingProps = GetSunLightingProperties( Input.WorldSpacePos, ShadowTexture );
+
+				//The specular will stretch along the input tangent. This can be provided via a flowmap or a vector.
+				#ifdef USE_FLOWMAP
+					float3 Flow = float3( PdxTex2D( AnisotropyHairMap, FLOWMAP_UV_SET ).rg, 0.0f );
+					Flow.rg = Flow.rg * 2.0f - 1.0f;
+					Flow.g = -Flow.g;
+					float3 T = normalize( mul( Flow, TBN ) );
+				#else
+					float3 T = normalize( mul( HairSettings._StrandDirection, TBN ) );
+				#endif
+
+				float3 N = lerp( Input.Normal, Normal, HairSettings._NormalStrength );
+
+				//Hair mainly produces two highlights. The primary highlight which reflects the light color and the secondary highlight which also reflects some of the hair color in addition to the light color.
+				//We shift them slightly manually to fake the light scattering effect.
+				float3 T1 = ShiftTangent( T, N, HairSettings._PrimaryHighlightShift + AnisotropyShift );
+				float3 T2 = ShiftTangent( T, N, HairSettings._SecondaryHighlightShift + AnisotropyShift );
+
+				SHairProperties HairProps;
+				HairProps._UVs = DIFFUSE_UV_SET;
+				HairProps._PrimaryTangent = T1;
+				HairProps._SecondaryTangent = T2;
+				HairProps._EdgeColor = HairSettings._EdgeColor.rgb;
+				HairProps._SpecularPower = HairSettings._SpecularPower;
+				HairProps._SmoothnessMin = HairSettings._AnisotropySmoothnessMin;
+				HairProps._SmoothnessMax = HairSettings._AnisotropySmoothnessMax;
+				HairProps._ColorMaskStrength = ColorMaskStrength;
+
+				float3 Color = CalculateHairLighting( Input.Position.xy, Input.WorldSpacePos, MaterialProps, LightingProps, HairProps, EnvironmentMap );
+
+				#ifdef ALPHA_TO_COVERAGE
+					Diffuse.a = RescaleAlphaByMipLevel( Diffuse.a, DIFFUSE_UV_SET, DiffuseMap );
+					Diffuse.a = SharpenAlpha( Diffuse.a, HairSettings._AlphaCutoffTreshold );
+				#endif
+				#ifdef HAIR_TRANSPARENCY_HACK
+					clip( Diffuse.a - 0.5f );
+				#endif
+
+				float Alpha = Diffuse.a;
+
+				PS_COLOR_SSAO Out;
+				Out.Color = float4( Color.rgb, Alpha );
+				Out.SSAOColor = PdxTex2D( SSAOColorMap, DIFFUSE_UV_SET );
+				Out.SSAOColor.rgb *= vPaletteColorHair.rgb;
+				return Out;
+			}
+		]]
+	}
+	# CfV HAIR-BLEND
 	MainCode PS_skin_hair_eye_blend
 	{
 		Input = "VS_OUTPUT_PDXMESHPORTRAIT"
@@ -842,8 +856,8 @@ RasterizerState rasterizer_backfaces
 RasterizerState ShadowRasterizerState
 {
 	#Don't go higher than 10000 as it will make the shadows fall through the mesh
-	DepthBias = 500
-	SlopeScaleDepthBias = 2
+	DepthBias = 1000
+	SlopeScaleDepthBias = 10
 }
 RasterizerState ShadowRasterizerStateBackfaces
 {
@@ -856,7 +870,7 @@ Effect portrait_skin
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_skin"
-	Defines = { "FAKE_SSS_EMISSIVE" "PDX_MESH_BLENDSHAPES" }
+	Defines = { "SKIN_SCATTERING" "TRANSLUCENCY" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_skinShadow
@@ -871,21 +885,22 @@ Effect portrait_teeth
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_skin"
-	Defines = { "FAKE_SSS_EMISSIVE" }
+	Defines = { "SKIN_SCATTERING" "TRANSLUCENCY" }
 }
 
 Effect portrait_teeth
 {
+	# CfV (POD)
 	VertexShader = "VS_portrait_blend_shapes"
 	PixelShader = "PS_skin"
-	Defines = { "FAKE_SSS_EMISSIVE" "PDX_MESH_BLENDSHAPES" }
+	Defines = { "SKIN_SCATTERING" "TRANSLUCENCY" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_skin_face
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_skin"
-	Defines = { "FAKE_SSS_EMISSIVE" "ENABLE_TEXTURE_OVERRIDE" "PDX_MESH_BLENDSHAPES" }
+	Defines = { "SKIN_SCATTERING" "TRANSLUCENCY" "ENABLE_TEXTURE_OVERRIDE" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_skin_faceShadow
@@ -900,6 +915,7 @@ Effect portrait_eye
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_eye"
+	# CfV EK2
 	Defines = { "EMISSIVE_PROPERTIES_RED" }
 }
 
@@ -1048,6 +1064,7 @@ Effect portrait_hair_transparency_hack
 {
 	VertexShader = "VS_standard"
 	PixelShader = "PS_hair"
+	# CfV EK2
 	#BlendState = "alpha_to_coverage"
 	BlendState = "hair_alpha_blend"
 	RasterizerState = "rasterizer_no_culling"
@@ -1079,6 +1096,15 @@ Effect portrait_hair_alpha
 	BlendState = "hair_alpha_blend"
 	DepthStencilState = "hair_alpha_blend"
 	Defines = { "PDX_MESH_BLENDSHAPES" }
+}
+
+Effect portrait_hair_decrease_specular_light_alpha
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_hair"
+	BlendState = "hair_alpha_blend"
+	DepthStencilState = "hair_alpha_blend"
+	Defines = { "PDX_MESH_BLENDSHAPES" "PDX_DECREASE_SPECULAR_LIGHT" }
 }
 
 Effect portrait_hair_opaque
@@ -1120,6 +1146,39 @@ Effect portrait_hair_backside
 	RasterizerState = "rasterizer_backfaces"
 }
 
+Effect portrait_anisotropic_hair
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_anisotropic_hair"
+	BlendState = "alpha_to_coverage"
+	RasterizerState = "rasterizer_no_culling"
+	Defines = { "ALPHA_TO_COVERAGE" "PDX_MESH_BLENDSHAPES" "USE_FLOWMAP" }
+}
+
+Effect portrait_anisotropic_hairShadow
+{
+	VertexShader = "VertexPdxMeshStandardShadow"
+	PixelShader = "PixelPdxMeshStandardShadow"
+	RasterizerState = "ShadowRasterizerState"
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+}
+
+Effect portrait_anisotropic_hair_no_flow
+{
+	VertexShader = "VS_standard"
+	PixelShader = "PS_anisotropic_hair"
+	BlendState = "alpha_to_coverage"
+	RasterizerState = "rasterizer_no_culling"
+	Defines = { "ALPHA_TO_COVERAGE" "PDX_MESH_BLENDSHAPES" }
+}
+
+Effect portrait_anisotropic_hair_no_flowShadow
+{
+	VertexShader = "VertexPdxMeshStandardShadow"
+	PixelShader = "PixelPdxMeshStandardShadow"
+	RasterizerState = "ShadowRasterizerState"
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+}
 
 # CfV HAIR-BLEND
 Effect portrait_color_blend
@@ -1132,6 +1191,7 @@ Effect portrait_color_blend
 }
 # CfV end
 
+# CfV (godherja)
 Effect portrait_emissive
 {
 	VertexShader = "VS_standard"
@@ -1139,3 +1199,4 @@ Effect portrait_emissive
 
 	Defines = { "EMISSIVE_PROPERTIES_RED" "PDX_MESH_BLENDSHAPES" }
 }
+# CfV end
