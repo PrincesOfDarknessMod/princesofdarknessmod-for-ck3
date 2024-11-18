@@ -1,6 +1,7 @@
 Includes = {
 	"GH_portrait_constants.fxh"
 	"cw/pdxgui.fxh"
+	"cw/utility.fxh"
 }
 
 PixelShader =
@@ -53,6 +54,49 @@ PixelShader =
 			float alpha = 1.0 - c;
 			return alpha;
 		}
+		
+		
+		#define FIRESPEED float2(0.0,-0.1)
+		
+		float POD_FireHash(in float2 co) {
+			return frac(sin(dot(co.xy ,float2(12.9898,58.233))) * 13758.5453);
+		}
+		
+		float POD_FireNoise(float2 p){
+			float2 ip = floor(p);
+			float2 u = frac(p);
+			u = u*u*(3.0-2.0*u);
+			float res = lerp(
+				lerp(POD_FireHash(ip),POD_FireHash(ip+float2(1.0,0.0)),u.x),
+				lerp(POD_FireHash(ip+float2(0.0,1.0)),POD_FireHash(ip+float2(1.0,1.0)),u.x),u.y);
+			return res*res;
+		}
+		
+		float POD_FireFBM( in float2 x )
+		{   
+			const float H = 0.8;
+			float G = exp2(-H);
+			float f = 1.0;
+			float a = 1.0;
+			float t = 0.0;
+			for( int i=0; i<12; i++ )
+			{
+				t += a*POD_FireNoise(f * x - GuiTime * FIRESPEED);
+				f *= 2.0;
+				a *= G;
+			}
+			//return t;
+			return smoothstep(0.,1.8,t);
+		}
+		
+		float POD_FireDomainwarp( in float2 p )
+		{
+			float2 q = float2( POD_FireFBM( p + float2(0.0,0.0) ),
+						POD_FireFBM( p + float2(5.2,1.3) ) );
+			float2 r = float2( POD_FireFBM( p + 4.0*q + float2(1.7,9.2) ),
+						POD_FireFBM( p + 4.0*q + float2(8.3,2.8) ) );
+			return POD_FireFBM( p + 4.0*r );
+		}
 
 		void POD_TryApplyPostEffect(inout float4 Color, in float2 uv)
 		{
@@ -66,7 +110,19 @@ PixelShader =
 				}
 				Color.a *= POD_GetSmokeAlpha(uv);
 			}
-			//Color = crepuscular_rays(uv, float2(0.5,0.5));
+			// Fire
+			else if ( Color.b >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && Color.b <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX )
+			{
+				if (Color.a > 0.996) {
+					Color.b -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				}
+				float fire = 1.0 - POD_FireDomainwarp(uv);
+				Color.g *= fire;
+				//Color.g = lerp(Color.g * fire * fire, Color.g, Color.r);
+				Color.b *= fire*fire*fire*fire*fire;
+				//Color.a *= fire;
+				Color.a = lerp(Color.a * fire, Color.a, Color.r); // more transparency in shadowy areas
+			}
 		}
 	]]
 }

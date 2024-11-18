@@ -260,15 +260,12 @@ PixelShader =
 		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
 		// CfV end
 		{
-			// CfV (godherja)
-			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Input);
-			// CfV end
 
 			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
 			float3 Normal = normalize( mul( NormalSample, TBN ) );
 
-			// CfV (POD)
-			POD_AdjustPortraitNormals(PortraitEffect, Input, Normal);
+			// CfV (godherja)
+			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Normal, Input);
 			// CfV end
 			
 			SMaterialProperties MaterialProps = GetMaterialProperties( Diffuse.rgb, Normal, saturate( Properties.a ), Properties.g, Properties.b );
@@ -321,6 +318,10 @@ PixelShader =
 				float3 emissiveColor = Diffuse.rgb * EmissiveStrength;
 				Color = lerp(Color, emissiveColor, emissiveMask);
 			#endif
+
+			// CfV POD
+			POD_TryApplyStatueLighting(PortraitEffect, Normal, Color);
+			// CfV end
 			
 			Color = ApplyDistanceFog( Color, Input.WorldSpacePos );
 			
