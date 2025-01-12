@@ -1224,6 +1224,8 @@ PixelShader =
 					float3 finalColor = float3(col*0.4, col*0.45, col*0.5);
 				#elif defined(RITUALGREEN)
 					float3 finalColor = float3(col*col*0.4, col*0.9, col*col);
+				#elif defined(SORCERY)
+					float3 finalColor = float3(col*col*0.4, col*0.9, col*col);
 				#else
 					float3 finalColor = float3(col, 0.0, col*col*col*col*col*0.25);
 				#endif
@@ -1827,6 +1829,21 @@ Effect FlowyRitualDisabled
 	PixelShader = "PS_Flowyblood"
 	
 	Defines = { "RITUALGREEN" "DISABLED" }
+}
+
+Effect FlowySorcery
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "SORCERY" }
+}
+Effect FlowySorceryDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Flowyblood"
+	
+	Defines = { "SORCERY" "DISABLED" }
 }
 
 Effect DeepUmbra
