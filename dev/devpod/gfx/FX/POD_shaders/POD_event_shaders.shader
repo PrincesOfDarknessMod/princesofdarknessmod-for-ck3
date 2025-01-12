@@ -1225,7 +1225,7 @@ PixelShader =
 				#elif defined(RITUALGREEN)
 					float3 finalColor = float3(col*col*0.4, col*0.9, col*col);
 				#elif defined(SORCERY)
-					float3 finalColor = float3(col*col*0.4, col*0.9, col*col);
+					float3 finalColor = float3(0.0, pow(col, 1.8)*0.9, col);
 				#else
 					float3 finalColor = float3(col, 0.0, col*col*col*col*col*0.25);
 				#endif
