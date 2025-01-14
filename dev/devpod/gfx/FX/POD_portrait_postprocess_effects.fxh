@@ -1,12 +1,15 @@
 Includes = {
 	"GH_portrait_constants.fxh"
 	"cw/pdxgui.fxh"
+	"cw/utility.fxh"
 }
 
 PixelShader =
 {
 	Code [[
 		// adapted from https://www.shadertoy.com/view/7tsfWS
+		
+		// TODO: put hash/noise/FBM/domainwarp functions in shared shader file
 		
 		float POD_SmokeRand(float2 n) {
 			return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
@@ -51,48 +54,48 @@ PixelShader =
 			float alpha = 1.0 - c;
 			return alpha;
 		}
-
-		// adapted from https://www.shadertoy.com/view/ls2Xzd
-		// there is no good way to make this only apply to specific characters :(
-		// Algorithm found in https://medium.com/community-play-3d/god-rays-whats-that-5a67f26aeac2
-		float4 crepuscular_rays(float2 texCoords, float2 pos) {
-			float decay = 0.92;
-			float density = 1.0;
-			float weight = 0.58767;
-			/// NUM_SAMPLES will describe the rays quality, you can play with
-			const int nsamples = 50;
-
-			float2 tc = texCoords.xy;
-			float2 deltaTexCoord = tc - pos.xy;
-			deltaTexCoord *= (1.0 / float(nsamples) * density);
-			float illuminationDecay = 1.0;
-
-			float4 color = PdxTex2DLod0(MainScene, tc.xy) * float4(0.4,0.4,0.4,0.4);
-
-			// float4 color = PdxTex2DLod0(MainScene, tc.xy);
-			// if ( color.r >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && color.r <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX ) {
-			// 	color.r -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
-			// }
-			// color *= float4(0.4,0.4,0.4,0.4);
-			
-			tc += deltaTexCoord * frac( sin(dot(texCoords.xy+frac(GuiTime), float2(12.9898, 78.233))) * 43758.5453 );
-			for (int i = 0; i < nsamples; i++)
+		
+		
+		#define FIRESPEED float2(0.0,-0.1)
+		
+		float POD_FireHash(in float2 co) {
+			return frac(sin(dot(co.xy ,float2(12.9898,58.233))) * 13758.5453);
+		}
+		
+		float POD_FireNoise(float2 p){
+			float2 ip = floor(p);
+			float2 u = frac(p);
+			u = u*u*(3.0-2.0*u);
+			float res = lerp(
+				lerp(POD_FireHash(ip),POD_FireHash(ip+float2(1.0,0.0)),u.x),
+				lerp(POD_FireHash(ip+float2(0.0,1.0)),POD_FireHash(ip+float2(1.0,1.0)),u.x),u.y);
+			return res*res;
+		}
+		
+		float POD_FireFBM( in float2 x )
+		{   
+			const float H = 0.8;
+			float G = exp2(-H);
+			float f = 1.0;
+			float a = 1.0;
+			float t = 0.0;
+			for( int i=0; i<12; i++ )
 			{
-				tc -= deltaTexCoord;
-				float4 sampl = PdxTex2DLod0(MainScene, tc.xy) * float4(0.4,0.4,0.4,0.4);
-
-				// float4 sampl = PdxTex2DLod0(MainScene, tc.xy);
-				// if ( sampl.r >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && sampl.r <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX ) {
-				// 	sampl.r -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
-				// }
-				// sampl *= float4(0.4,0.4,0.4,0.4);
-
-				sampl *= illuminationDecay * weight;
-				color += sampl;
-				illuminationDecay *= decay;
+				t += a*POD_FireNoise(f * x - GuiTime * FIRESPEED);
+				f *= 2.0;
+				a *= G;
 			}
-			
-			return color;
+			//return t;
+			return smoothstep(0.,1.8,t);
+		}
+		
+		float POD_FireDomainwarp( in float2 p )
+		{
+			float2 q = float2( POD_FireFBM( p + float2(0.0,0.0) ),
+						POD_FireFBM( p + float2(5.2,1.3) ) );
+			float2 r = float2( POD_FireFBM( p + 4.0*q + float2(1.7,9.2) ),
+						POD_FireFBM( p + 4.0*q + float2(8.3,2.8) ) );
+			return POD_FireFBM( p + 4.0*r );
 		}
 
 		void POD_TryApplyPostEffect(inout float4 Color, in float2 uv)
@@ -107,7 +110,19 @@ PixelShader =
 				}
 				Color.a *= POD_GetSmokeAlpha(uv);
 			}
-			//Color = crepuscular_rays(uv, float2(0.5,0.5));
+			// Fire
+			else if ( Color.b >= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN && Color.b <= POD_PORTRAIT_POSTPROCESS_CHANNEL_MAX )
+			{
+				if (Color.a > 0.996) {
+					Color.b -= POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				}
+				float fire = 1.0 - POD_FireDomainwarp(uv);
+				Color.g *= fire;
+				//Color.g = lerp(Color.g * fire * fire, Color.g, Color.r);
+				Color.b *= fire*fire*fire*fire*fire;
+				//Color.a *= fire;
+				Color.a = lerp(Color.a * fire, Color.a, Color.r); // more transparency in shadowy areas
+			}
 		}
 	]]
 }

@@ -2,6 +2,7 @@ Includes = {
 	"jomini/portrait_decals.fxh"
 	"cw/camera.fxh"
 	"cw/pdxgui.fxh"
+	"cw/utility.fxh"
 	"GH_portrait_constants.fxh"
 }
 
@@ -15,7 +16,7 @@ PixelShader =
 		// Interface
 		//
 
-		void GH_TryApplyStatueEffect(in GH_SPortraitEffect PortraitEffect, inout float4 Diffuse, inout float4 Properties, in VS_OUTPUT_PDXMESHPORTRAIT Input)
+		void GH_TryApplyStatueEffect(in GH_SPortraitEffect PortraitEffect, inout float4 Diffuse, inout float4 Properties, inout float3 Normal, in VS_OUTPUT_PDXMESHPORTRAIT Input)
 		{
 			if (PortraitEffect.isEnabled)
 			{
@@ -43,41 +44,54 @@ PixelShader =
 
 				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
 					// the value of the gene controls animation speed
-					float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+					float metalSpeed   = GuiTime * 2.0 / PortraitEffect.AnimValue;
+					float normalsSpeed = GuiTime * 1.2 / PortraitEffect.AnimValue;
 
 					float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
-					float pulseDepth = (sin( adjustedDepth  - iTime ) + 1.0) / 2.0;
+					float pulseDepthForMetal   = (sin( adjustedDepth - metalSpeed   ) + 1.0) / 2.0;
+					float pulseDepthForNormals = (sin( adjustedDepth - normalsSpeed ) - 1.0);
+					pulseDepthForNormals -= 0.1 - (pulseDepthForNormals * 0.1);
 
-					Properties.b *= pulseDepth; // metalness
+					Properties.b *= pulseDepthForMetal; // metalness
+
+					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
+					float pulseHeight = (sin( adjustedHeight + normalsSpeed ) + 3.0) / 4.0; // value between 0.5 and 1.0
+
+					float3 Normal2 = normalize( float3(Normal.x, Normal.y, pulseDepthForNormals) );
+					Normal = normalize(lerp(Normal,Normal2,pulseHeight));
 				}
 				else if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_VERTICAL_SHINIES ) {
 					// the value of the gene controls animation speed
-					float iTime = GuiTime * 2.0 / PortraitEffect.AnimValue;
+					float speed = GuiTime * 2.0 / PortraitEffect.AnimValue;
 
 					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
-					float pulseHeight = (sin( adjustedHeight  - iTime ) + 1.0) / 2.0;
+					float pulseHeight = (sin( adjustedHeight - speed ) + 1.0) / 2.0;
 
 					Properties.g *= pulseHeight * 2.0; // specularity
+				}
+
+				if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_FIRE ) {
+					float speed = GuiTime * 0.6;
+
+					float c = cos(speed);
+					float s = sin(speed);
+					// rotation along Z-axis
+					Normal = normalize( mul( Normal, float3x3(
+						float3(c, -s, 0),
+						float3(s, c, 0),
+						float3(0, 0, 1)
+					) ) );
 				}
 			}
 		}
 
-		void POD_AdjustPortraitNormals(in GH_SPortraitEffect PortraitEffect, in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float3 Normal)
+		void POD_TryApplyStatueLighting(in GH_SPortraitEffect PortraitEffect, in float3 Normal, inout float3 Color)
 		{
-			if ( PortraitEffect.isEnabled ) {
-				if ( PortraitEffect.AnimType == POD_PORTRAIT_ANIM_CONCENTRIC_METAL ) {
-					// the value of the gene controls animation speed
-					float iTime = GuiTime * 1.2 / PortraitEffect.AnimValue;
-
-					float adjustedDepth = length(CameraPosition.xz - Input.WorldSpacePos.xz) * 0.5;
-					float pulseDepth  = (sin( adjustedDepth - iTime ) - 1.0);
-					pulseDepth -= 0.1 - (pulseDepth * 0.1);
-
-					float adjustedHeight = (CameraPosition.y - Input.WorldSpacePos.y) * 0.3;
-					float pulseHeight = (sin( adjustedHeight + iTime ) + 3.0) / 4.0; // value between 0.5 and 1.0
-
-					float3 Normal2 = normalize( float3(Normal.x, Normal.y, pulseDepth) );
-					Normal = normalize(lerp(Normal,Normal2,pulseHeight));
+			if (PortraitEffect.isEnabled)
+			{
+				if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_FIRE ) {
+					float edgeGlow = 1.0 - abs( dot( normalize(CameraLookAtDir), Normal ) );
+					Color = ColorDodge(Color, edgeGlow);
 				}
 			}
 		}
@@ -86,6 +100,10 @@ PixelShader =
 		{
 			if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_SMOKE ) {
 				Out.Color.r += POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
+				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+			}
+			else if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_FIRE && PortraitEffect.isEnabled ) {
+				Out.Color.b += POD_PORTRAIT_POSTPROCESS_CHANNEL_MIN;
 				Out.SSAOColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 			}
 			else if ( PortraitEffect.Postprocess == POD_PORTRAIT_POSTPROCESS_FOGOFWAR ) {

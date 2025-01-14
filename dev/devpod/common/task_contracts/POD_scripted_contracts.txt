@@ -1,0 +1,538 @@
+﻿
+# "Scripted" contracts means these aren't meant to be part of random pools.
+# These are created manually via other scripts, to be used as one-offs or historical events.
+
+
+##### Some explanations for the jank:
+#
+# travel = yes straight up doesn't work for landed characters.
+# You will travel to accept the contract, but on_accepted doesn't fire when you arrive.
+# So instead, here on_accept fires an event where you can choose whether to travel.
+# And the travel plan is handled by that event.
+#
+# There is no way to un-accept a contract after you've accepted it.
+# So if you quit out of the travel plan or otherwise abort the journey, there needs to be a fallback.
+# The fallback is in on_invalidated.
+# Put simply, if the contract invalidates, it gets deleted and recreated as a new copy.
+# For that to work properly, all internal variables are copied to the new contract during on_invalidated.
+#
+#
+# Multiple timekeeping variables are necessary to make the expiration date work:
+#
+##### time_remaining
+# Saves the remaining time in a format that localization/GUI can understand.
+# This is done via GetVarTimeRemaining and either GetGameTimeDifferenceForDiffDays or GetCurrentDateWithDiff.
+#
+##### end_date
+# Saves the remaining time in a format that script can understand.
+# Necessary for recreating the contract.
+#
+##### POD_task_contracts.1
+# An event that deletes the contract (defined in events\POD_task_contracts\POD_task_contract_events.txt)
+# Necessary to make the contract expire on an exact date.
+# Otherwise, the date would get fuzzy (valid_to_continue and valid_to_keep are only checked once a month).
+#
+##### POD_days_remaining_for_task_contract
+# A script value (defined in common\script_values\POD_task_contract_values.txt)
+# Necessary because you can't use the inline value = {} syntax for time delays.
+#
+#
+# Weirdly, abandoning or completing a contract doesn't actually delete it immediately.
+# It gets hidden in the GUI, but scripts can still access the scope if it was saved anywhere.
+# Hence, events will need safeguards to check whether the scoped contract is still "active".
+# E.g. via any_character_active_contract = { scope:task_contract ?= this }
+#
+# What seems to happen is that abandoning or completing a contract silently invalidates it after a month.
+# Which also fires on_invalidated.
+# Hence, I also set a do_not_recreate variable on completion, and check for it during on_invalidated.
+# So that the contract doesn't get recreated after successful completion.
+#
+#
+# All of this jank would become obsolete if travel = yes worked properly for landed characters.
+# Fingers crossed?
+
+
+# Predicted a natural disaster
+POD_natural_disaster = {
+	group = POD_scripted_contracts
+	#icon = "gfx/interface/icons/faith/wyrm.dds"
+	icon = "gfx/interface/icons/terrain_types/drylands.dds"
+
+	travel = no
+
+	valid_to_create = {
+		OR = {
+			POD_can_predict_weather_trigger = yes
+			any_relation = {
+				type = coterie_member
+				POD_can_predict_weather_trigger = yes
+			}
+		}
+	}
+	valid_to_accept = {
+		is_available_allow_travelling_allow_army = yes
+	}
+	valid_to_continue = {
+		POD_contract_has_not_expired = yes
+	}
+	valid_to_keep = {
+		POD_contract_has_not_expired = yes
+	}
+
+	# On_actions
+	on_accepted = {
+		#task_contract_taker = { play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_accept_contract" }
+		save_scope_as = task_contract
+		task_contract_taker = { trigger_event = POD_natural_disasters.0003 }
+	}
+	on_create = {
+		scope:contract = {
+			set_variable = retain_despite_distance
+			set_variable = recreate_on_travel_abort
+			# other variables are set when first creating the contract
+			# in POD_natural_disasters.0002
+		}
+	}
+	
+	on_completed = {
+		set_variable = do_not_recreate
+		# travel_plan variable is set in POD_task_contracts.4
+		var:travel_plan ?= {
+			reroute_to_home = yes
+		}
+	}
+	
+	on_invalidated = {
+		# For creating a new copy of the contract if it was abandoned (e.g. from getting imprisoned)
+		if = {
+			limit = {
+				POD_contract_has_not_expired = yes
+				NOT = { has_variable = do_not_recreate }
+			}
+			POD_recreate_contract_with_timekeeping_vars = {
+				CONTRACT_TYPE = POD_natural_disaster
+				SAVE_AS = task_contract
+			}
+			hidden_effect_new_object = {
+				scope:task_contract = {
+					set_variable = {
+						name  = disaster_loc
+						value = root.var:disaster_loc
+					}
+					set_variable = {
+						name  = disaster_type
+						value = root.var:disaster_type
+					}
+					set_variable = {
+						name  = target_title
+						value = root.var:target_title
+					}
+				}
+			}
+		}
+		# travel_plan variable is set in POD_task_contracts.4
+		var:travel_plan ?= {
+			reroute_to_home = yes
+		}
+	}
+
+	# Rewards
+	task_contract_reward = {
+		success_prevented_disaster = {
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_success_on_contract"
+					
+					if = {
+						limit = { NOT = { POD_can_manipulate_disaster = { CONTRACT = prev } } }
+						custom_description_no_bullet = { text = POD_need_weather_control_coterie_ability }
+					}
+					
+					pod_stopped_natural_disaster_count_increase_effect = yes
+					
+					stress_impact = {
+						base = 0
+						compassionate = -50
+						callous = 50
+						sadistic = 50
+					}
+					
+					if = {
+						limit = {
+							faith = {
+								OR = {
+									has_doctrine = special_doctrine_allied_to_apophis_hostility
+									has_doctrine = doctrine_triat_alignment_wyrm
+								}
+							}
+						}
+						add_piety = -250
+					}
+					else = { 
+						add_piety = 250
+					}
+					
+					if = {
+						limit = { POD_is_mummy_trigger = yes }
+						add_hekau_celestial_lifestyle_perk_points = 1
+					}
+					if = {
+						limit = { has_trait = demon }
+						add_trait_xp = { trait = demon value = -10 }
+					}
+					if = {
+						limit = {
+							OR = { 
+								has_trait = truefaith
+								faith = faith:shadowinquisition
+							}
+						}
+						add_faith_lifestyle_perk_points = 1
+					}
+					hidden_effect = {
+						every_relation = {
+							type = coterie_member
+							limit = {
+								# check for presence during travel? or maybe not
+								always = yes
+							}
+							if = {
+								limit = { POD_is_mummy_trigger = yes }
+								add_hekau_celestial_lifestyle_perk_points = 1
+							}
+							if = {
+								limit = { has_trait = demon }
+								add_trait_xp = { trait = demon value = -10 }
+							}
+							if = {
+								limit = {
+									OR = { 
+										has_trait = truefaith
+										faith = faith:shadowinquisition
+									}
+								}
+								add_faith_lifestyle_perk_points = 1
+							}
+						}
+					}
+				}
+			}
+		}
+		success_turned_disaster_into_prosperity = {
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_success_on_contract"
+					
+					if = {
+						limit = { NOT = { POD_can_manipulate_disaster = { CONTRACT = prev } } }
+						custom_description_no_bullet = { text = POD_need_weather_control_coterie_ability }
+					}
+					
+					pod_stopped_natural_disaster_count_increase_effect = yes
+					
+					stress_impact = {
+						base = 100
+						compassionate = -50
+						callous = 50
+						sadistic = 50
+					}
+					
+					if = {
+						limit = {
+							faith = {
+								OR = {
+									has_doctrine = special_doctrine_allied_to_apophis_hostility
+									has_doctrine = doctrine_triat_alignment_wyrm
+								}
+							}
+						}
+						add_piety = -750
+					}
+					else = { 
+						add_piety = 750
+					}
+					
+					if = {
+						limit = { POD_is_mummy_trigger = yes }
+						add_hekau_celestial_lifestyle_perk_points = 1
+					}
+					if = {
+						limit = { has_trait = demon }
+						add_trait_xp = { trait = demon value = -15 }
+					}
+					if = {
+						limit = {
+							OR = { 
+								has_trait = truefaith
+								faith = faith:shadowinquisition
+							}
+						}
+						add_faith_lifestyle_xp = 1500
+					}
+					if = {
+						limit = { has_trait = beatific }
+						POD_advance_beatific_multiple_effect = { VALUE = "{ 1 2 }" }
+					}
+					hidden_effect = {
+						every_relation = {
+							type = coterie_member
+							limit = {
+								# check for presence during travel? or maybe not
+								always = yes
+							}
+							if = {
+								limit = { POD_is_mummy_trigger = yes }
+								add_hekau_celestial_lifestyle_perk_points = 1
+							}
+							if = {
+								limit = { has_trait = demon }
+								add_trait_xp = { trait = demon value = -15 }
+							}
+							if = {
+								limit = {
+									OR = { 
+										has_trait = truefaith
+										faith = faith:shadowinquisition
+									}
+								}
+								add_faith_lifestyle_xp = 1500
+							}
+							if = {
+								limit = { has_trait = beatific }
+								POD_advance_beatific_multiple_effect = { VALUE = "{ 1 2 }" }
+							}
+						}
+					}
+				}
+			}
+		}
+		success_made_disaster_worse = {
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_success_on_contract"
+					
+					if = {
+						limit = { NOT = { POD_can_manipulate_disaster = { CONTRACT = prev } } }
+						custom_description_no_bullet = { text = POD_need_weather_control_coterie_ability }
+					}
+					
+					POD_commit_heinous_act_effect = yes
+					pod_aggravated_natural_disaster_count_increase_effect = yes
+					
+					stress_impact = {
+						base = 0
+						compassionate = 50
+						callous = -50
+						sadistic = -50
+					}
+					
+					if = {
+						limit = {
+							faith = {
+								OR = {
+									has_doctrine = special_doctrine_allied_to_apophis_hostility
+									has_doctrine = doctrine_triat_alignment_wyrm
+								}
+							}
+						}
+						add_piety = 250
+					}
+					else = { 
+						add_piety = -250
+					}
+					
+					if = {
+						limit = { POD_is_mummy_trigger = yes }
+						add_hekau_celestial_lifestyle_perk_points = 1
+					}
+					if = {
+						limit = { has_trait = demon }
+						add_trait_xp = { trait = demon value = 10 }
+					}
+					hidden_effect = {
+						every_relation = {
+							type = coterie_member
+							limit = {
+								# check for presence during travel? or maybe not
+								always = yes
+							}
+							if = {
+								limit = { POD_is_mummy_trigger = yes }
+								add_hekau_celestial_lifestyle_perk_points = 1
+							}
+							if = {
+								limit = { has_trait = demon }
+								add_trait_xp = { trait = demon value = 10 }
+							}
+						}
+					}
+				}
+			}
+		}
+		success_provided_relief = {
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_success_on_contract"
+					
+					remove_short_term_gold = 50
+					stress_impact = {
+						base = 0
+						compassionate = -50
+						callous = 50
+						sadistic = 50
+					}
+					
+					if = {
+						limit = {
+							faith = {
+								OR = {
+									has_doctrine = special_doctrine_allied_to_apophis_hostility
+									has_doctrine = doctrine_triat_alignment_wyrm
+								}
+							}
+						}
+						add_piety = -250
+					}
+					else = { 
+						add_piety = 250
+					}
+					
+					if = {
+						limit = { has_trait = demon }
+						add_trait_xp = { trait = demon value = -10 }
+					}
+					if = {
+						limit = {
+							OR = { 
+								has_trait = truefaith
+								faith = faith:shadowinquisition
+							}
+						}
+						add_faith_lifestyle_perk_points = 1
+					}
+					hidden_effect = {
+						every_relation = {
+							type = coterie_member
+							limit = {
+								# check for presence during travel? or maybe not
+								always = yes
+							}
+							if = {
+								limit = { has_trait = demon }
+								add_trait_xp = { trait = demon value = -10 }
+							}
+							if = {
+								limit = {
+									OR = { 
+										has_trait = truefaith
+										faith = faith:shadowinquisition
+									}
+								}
+								add_faith_lifestyle_perk_points = 1
+							}
+						}
+					}
+				}
+			}
+		}
+		success_provided_great_relief = {
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_success_on_contract"
+					
+					remove_short_term_gold = 100
+					
+					stress_impact = {
+						base = 100
+						compassionate = -50
+						callous = 50
+						sadistic = 50
+					}
+					
+					if = {
+						limit = {
+							faith = {
+								OR = {
+									has_doctrine = special_doctrine_allied_to_apophis_hostility
+									has_doctrine = doctrine_triat_alignment_wyrm
+								}
+							}
+						}
+						add_piety = -750
+					}
+					else = { 
+						add_piety = 750
+					}
+					
+					if = {
+						limit = { has_trait = demon }
+						add_trait_xp = { trait = demon value = -15 }
+					}
+					if = {
+						limit = {
+							OR = { 
+								has_trait = truefaith
+								faith = faith:shadowinquisition
+							}
+						}
+						add_faith_lifestyle_xp = 1500
+					}
+					if = {
+						limit = { has_trait = beatific }
+						POD_advance_beatific_multiple_effect = { VALUE = "{ 1 2 }" }
+					}
+					hidden_effect = {
+						every_relation = {
+							type = coterie_member
+							limit = {
+								# check for presence during travel? or maybe not
+								always = yes
+							}
+							if = {
+								limit = { has_trait = demon }
+								add_trait_xp = { trait = demon value = -15 }
+							}
+							if = {
+								limit = {
+									OR = { 
+										has_trait = truefaith
+										faith = faith:shadowinquisition
+									}
+								}
+								add_faith_lifestyle_xp = 1500
+							}
+							if = {
+								limit = { has_trait = beatific }
+								POD_advance_beatific_multiple_effect = { VALUE = "{ 1 2 }" }
+							}
+						}
+					}
+				}
+			}
+		}
+		failure_do_nothing = {
+			positive = no
+			should_print_on_complete = yes
+			effect = {
+				task_contract_taker = {
+					play_sound_effect = "event:/DLC/EP3/SFX/UI/Contracts/ep3_ui_contracts_failure_on_contract"
+					
+					if = {
+						limit = { has_trait = compassionate }
+						stress_impact = {
+							compassionate = 50
+						}
+					}
+					else = {
+						custom_tooltip = NO_EFFECT
+					}
+				}
+			}
+		}
+	}
+}

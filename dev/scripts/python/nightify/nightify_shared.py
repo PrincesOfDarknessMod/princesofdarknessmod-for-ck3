@@ -284,6 +284,15 @@ nightify_illustrations = {
 	"event_scenes/ep3_medi_market.dds":					"event_scenes/market_east_night.dds",
 	"event_scenes/ep3_medi_study.dds":					"event_scenes/study_night.dds",
 	"event_scenes/ep3_relaxing_room.dds":				"event_scenes/fp2_relaxing_room_night.dds",
+
+	# WANDERING NOBLES
+	"event_scenes/bp3_coast.dds":						"event_scenes/pod_nightlandscape4.dds",
+	"event_scenes/bp3_hills_winter.dds":				"event_scenes/pod_alamut.dds",
+	"event_scenes/bp3_mountain_winter.dds":				"event_scenes/mountains_night.dds",
+	"event_scenes/bp3_plains_winter.dds":				"event_scenes/pod_nightlandscape5.dds",
+	"event_scenes/bp3_riverside.dds":					"event_scenes/pod_nightlandscape4.dds",
+	"event_scenes/bp3_steppe_winter.dds":				"event_scenes/steppe_night.dds",
+	"event_scenes/bp3_wetlands_winter.dds":				"event_scenes/pod_nightlandscape4.dds",
 }
 
 
