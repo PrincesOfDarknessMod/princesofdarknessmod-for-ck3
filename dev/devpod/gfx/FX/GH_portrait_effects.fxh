@@ -208,7 +208,7 @@ PixelShader =
 		// Interface
 		//
 
-		GH_SPortraitEffect GH_ScanMarkerDecals(int DecalsCount, bool isAttachment, bool isSkin)
+		GH_SPortraitEffect GH_ScanMarkerDecals(int DecalsCount, bool isAttachment, bool isSkin, bool isEyes)
 		{
 			int From = 0;
 			int To   = DecalsCount;
@@ -282,9 +282,6 @@ PixelShader =
 					else if (POD_GeneWeightEquals(PostprocessGeneWeight, POD_GENE_WEIGHT_POSTPROCESS_FIRE)) {
 						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_FIRE;
 					}
-					/*if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_POSTPROCESS_SMOKE)) {
-						Effect.Postprocess = POD_PORTRAIT_POSTPROCESS_SMOKE;
-					}*/
 				}
 				else if (GH_MarkerTexelEquals(MarkerTexels.TopLeftTexel, GH_MARKER_TOP_LEFT_CLOTHING)) {
 					if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CLOTHING_1_R)) {
@@ -364,12 +361,9 @@ PixelShader =
 						Effect.isEnabled = isSkin;
 						Effect.ColorLerp = 0.4f;
 					}
-					/*if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_IGNORECLOTHING)) {
-						Effect.isEnabled = !isAttachment;
+					else if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_IGNOREEYES)) {
+						Effect.isEnabled = !isEyes;
 					}
-					else if (GH_MarkerTexelEquals(MarkerTexels.TopRightTexel, GH_MARKER_TOP_RIGHT_CONDITIONAL_SKINONLY)) {
-						Effect.isEnabled = isSkin;
-					}*/
 				}
 			}
 
