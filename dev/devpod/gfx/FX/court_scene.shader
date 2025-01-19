@@ -1158,7 +1158,7 @@ PixelShader =
 			#endif
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true, false);
 				// CfV end
 
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
@@ -1199,7 +1199,7 @@ PixelShader =
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false, true);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, 0.f );
 				// CfV end
@@ -1236,7 +1236,7 @@ PixelShader =
 				Diffuse.a = PdxMeshApplyOpacity( Diffuse.a, Input.Position.xy, PdxMeshGetOpacity( Input.InstanceIndex ) );
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false, false);
 				// CfV end
 
 				#ifdef VARIATIONS_ENABLED
@@ -1312,7 +1312,7 @@ PixelShader =
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorHair.rgb, Input.InstanceIndex, ColorMaskStrength );
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false, false);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 				// CfV end
@@ -1367,7 +1367,7 @@ PixelShader =
 				Diffuse.rgb *= vPaletteColorHair.rgb;
 
 				// CfV (godherja)
-				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false);
+				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false, false);
 
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect, HoverMult );
 				// CfV end
