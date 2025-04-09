@@ -1239,8 +1239,11 @@ PixelShader =
 				// CfV end
 
 				#ifdef VARIATIONS_ENABLED
+					float4 SecondColorMask = vec4( 0.0f );
+					SecondColorMask.r = Properties.r;
+					SecondColorMask.g =  NormalSampleRaw.b;
 					// CfV (POD)
-					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, PortraitEffect );
+					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, SecondColorMask, PortraitEffect );
 					// CfV end
 				#endif
 				
@@ -1253,20 +1256,20 @@ PixelShader =
 					// this is only for courtroom objects that use a pattern on it but don't want to have a hover highlight.
 					float AppliedHover = 0;
 				#elif defined( USE_CHARACTER_DATA )
-					float AppliedHover = HoverMult;
+				float AppliedHover = HoverMult;
 				#else
 					#ifdef VARIATIONS_ENABLED
-						// see portrait_user_data.fxh - it explains data layout for userdata
-						// we append hover value after _BodyPartIndex, so
-						// it's a float under index 1 in float4 element of Data array
-						// if portrait accessory use data layout changes, this will also break
+					// see portrait_user_data.fxh - it explains data layout for userdata
+					// we append hover value after _BodyPartIndex, so
+					// it's a float under index 1 in float4 element of Data array
+					// if portrait accessory use data layout changes, this will also break
 						static const int USER_DATA_HOVER_SLOT = 25;
-						float AppliedHover = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).g;
+					float AppliedHover = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).g;
 					#else
-						// if the effect doesn't have variations and is intended for a court artifact on a pedestal,
-						// then hover data is the only thing set for the entity
-						static const int USER_DATA_HOVER_SLOT = 0;
-						float AppliedHover = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).r;
+					// if the effect doesn't have variations and is intended for a court artifact on a pedestal,
+					// then hover data is the only thing set for the entity
+					static const int USER_DATA_HOVER_SLOT = 0;
+					float AppliedHover = GetUserData( Input.InstanceIndex, USER_DATA_HOVER_SLOT ).r;
 					#endif
 				#endif
 
