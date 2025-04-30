@@ -90,6 +90,13 @@ PixelShader =
 				float4 PatternProperties = PdxTex2D( PatternPropertyMaps, float3( UV, Desc._PropertyMapIndex ) );
 				float4 PatternNormalSample = PdxTex2D( PatternNormalMaps, float3( UV, Desc._NormalMapIndex ) );
 
+				//If there is a second color mask, the color palette size should be 32-width
+				#ifdef SECOND_COLOR_MASK
+					float PaletteWidth = 32.0f;
+				#else
+					float PaletteWidth = 16.0f;
+				#endif
+
 				//Sample the color palette once for each channel in the mask
 				for ( int i = 0; i < 4; ++i )
 				{
@@ -104,7 +111,7 @@ PixelShader =
 						else
 						{
 							float HorizontalSample = ( MaskIndex * 4.0f ) + i;
-							HorizontalSample = ( HorizontalSample + 0.5f ) / 16.0f;
+							HorizontalSample = ( HorizontalSample + 0.5f ) / PaletteWidth;
 							Sample = PdxTex2D( PatternColorPalette, float2( HorizontalSample, RandomNumber ) ).rgb;
 							// CfV (POD)
 							POD_SetScriptedClothingColors(Sample, MaskIndex + i, PortraitEffect);
@@ -126,13 +133,14 @@ PixelShader =
 			}
 
 			// CfV (POD)
-			void ApplyVariationPatterns( in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float4 Diffuse, inout float4 Properties, inout float3 NormalSample, GH_SPortraitEffect PortraitEffect )
+			void ApplyVariationPatterns( in VS_OUTPUT_PDXMESHPORTRAIT Input, inout float4 Diffuse, inout float4 Properties, inout float3 NormalSample, in float4 SecondColorMask, GH_SPortraitEffect PortraitEffect )
 			// CfV end
 			{
 				float4 Mask = PdxTex2D( PatternMask, Input.UV0 );
 				float4 PatternDiffuse = float4( 1.0f, 1.0f, 1.0f, 1.0f );
 				float3 PatternNormal = float3( 0.0f, 0.0f, 1.0f );
 				float4 PatternProperties = Properties;
+				PatternProperties.r = 1.0f;
 
 				float RandomNumber = GetRandomNumber( Input.InstanceIndex );
 				for( int i = 0; i < 4; ++i )
@@ -149,6 +157,25 @@ PixelShader =
 						PatternProperties = lerp( PatternProperties, PatternOutput._Properties, Mask[i] * OpacityMask);
 					}
 				}
+
+				//Currently, we're only using 2 channels, leaving 2 channels available.
+				#ifdef SECOND_COLOR_MASK
+					float MaskOffset = 4.0f;
+					for( int i = 0; i < 2; ++i )
+					{
+						if( SecondColorMask[i] > 0.0f )
+						{
+							float OpacityMask = 0;
+							// CfV (POD) (TODO: check what the second mask actually does)
+							SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetSecondPatternDesc( Input.InstanceIndex, i ), RandomNumber, ( i + MaskOffset ), OpacityMask, PortraitEffect );
+							// CfV end
+
+							PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, SecondColorMask[i] * OpacityMask);
+							PatternNormal = lerp( PatternNormal, PatternOutput._Normal.rgb, SecondColorMask[i] * OpacityMask);
+							PatternProperties = lerp( PatternProperties, PatternOutput._Properties, SecondColorMask[i] * OpacityMask);
+						}
+					}
+				#endif
 
 				Diffuse *= PatternDiffuse;
 				Diffuse.rgb *= PatternProperties.rrr; // pattern AO
