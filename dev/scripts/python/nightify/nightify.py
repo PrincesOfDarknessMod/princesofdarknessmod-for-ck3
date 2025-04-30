@@ -390,6 +390,20 @@ if len(parse_errors) == 0 and len(unknown_bgs) == 0 and len(unknown_environments
             warning_string += formatGreen(nightify_shared.vanilla_religion_warnings[vanilla_religion])
             print(warning_string)
     
+    if file_output.find(nightify_shared.nomadic_gov_warning) != -1:
+        warning_string = formatRed("Warning:") + " The output contains at least one reference to the vanilla government flag "
+        warning_string += formatOrange(nightify_shared.nomadic_gov_warning)
+        warning_string += "\n         Make sure to add or replace it with the PoD trigger "
+        warning_string += formatGreen(nightify_shared.nomadic_gov_trigger)
+        print(warning_string)
+    
+    if file_output.find(nightify_shared.nomadic_tier_warning) != -1:
+        warning_string = formatRed("Warning:") + " The output contains at least one reference to the vanilla nomad law "
+        warning_string += formatOrange(nightify_shared.nomadic_tier_warning)
+        warning_string += "\n         Make sure to add or replace it with a trigger that works for feudal governments: "
+        warning_string += formatGreen(nightify_shared.nomadic_tier_trigger)
+        print(warning_string)
+    
     if file_output.find(nightify_shared.gruesome_festival_warning) != -1:
         warning_string = formatRed("Warning:") + " The output contains at least one reference to the Gruesome Festival background "
         warning_string += formatOrange(nightify_shared.gruesome_festival_warning)
