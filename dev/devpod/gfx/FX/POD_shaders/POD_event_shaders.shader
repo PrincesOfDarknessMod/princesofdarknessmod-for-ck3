@@ -1360,6 +1360,97 @@ PixelShader =
 	}
 }
 
+MainCode PS_VortexPortal
+{
+	Input = "VS_OUTPUT_PDX_GUI"
+	Output = "PDX_COLOR"
+	Code
+	[[
+		float rand(float2 p) {
+			return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+		}
+
+		float noise(float2 p) {
+			float2 f = frac(p);
+			f = f * f * f * f * (3. - 2. * f) * (3. - 2. * f);
+			float2 i = floor(p);
+			return lerp(lerp(rand(i + float2(0, 0)), 
+						rand(i + float2(1, 0)), f.x),
+					lerp(rand(i + float2(0, 1)), 
+						rand(i + float2(1, 1)), f.x), f.y);
+		}
+
+		float fbm(float2 p) {
+			float v = 0.;
+			float a = 1.;
+			for(int i = 0; i < 4; ++i) {
+				p = 1.5 * p + 15.;
+				a *= 0.5;
+				v += a * noise(p);
+			}
+			return v;
+		}
+
+		PDX_MAIN
+		{
+			float2 uv = (Input.UV0 - 0.5) * float2(2.0, 1.0);
+			uv.x -= 0.33;
+			float time = GuiTime * 0.4;
+			float dist = length(uv);
+			float angle = atan2(uv.y, uv.x);
+			
+			// Combined rotation + radial motion parameters
+			float rotationSpeed = 1.5;
+			float radialSpeed = -0.5;
+			float spiralTightness = 3.6;
+			
+			// Dual motion calculation
+			float2 p = float2(
+				cos(-angle - dist * spiralTightness + time * rotationSpeed),
+				dist + time * radialSpeed  // Radial outward movement
+			);
+
+			// Generate noise pattern with dual motion
+			float2 r1 = float2(fbm(p + 0.02 * time), fbm(p + 0.005 * time));
+			float2 r2 = float2(
+				fbm(p + 0.15 * time + 10. * r1), 
+				fbm(p + 0.12 * time + 12. * r1 + float2(time * 0.2, 0.0))
+			);
+
+			float col = 2.0 * pow(fbm(p + r2 * float2(1.2, 0.8)), 2.0);
+
+			// Dark center tunnel
+			float centerSize = 0.3;
+			float centerMask = smoothstep(centerSize - 0.05, centerSize + 0.05, dist);
+			float3 finalColor = float3(0.0, 0.0, 0.0);
+
+			// Corona energy ring
+			float corona = smoothstep(centerSize, centerSize + 0.1, dist) * 
+						(1.0 - smoothstep(centerSize + 0.1, centerSize + 0.15, dist));
+			
+			// Radiating crimson flow (dual motion effect)
+			float3 vortexColor = float3(
+				(col * 1.5 + 0.2 * sin(dist * 20.0 - time * 5.0)) * centerMask,
+				col * 0.3 * centerMask,
+				pow(col, 4.0) * 0.25 * centerMask
+			);
+
+			// Motion blending
+			finalColor = lerp(finalColor, vortexColor, centerMask);
+			
+			// Animated corona with outward streaks
+			float coronaFlash = sin(time * 5.0 + dist * 20.0) * 0.5 + 0.5;
+			finalColor += corona * float3(1.0, 0.6, 0.3) * (col + 0.5) * coronaFlash;
+
+			// Alpha with outward fade
+			float alpha = SampleImageSprite(Texture, Input.UV0).a * 
+						smoothstep(0.0, 0.5, dist) * 
+						(1.0 - smoothstep(0.8, 1.2, dist));
+			
+			return float4(finalColor, alpha);
+		}
+	]]
+}
 # SampleImageSprite( Texture, Input.UV0 );
 
 BlendState BlendState
@@ -1799,6 +1890,20 @@ Effect FlowyGoldDisabled
 	PixelShader = "PS_Flowyblood"
 	
 	Defines = { "GOLD" "DISABLED" }
+}
+Effect VortexPortal
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_VortexPortal"
+	BlendState = "BlendState"
+}
+
+Effect VortexPortalDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_VortexPortal"
+	BlendState = "BlendState"
+	Defines = { "DISABLED" }
 }
 
 Effect FlowyGrey
