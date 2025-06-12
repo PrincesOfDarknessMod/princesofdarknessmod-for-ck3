@@ -859,7 +859,8 @@ PixelShader =
 				float timeSpeed = SPEED;
 				float realTime = timeSpeed*time;
 				//
-				float2 coordScaled = 0.01*fragPosition;
+				//float2 coordScaled = 0.01*fragPosition;
+				float2 coordScaled = 0.02*fragPosition;
 				float3 position = float3(coordScaled,0.0);
 				//float3 position = float3(coordScaled,0.0) + float3(1223.0,6434.0,8425.0);
 				float3 flow = float3(4.1*(0.5-xpart)*pow(ypartClippedn,4.0),-2.0*xfuel*pow(ypartClippedn,64.0),0.0);
