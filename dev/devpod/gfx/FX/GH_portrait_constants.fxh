@@ -99,6 +99,7 @@ PixelShader =
 		static const float POD_GENE_WEIGHT_CONDITIONAL_CLOTHINGONLY   = 0.2f;
 		static const float POD_GENE_WEIGHT_CONDITIONAL_JURATA         = 0.3f;
 		static const float POD_GENE_WEIGHT_CONDITIONAL_IGNOREEYES     = 0.4f;
+		static const float POD_GENE_WEIGHT_CONDITIONAL_DOLL           = 0.5f;
 
 		//
 		// Types
