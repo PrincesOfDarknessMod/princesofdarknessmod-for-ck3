@@ -364,6 +364,10 @@ PixelShader =
 					else if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_IGNOREEYES)) {
 						Effect.isEnabled = !isEyes;
 					}
+					else if (POD_GeneWeightEquals(ConditionalGeneWeight, POD_GENE_WEIGHT_CONDITIONAL_DOLL)) {
+						Effect.isEnabled = !isEyes;
+						Effect.ColorLerp = 0.2f;
+					}
 				}
 			}
 
