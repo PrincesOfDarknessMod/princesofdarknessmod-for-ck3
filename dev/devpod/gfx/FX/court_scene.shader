@@ -1195,8 +1195,12 @@ PixelShader =
 				float4 Properties = PdxTex2D( PropertiesMap, UV0 );
 				float3 NormalSample = UnpackRRxGNormal( PdxTex2D( NormalMap, UV0 ) );
 
+				// CfV POD: allow our custom eyes to ignore genetic eye color
+				// otherwise the game tries to blend our texture with character eye color, leading to visual glitches
+				#ifndef IGNORE_GENETIC_EYE_COLOR
 				float ColorMaskStrength = Diffuse.a;
 				Diffuse.rgb = GetColorMaskColorBLend( Diffuse.rgb, vPaletteColorEyes.rgb, Input.InstanceIndex, ColorMaskStrength );
+				#endif
 
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, false, true);
