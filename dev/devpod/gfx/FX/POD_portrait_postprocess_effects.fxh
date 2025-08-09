@@ -11,14 +11,22 @@ PixelShader =
 		
 		// TODO: put hash/noise/FBM/domainwarp functions in shared shader file
 		
-		float POD_SmokeRand(float2 n) {
-			return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+		// float POD_SmokeRand(float2 n) {
+		// 	return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+		// }
+		
+		// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+		// because the trig-based hash functions cause issues on vulkan
+		float POD_Hash(float2 p) {
+			float3 p3 = frac(float3(p.xyx) * .1031);
+			p3 += dot(p3, p3.yzx + 33.33);
+			return frac((p3.x + p3.y) * p3.z);
 		}
 
 		float POD_SmokeNoise(float2 n) {
 			const float2 d = float2(0.0, 1.0);
 			float2 b = floor(n), f = smoothstep(float2(0.0,0.0), float2(1.0,1.0), frac(n));
-			return lerp(lerp(POD_SmokeRand(b), POD_SmokeRand(b + d.yx), f.x), lerp(POD_SmokeRand(b + d.xy), POD_SmokeRand(b + d.yy), f.x), f.y);
+			return lerp(lerp(POD_Hash(b), POD_Hash(b + d.yx), f.x), lerp(POD_Hash(b + d.xy), POD_Hash(b + d.yy), f.x), f.y);
 		}
 
 		float POD_SmokeFBM(float2 n) {
@@ -58,17 +66,17 @@ PixelShader =
 		
 		#define FIRESPEED float2(0.0,-0.1)
 		
-		float POD_FireHash(in float2 co) {
-			return frac(sin(dot(co.xy ,float2(12.9898,58.233))) * 13758.5453);
-		}
+		// float POD_FireHash(in float2 co) {
+		// 	return frac(sin(dot(co.xy ,float2(12.9898,58.233))) * 13758.5453);
+		// }
 		
 		float POD_FireNoise(float2 p){
 			float2 ip = floor(p);
 			float2 u = frac(p);
 			u = u*u*(3.0-2.0*u);
 			float res = lerp(
-				lerp(POD_FireHash(ip),POD_FireHash(ip+float2(1.0,0.0)),u.x),
-				lerp(POD_FireHash(ip+float2(0.0,1.0)),POD_FireHash(ip+float2(1.0,1.0)),u.x),u.y);
+				lerp(POD_Hash(ip),POD_Hash(ip+float2(1.0,0.0)),u.x),
+				lerp(POD_Hash(ip+float2(0.0,1.0)),POD_Hash(ip+float2(1.0,1.0)),u.x),u.y);
 			return res*res;
 		}
 		
