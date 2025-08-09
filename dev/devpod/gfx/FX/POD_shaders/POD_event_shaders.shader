@@ -554,7 +554,7 @@ PixelShader =
 				float noise = 0.0;
 				float alpha = 1.0;
 				float size = 1.0;
-				float2 offset;
+				float2 offset = float2(0.0,0.0);
 				for (int i = 0; i < layers; i++)
 				{
 					offset += hash2_2(float2(alpha, size)) * 10.0;
