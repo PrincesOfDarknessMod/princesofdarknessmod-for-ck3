@@ -69,8 +69,16 @@ PixelShader =
 				);
 			}
 
-			float rand(float2 uv){
-				return frac(sin(dot(float2(12.9898,78.233), uv)) * 43758.5453123);
+			// float rand(float2 uv){
+			// 	return frac(sin(dot(float2(12.9898,78.233), uv)) * 43758.5453123);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float rand(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
 
 			float valueNoise(float2 uv){
@@ -204,7 +212,15 @@ PixelShader =
 		[[
 			// adapted from https://www.shadertoy.com/view/ldBSRd
 
-			float2 random2(float2 c) { float j = 4906.0*sin(dot(c,float2(169.7, 5.8))); float2 r; r.x = frac(512.0*j); j *= .125; r.y = frac(512.0*j);return r-0.5;}
+			//float2 random2(float2 c) { float j = 4906.0*sin(dot(c,float2(169.7, 5.8))); float2 r; r.x = frac(512.0*j); j *= .125; r.y = frac(512.0*j);return r-0.5;}
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float2 random2(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+				p3 += dot(p3, p3.yzx+33.33);
+				return frac((p3.xx+p3.yz)*p3.zy);
+			}
 
 			static const float F2 =  0.3660254;
 			static const float G2 = -0.2113249;
@@ -340,9 +356,17 @@ PixelShader =
 				return c;
 			}
 
-			float2 hash( float2 p ){
-				p = float2( dot(p,float2(127.1,311.7)),dot(p,float2(269.5,183.3)));
-				return frac(sin(p)*43758.5453) * 2.0 - 1.0;
+			// float2 hash( float2 p ){
+			// 	p = float2( dot(p,float2(127.1,311.7)),dot(p,float2(269.5,183.3)));
+			// 	return frac(sin(p)*43758.5453) * 2.0 - 1.0;
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float2 hash(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+				p3 += dot(p3, p3.yzx+33.33);
+				return frac((p3.xx+p3.yz)*p3.zy);
 			}
 
 			float dirt(float2 uv, float n)
@@ -453,17 +477,31 @@ PixelShader =
 			#define ALPHA_MOD 0.9
 			#define LAYERS_COUNT 15
 
-			float hash1_2(in float2 x)
-			{
-				float d = dot(x, float2(52.127, 61.2871));
-				return frac(sin(d) * 521.582);   
-			}
+			// float hash1_2(in float2 x)
+			// {
+			// 	float d = dot(x, float2(52.127, 61.2871));
+			// 	return frac(sin(d) * 521.582);
+			// }
 
-			float2 hash2_2(in float2 x)
-			{
-				float2 m = mul(x, float2x2(20.52, 24.1994, 70.291, 80.171));
-				float2 s = float2(sin(m.x),sin(m.y));
-				return frac(s * 492.194);
+			// float2 hash2_2(in float2 x)
+			// {
+			// 	float2 m = mul(x, float2x2(20.52, 24.1994, 70.291, 80.171));
+			// 	float2 s = float2(sin(m.x),sin(m.y));
+			// 	return frac(s * 492.194);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float hash1_2(in float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
+			}
+			
+			float2 hash2_2(in float2 p) {
+				float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+				p3 += dot(p3, p3.yzx+33.33);
+				return frac((p3.xx+p3.yz)*p3.zy);
 			}
 
 			//Simple interpolated noise
@@ -794,7 +832,7 @@ PixelShader =
 			// From https://www.shadertoy.com/view/4djSRW
 			float prng(in float2 seed) {
 				seed = frac(seed * float2 (5.3983, 5.4427));
-				seed += dot (seed.yx, seed.xy + float2 (21.5351, 14.3137));
+				seed += dot(seed.yx, seed.xy + float2 (21.5351, 14.3137));
 				return frac(seed.x * seed.y * 95.4337);
 			}
 
@@ -930,8 +968,16 @@ PixelShader =
 		[[
 			// adapted from https://www.shadertoy.com/view/7tsfWS
 			
-			float rand(float2 n) {
-				return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+			// float rand(float2 n) {
+			// 	return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float rand(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
 
 			float noise(float2 n) {
@@ -1063,9 +1109,17 @@ PixelShader =
 			#define ParticleColor2			float3(1.5, 0.5, 0.0)
 
 
-			float hash( float x )
-			{
-				return frac( sin( x ) * 43758.5453 );
+			// float hash( float x )
+			// {
+			// 	return frac( sin( x ) * 43758.5453 );
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float hash(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
 
 			float noise( float2 uv )  // Thanks Inigo Quilez
@@ -1177,8 +1231,16 @@ PixelShader =
 		[[
 			// adapted from https://www.shadertoy.com/view/ftd3zX
 			
+			// float rand(float2 p) {
+			// 	return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
 			float rand(float2 p) {
-				return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
 
 			float noise(float2 p) {
@@ -1367,8 +1429,16 @@ MainCode PS_VortexPortal
 	Output = "PDX_COLOR"
 	Code
 	[[
+		// float rand(float2 p) {
+		// 	return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+		// }
+		
+		// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+		// because the trig-based hash functions cause issues on vulkan
 		float rand(float2 p) {
-			return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+			float3 p3 = frac(float3(p.xyx) * .1031);
+			p3 += dot(p3, p3.yzx + 33.33);
+			return frac((p3.x + p3.y) * p3.z);
 		}
 
 		float noise(float2 p) {
