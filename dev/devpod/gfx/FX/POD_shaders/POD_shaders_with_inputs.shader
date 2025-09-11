@@ -54,6 +54,140 @@ PixelShader =
 		]]
 	}
 
+	MainCode PS_PODTernaryGraph
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float hash(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
+			}
+			
+			float noise(float2 p) {
+				float2 ip = floor(p);
+				float2 u = frac(p);
+				u = u*u*(3.0-2.0*u);
+				float res = lerp(
+					lerp(hash(ip),hash(ip+float2(1.0,0.0)),u.x),
+					lerp(hash(ip+float2(0.0,1.0)),hash(ip+float2(1.0,1.0)),u.x),u.y);
+				return res*res;
+			}
+			
+			float fbm( in float2 x, in float2 speed ) {
+				const float H = 0.8;
+				float G = exp2(-H);
+				float f = 1.0;
+				float a = 1.0;
+				float t = 0.0;
+				for( int i=0; i<12; i++ ) {
+					t += a*noise(f * x + speed);
+					f *= 2.0;
+					a *= G;
+				}
+				//return t;
+				return smoothstep(0.,1.5,t);
+			}
+			
+			float domainwarp( in float2 p, in float2 speed ) {
+				float2 q = float2( fbm( p + float2(0.0,0.0), speed ),
+							fbm( p + float2(5.2,1.3), speed ) );
+
+				return fbm( p + 4.0*q, speed );
+			}
+			
+			// equilateral triangle SDF, from https://www.shadertoy.com/view/Xl2yDW
+			// r is the bounding circle's radius
+			float sdEquilateralTriangle( in float2 p, in float r ) {
+				const float k = sqrt(3.0);
+				p.x = abs(p.x);
+				p -= float2(0.5,0.5*k)*max(p.x+k*p.y,0.0);
+				p -= float2(clamp(p.x,-0.5*r*k,0.5*r*k),-0.5*r);
+				return length(p)*sign(-p.y);
+			}
+			
+			float2 rot2d(in float2 coord, in float angle) {
+				float c = cos(angle);
+				float s = sin(angle);
+				return mul( coord, float2x2(c, -s, s, c) );
+			}
+			
+			float SDFToLine( in float x, in float thickness, in float feathering ) {
+				float min = thickness - feathering;
+				float max = thickness + feathering;
+				return smoothstep(max,min,x);
+			}
+			
+			// because guess what, the modulo operator works differently in GLSL and HLSL
+			// https://stackoverflow.com/questions/7610631/glsl-mod-vs-hlsl-fmod
+			float GLSLmod(in float x, in float y) {
+				return x - y * floor(x/y);
+			}
+			
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y; // UVs are upside down in ck3
+				float2 fragCoord = uv * SpriteSize.xy;
+				float2 p = (2.0*fragCoord.xy-SpriteSize.xy)/SpriteSize.y;
+				
+				// center (sort of) and zoom
+				//p *= 0.75;
+				//p.y += 0.25;
+				//p *= 1.25;
+				
+				// alternatively, scoot a bit
+				//p.y += 0.1;
+				
+				float grid_divisions    = SpriteBorder[0].x; // spriteborder_left
+				float line_thickness    = SpriteBorder[0].y; // spriteborder_top
+				float line_feathering   = SpriteBorder[0].z; // spriteborder_right
+				float domainwarp_weight = SpriteBorder[0].w; // spriteborder_bottom
+				
+				float lineweight_gradient = SpriteBorder[1].x; // spriteborder_left
+				
+				
+				// first domainwarp to un-straighten the lines
+				p.x += (-0.5+0.5*domainwarp(p*0.2, 0.))*0.01*domainwarp_weight;
+				p.y += (-0.5+0.5*domainwarp(p*0.2,10.))*0.01*domainwarp_weight;
+				// second domainwarp to feather the lines ("pencil" texture)
+				p.x += (-0.5+0.5*domainwarp(p*40.,20.))*0.008*domainwarp_weight;
+				p.y += (-0.5+0.5*domainwarp(p*40.,30.))*0.008*domainwarp_weight;
+				
+				float sdf = sdEquilateralTriangle( p, 1.0 );
+				
+				float2 pa = rot2d(p, 2.0*PI*(1.0/3.0));
+				float2 pb = rot2d(p, 2.0*PI*(2.0/3.0));
+				
+				float interval = 1.5 / grid_divisions;
+				
+				float lines_a = min( GLSLmod( pa.y-1.0, interval ), GLSLmod( -pa.y+1.0, interval ) );
+				float lines_b = min( GLSLmod( pb.y-1.0, interval ), GLSLmod( -pb.y+1.0, interval ) );
+				float lines_c = min( GLSLmod(  p.y-1.0, interval ), GLSLmod(  -p.y+1.0, interval ) );
+				
+				float grid = min(lines_a,min(lines_b,min(lines_c,-sdf)));
+				
+				// lines become thinner near the center
+				float line_thickness_center = line_thickness * min( 0.35 + length(p*0.6), 1.0 );
+				float line_thickness_grid = lerp(line_thickness, line_thickness_center, lineweight_gradient);
+				
+				float grid_ss     = SDFToLine( grid, line_thickness_grid, line_feathering );
+				float bound_outer = SDFToLine(  sdf, line_thickness,      line_feathering );
+				
+				float alpha = lerp( 0.0, 1.0, grid_ss * bound_outer );
+				
+				float4 color = SpriteModifyTexturesColors[1];
+				color.a *= alpha;
+				color.a *= SampleImageSprite( Texture, Input.UV0 ).a; // apply modify_texture alphamultiply
+				return color;
+			}
+		]]
+	}
+
 	MainCode PS_PODYomi
 	{
 		Input = "VS_OUTPUT_PDX_GUI"
@@ -264,6 +398,19 @@ Effect PdxGuiPreMultipliedAlphaDisabled
 	PixelShader = "PS_Default"
 	BlendState = PreMultipliedAlpha
 	
+	Defines = { "DISABLED" }
+}
+
+Effect PODTernaryGraph
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODTernaryGraph"
+}
+
+Effect PODTernaryGraphDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODTernaryGraph"
 	Defines = { "DISABLED" }
 }
 
