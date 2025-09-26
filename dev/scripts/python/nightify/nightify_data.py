@@ -1,3 +1,8 @@
+file_header = """##### THIS FILE WAS AUTO-GENERATED
+##### Refer to the 1-click nightification script for more information:
+##### /dev/scripts/python/nightify/nightify_cli.py
+
+"""
 
 night_trigger = "POD_use_nighttime_event_bg = yes"
 night_trigger_activity = "POD_use_nighttime_event_bg_activity = yes"
