@@ -261,6 +261,9 @@ class Nightify:
     def pprint(self):
         ck3_parser.ck3_parse_results_pprint(self.results)
     
+    def pformat(self):
+        return ck3_parser.ck3_parse_results_pformat(self.results)
+    
     def get_parser_log(self):
         return self.parser_log
     
@@ -350,6 +353,9 @@ class Nightify:
         #log += "\n"
         
         return log
+    
+    def get_file_output(self):
+        return self.file_output
     
     def attempt_file_output(self, path):
         if self.successful_parse:

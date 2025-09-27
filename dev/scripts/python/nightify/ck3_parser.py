@@ -26,6 +26,7 @@
 
 
 import pyparsing as pp
+import io
 
 
 def ck3_parse(file_content):
@@ -68,3 +69,11 @@ def ck3_parse_results_as_list(parse_results):
 
 def ck3_parse_results_pprint(parse_results):
     parse_results.pprint()
+
+
+def ck3_parse_results_pformat(parse_results):
+    output = io.StringIO()
+    parse_results.pprint(stream=output)
+    contents = output.getvalue()
+    output.close()
+    return contents
