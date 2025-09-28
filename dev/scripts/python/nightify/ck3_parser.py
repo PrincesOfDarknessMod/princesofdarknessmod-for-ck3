@@ -77,3 +77,13 @@ def ck3_parse_results_pformat(parse_results):
     contents = output.getvalue()
     output.close()
     return contents
+
+
+def recursive_concat(input_list):
+    output_string = ""
+    for element in input_list:
+        if not isinstance(element, list):
+            output_string += element
+        else:
+            output_string += recursive_concat(element)
+    return output_string
