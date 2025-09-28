@@ -55,16 +55,6 @@ class TextFormatter:
             output_text = text
 
         return output_text
-    
-
-def recursive_concat(input_list):
-    output_string = ""
-    for element in input_list:
-        if not isinstance(element, list):
-            output_string += element
-        else:
-            output_string += recursive_concat(element)
-    return output_string
 
 
 class Nightify:
@@ -248,7 +238,7 @@ class Nightify:
         
         if self.successful_parse:
             # flatten the list
-            self.file_output = nightify_data.file_header + recursive_concat(self.output_list)
+            self.file_output = nightify_data.file_header + ck3_parser.recursive_concat(self.output_list)
         else:
             self.file_output = ""
     
@@ -260,6 +250,9 @@ class Nightify:
     
     def pprint(self):
         ck3_parser.ck3_parse_results_pprint(self.results)
+    
+    def pformat(self):
+        return ck3_parser.ck3_parse_results_pformat(self.results)
     
     def get_parser_log(self):
         return self.parser_log
@@ -350,6 +343,9 @@ class Nightify:
         #log += "\n"
         
         return log
+    
+    def get_file_output(self):
+        return self.file_output
     
     def attempt_file_output(self, path):
         if self.successful_parse:
