@@ -145,14 +145,20 @@ PixelShader =
 			}
 
 			float df(float2 uv, float2 texSize) {
+				float2 sdf1_offset = SpriteBorder[1].xy;
+				float2 sdf2_offset = SpriteBorder[2].xy;
+				
+				float sdf1_scale = SpriteTranslateRotateUVAndAlpha[1].z;
+				float sdf2_scale = SpriteTranslateRotateUVAndAlpha[2].z;
 				
 				//float2 sdf_uv = ( p + float2(.5,.5) ) * 1.25;
-				float2 sdf_uv = ( uv - float2(.5,.15) ) * texSize / SDF_SIZE * 0.9;
-				float podsdf  = get_texture_sdf(ModifyTexture0, sdf_uv);
-				float ankhsdf = get_texture_sdf(ModifyTexture1, sdf_uv);
+				float2 sdf1_uv = ( uv - sdf1_offset ) * texSize / SDF_SIZE * sdf1_scale;
+				float2 sdf2_uv = ( uv - sdf2_offset ) * texSize / SDF_SIZE * sdf2_scale;
+				float sdf1 = get_texture_sdf(ModifyTexture0, sdf1_uv);
+				float sdf2 = get_texture_sdf(ModifyTexture1, sdf2_uv);
 
 				float sdflerp = cos(GuiTime * 0.2) * .5 + .5;
-				float lerped_sdf = lerp(podsdf, ankhsdf, sdflerp);
+				float lerped_sdf = lerp(sdf1, sdf2, sdflerp);
 
 				return 0.5 - lerped_sdf;
 			}
@@ -223,7 +229,8 @@ PixelShader =
 
 				col = float3(col.r, 0.0, col.r*col.r*col.r*col.r*col.r*0.25);
 
-				float alpha = 1.0 - ( (1.0 - col.r) * (1.0 - SampleImageSprite(Texture,Input.UV0).a) );
+				//float alpha = 1.0 - ( (1.0 - col.r) * (1.0 - SampleImageSprite(Texture,Input.UV0).a) );
+				float alpha = SampleImageSprite(Texture,Input.UV0).a * lerp(col.r, 1.0, SpriteBorder[0].x);
 
 				//float alpha = 1.0;
 
