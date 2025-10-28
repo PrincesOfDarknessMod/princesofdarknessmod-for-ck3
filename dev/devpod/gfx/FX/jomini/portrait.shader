@@ -13,6 +13,7 @@ Includes = {
 	"jomini/portrait_user_data.fxh"
 	"jomini/portrait_hair_lighting.fxh"
 	"jomini/portrait_lighting.fxh"
+	"jomini/shader_utility.fxh"
 	"constants.fxh"
 	# CfV (godherja)
 	"GH_portrait_effects.fxh"
@@ -254,19 +255,30 @@ PixelShader =
 				DebugReturn( Out, MaterialProps, LightingProps, EnvironmentMap );
 			#endif
 		}
+		
+		float3 TangentSpaceToWorldNormal( in VS_OUTPUT_PDXMESHPORTRAIT Input, float3 NormalSample )
+		{
+			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
+			return normalize( mul( NormalSample, TBN ) );
+		}
+
+		float3 TangentSpaceToWorldNormalWithTwoNormal( in VS_OUTPUT_PDXMESHPORTRAIT Input, float3 FirstNormalSample, float3 SecondNormalSample, float NormalUVChannel )
+		{
+			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
+			float3 BaseWorldNormal  = normalize( mul( FirstNormalSample, TBN ) );
+			float3x3 TBN2 = BuildTangentFrame( BaseWorldNormal , Input.WorldSpacePos, Input.UV1 );
+			float3 LayeredNormal = normalize( mul( SecondNormalSample, TBN2 ) );
+			return lerp( BaseWorldNormal , LayeredNormal, NormalUVChannel );
+		}
 
 		// CfV (godherja)
-		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
-		// CfV end
+		float3 CommonPixelShaderColor( float4 Diffuse, float4 Properties, float3 Normal, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
 		{
-
-			float3x3 TBN = Create3x3( normalize( Input.Tangent ), normalize( Input.Bitangent ), normalize( Input.Normal ) );
-			float3 Normal = normalize( mul( NormalSample, TBN ) );
-
 			// CfV (godherja)
 			GH_TryApplyStatueEffect(PortraitEffect, Diffuse, Properties, Normal, Input);
-			// CfV end
-			
+
+			GetSpecularAA( Normal, 1.0f, 1.0f, Properties.a );
+
 			SMaterialProperties MaterialProps = GetMaterialProperties( Diffuse.rgb, Normal, saturate( Properties.a ), Properties.g, Properties.b );
 			SLightingProperties LightingProps = GetSunLightingProperties( Input.WorldSpacePos, ShadowTexture );
 			
@@ -322,10 +334,24 @@ PixelShader =
 			POD_TryApplyStatueLighting(PortraitEffect, Normal, Color);
 			// CfV end
 			
-			Color = ApplyDistanceFog( Color, Input.WorldSpacePos );
-			
 			DebugReturn( Color, MaterialProps, LightingProps, EnvironmentMap, ScatteringColor, ScatteringMask, DiffuseTranslucency );
 			return Color;
+		}
+
+		// CfV (godherja)
+		float3 CommonPixelShader( float4 Diffuse, float4 Properties, float3 NormalSample, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
+		{
+			float3 Normal = TangentSpaceToWorldNormal( Input, NormalSample );
+			// CfV (godherja)
+			return CommonPixelShaderColor( Diffuse, Properties, Normal, Input, PortraitEffect );
+		}
+
+		// CfV (godherja)
+		float3 CommonPixelShaderWithTwoNormal( float4 Diffuse, float4 Properties, float3 FirstNormalSample, float3 SecondNormalSample, float NormalUVChannel, in VS_OUTPUT_PDXMESHPORTRAIT Input, in GH_SPortraitEffect PortraitEffect )
+		{
+			float3 Normal = TangentSpaceToWorldNormalWithTwoNormal( Input, FirstNormalSample, SecondNormalSample, NormalUVChannel );
+			// CfV (godherja)
+			return CommonPixelShaderColor( Diffuse, Properties, Normal, Input, PortraitEffect );
 		}
 
 		// Remaps Value to [IntervalStart, IntervalEnd]
@@ -405,8 +431,7 @@ PixelShader =
 				
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, false, true, false);
-				// CfV end
-				
+
 				AddDecals( Diffuse.rgb, NormalSample, Properties, UV0, Input.InstanceIndex, 0, PreSkinColorDecalCount );
 				
 				float ColorMaskStrength = Diffuse.a;
@@ -416,7 +441,7 @@ PixelShader =
 				
 				// CfV (godherja)
 				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
-				// CfV end
+
 				Out.Color = float4( Color, 1.0f );
 
 				Out.SSAOColor = PdxTex2D( SSAOColorMap, UV0 );
@@ -424,7 +449,6 @@ PixelShader =
 				
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 
 				return Out;
 			}
@@ -466,7 +490,6 @@ PixelShader =
 				
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 	
 				return Out;
 			}
@@ -495,15 +518,15 @@ PixelShader =
 				
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false, false);
-				// CfV end
 
 				#ifdef VARIATIONS_ENABLED
 					float4 SecondColorMask = vec4( 0.0f );
 					SecondColorMask.r = Properties.r;
 					SecondColorMask.g =  NormalSampleRaw.b;
+					float3 PatternNormal = NormalSample;
+					float NormalUVChannel = 0.0f;
 					// CfV (POD)
-					ApplyVariationPatterns( Input, Diffuse, Properties, NormalSample, SecondColorMask, PortraitEffect );
-					// CfV end
+					ApplyVariationPatterns( Input, Diffuse, Properties, PatternNormal, SecondColorMask, PortraitEffect, NormalUVChannel );
 				#endif
 				
 				#ifdef COA_ENABLED
@@ -511,18 +534,18 @@ PixelShader =
 					ApplyCoa( Input, Diffuse, CoaColor1, CoaColor2, CoaColor3, CoaOffsetAndScale.xy, CoaOffsetAndScale.zw, CoaTexture, Properties.r );
 				#endif
 
-
-				
 				// CfV (godherja)
-				float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
-				// CfV end
+				#ifdef VARIATIONS_ENABLED
+					float3 Color = CommonPixelShaderWithTwoNormal( Diffuse, Properties, NormalSample, PatternNormal, NormalUVChannel, Input, PortraitEffect );
+				#else 
+					float3 Color = CommonPixelShader( Diffuse, Properties, NormalSample, Input, PortraitEffect );
+				#endif
 
 				Out.Color = float4( Color, Diffuse.a );
 				Out.SSAOColor = float4( vec3( 0.0f ), 1.0f );
 				
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 
 				return Out;
 			}
@@ -551,7 +574,8 @@ PixelShader =
 				PS_COLOR_SSAO Out;
 
 				float2 UV0 = Input.UV0;
-				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );								
+				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );
+				clip( Diffuse.a - 1e-5 );
 				float4 Properties = PdxTex2D( PropertiesMap, UV0 );
 				Properties *= vHairPropertyMult;
 				float4 NormalSampleRaw = PdxTex2D( NormalMap, UV0 );
@@ -591,7 +615,6 @@ PixelShader =
 
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 
 				return Out;
 			}
@@ -632,7 +655,6 @@ PixelShader =
 
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 
 				return Out;
 			}
@@ -764,7 +786,8 @@ PixelShader =
 				PS_COLOR_SSAO Out;
 
 				float2 UV0 = Input.UV0;
-				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );								
+				float4 Diffuse = PdxTex2D( DiffuseMap, UV0 );
+				clip( Diffuse.a - 1e-5 );								
 				float4 Properties = PdxTex2D( PropertiesMap, UV0 );
 				Properties *= vHairPropertyMult;
 				float4 NormalSampleRaw = PdxTex2D( NormalMap, UV0 );
@@ -810,7 +833,6 @@ PixelShader =
 
 				// CfV (POD)
 				POD_RemapColorsForPostEffect( Out, PortraitEffect );
-				// CfV end
 
 				return Out;
 			}
@@ -1091,7 +1113,6 @@ Effect portrait_hair_transparency_hack
 	VertexShader = "VS_standard"
 	PixelShader = "PS_hair"
 	# CfV EK2
-	#BlendState = "alpha_to_coverage"
 	BlendState = "hair_alpha_blend"
 	RasterizerState = "rasterizer_no_culling"
 	Defines = { "HAIR_TRANSPARENCY_HACK" "PDX_MESH_BLENDSHAPES" }
