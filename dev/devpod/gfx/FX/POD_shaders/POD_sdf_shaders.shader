@@ -181,7 +181,7 @@ PixelShader =
 				col=pow(clamp(col,0.0,1.0),float3(0.75,0.75,0.75));
 				col=col*0.6+0.4*col*col*(3.0-2.0*col);  // contrast
 				float saturator = dot(col, float3(0.33,0.33,0.33));
-				col=lerp(col, float3(saturator,saturator,saturator), -0.4);  // satuation
+				col=lerp(col, float3(saturator,saturator,saturator), -0.4);  // saturation
 				return col;
 			}
 
@@ -226,11 +226,18 @@ PixelShader =
 				//col = postProcess(col);
 
 				//col *= smoothstep(0.0, 16.0, GuiTime*GuiTime);
+				
+				float expR = SpriteBorder[3].x;
+				float expG = SpriteBorder[3].y;
+				float expB = SpriteBorder[3].z;
 
-				col = float3(col.r, 0.0, col.r*col.r*col.r*col.r*col.r*0.25);
+				//col = float3(col.r, 0.0, col.r*col.r*col.r*col.r*col.r*0.25); // default (red)
+				col = float3( pow(col.r,expR), pow(col.r,expG), pow(col.r,expB) ) * SpriteModifyTexturesColors[3].xyz;
+				col = clamp(col,float3(0.,0.,0.),float3(1.,1.,1.));
+				float colMax = max(max(col.r,col.g),col.b);
 
 				//float alpha = 1.0 - ( (1.0 - col.r) * (1.0 - SampleImageSprite(Texture,Input.UV0).a) );
-				float alpha = SampleImageSprite(Texture,Input.UV0).a * lerp(col.r, 1.0, SpriteBorder[0].x);
+				float alpha = SampleImageSprite(Texture,Input.UV0).a * lerp(colMax, 1.0, SpriteBorder[0].x);
 
 				//float alpha = 1.0;
 
