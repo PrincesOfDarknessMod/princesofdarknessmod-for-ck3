@@ -1,8 +1,6 @@
-version="1.18.0.1"
+version="1"
 tags={
 	"Total Conversion"
 }
-name="Development Princes of Darkness"
-picture="thumbnail.png"
+name="Azure Dragon Court Rework"
 supported_version="1.18.0.1"
-path="mod/devpod"
