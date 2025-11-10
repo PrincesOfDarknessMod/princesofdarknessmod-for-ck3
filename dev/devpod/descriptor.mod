@@ -1,6 +1,6 @@
-version="1"
+version="1.18.0.2"
 tags={
 	"Total Conversion"
 }
-name="Azure Dragon Court Rework"
-supported_version="1.18.0.1"
+name="Development Princes of Darkness"
+supported_version="1.18.0.2"
