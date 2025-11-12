@@ -948,7 +948,8 @@ Effect portrait_eye
 	VertexShader = "VS_standard"
 	PixelShader = "PS_eye"
 	# CfV EK2
-	Defines = { "EMISSIVE_PROPERTIES_RED" }
+	# disabled since it started causing issues in 1.18.1
+	# Defines = { "EMISSIVE_PROPERTIES_RED" }
 }
 
 Effect portrait_attachment
