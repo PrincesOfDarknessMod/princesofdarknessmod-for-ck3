@@ -174,7 +174,7 @@ PixelShader =
 			#ifdef BLOOM_ENABLED
 				float3 bloom = PdxTex2DLod0( RestoreBloom, Input.uv ).rgb;
 				// CfV (POD): reduce bloom
-				color.rgb = bloom.rgb * 0.25 + color.rgb; // todo * bloomscale?
+				color.rgb = bloom.rgb * 0.5 + color.rgb; // todo * bloomscale?
 
 				#ifdef LENS_FLARE_ENABLED
 					float3 LensFlare = PdxTex2DLod0( LensFlareTexture, Input.uv ).rgb;
