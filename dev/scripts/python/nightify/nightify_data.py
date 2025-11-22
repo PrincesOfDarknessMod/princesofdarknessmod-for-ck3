@@ -60,6 +60,10 @@ do_not_nightify = [
 	"event_scenes/study_physician.dds",
 	"event_scenes/tavern.dds",
 	"event_scenes/test_event.dds",
+	"event_scenes/tgp_alley_night_asia.dds",
+	"event_scenes/tgp_chinese_corridor_night.dds",
+	"event_scenes/tgp_moon_festival_japan.dds",
+	"event_scenes/tgp_tanabata_festival_night_japan.dds",
 
 	# Activity backgrounds
 	"activity_backgrounds/activity_feast.dds",
@@ -194,6 +198,39 @@ nightify_illustrations = {
 	"event_scenes/sittingroom.dds":						"event_scenes/sittingroom_night.dds",
 	"event_scenes/study.dds":							"event_scenes/study_night.dds",
 	"event_scenes/temple.dds":							"event_scenes/temple_night.dds",
+	"event_scenes/tgp_alley_day_asia.dds":				"event_scenes/tgp_alley_night_asia.dds", # vanilla nighttime illustration
+	"event_scenes/tgp_asia_estate.dds":					"event_scenes/tgp_asia_estate_night.dds",
+	"event_scenes/tgp_asia_throne_room.dds":			"event_scenes/tgp_asia_throne_room_night.dds",
+	"event_scenes/tgp_camp_asia.dds":					"event_scenes/tgp_camp_asia_night.dds",
+	"event_scenes/tgp_chinese_city.dds":				"event_scenes/tgp_chinese_city_night.dds",
+	"event_scenes/tgp_chinese_corridor_day.dds":		"event_scenes/tgp_chinese_corridor_night.dds", # vanilla nighttime illustration
+	"event_scenes/tgp_courtyard_asia.dds":				"event_scenes/tgp_courtyard_asia_night.dds",
+	"event_scenes/tgp_crossroad_inn_asia.dds":			"event_scenes/tgp_crossroad_inn_asia_night.dds",
+	"event_scenes/tgp_docks_asia.dds":					"event_scenes/tgp_docks_asia_night.dds",
+	"event_scenes/tgp_examination_room.dds":			"event_scenes/tgp_examination_room_night.dds",
+	"event_scenes/tgp_farm_asia.dds":					"event_scenes/tgp_farm_asia_night.dds",
+	"event_scenes/tgp_feast_asia.dds":					"event_scenes/tgp_feast_asia_night.dds",
+	"event_scenes/tgp_festival_ritual_japan.dds":		"event_scenes/tgp_festival_ritual_japan_night.dds",
+	"event_scenes/tgp_garden_asia.dds":					"event_scenes/tgp_garden_asia_night.dds",
+	"event_scenes/tgp_holysite_asia.dds":				"event_scenes/tgp_holysite_asia_night.dds",
+	"event_scenes/tgp_hunt_generic_asia.dds":			"event_scenes/tgp_hunt_generic_asia_night.dds",
+	"event_scenes/tgp_japan_throne_room.dds":			"event_scenes/tgp_japan_throne_room_night.dds",
+	"event_scenes/tgp_japanese_city.dds":				"event_scenes/tgp_japanese_city_night.dds",
+	"event_scenes/tgp_kitchen_asia.dds":				"event_scenes/tgp_kitchen_asia_night.dds",
+	"event_scenes/tgp_market_asia.dds":					"event_scenes/tgp_market_asia_night.dds",
+	"event_scenes/tgp_overflowing_river.dds":			"event_scenes/tgp_overflowing_river_night.dds",
+	"event_scenes/tgp_physician_asia.dds":				"event_scenes/tgp_physician_asia_night.dds",
+	"event_scenes/tgp_relaxing_room_asia.dds":			"event_scenes/tgp_relaxing_room_asia_night.dds",
+	"event_scenes/tgp_rice_fields.dds":					"event_scenes/tgp_rice_fields_night.dds",
+	"event_scenes/tgp_ruined_holding.dds":				"event_scenes/tgp_ruined_holding_night.dds",
+	"event_scenes/tgp_study_asia.dds":					"event_scenes/tgp_study_asia_night.dds",
+	"event_scenes/tgp_study_japan.dds":					"event_scenes/tgp_study_japan_night.dds",
+	"event_scenes/tgp_tanabata_festival_japan.dds":		"event_scenes/tgp_tanabata_festival_night_japan.dds", # vanilla nighttime illustration
+	"event_scenes/tgp_tavern_asia.dds":					"event_scenes/tgp_tavern_asia_night.dds",
+	"event_scenes/tgp_temple_asia.dds":					"event_scenes/tgp_temple_asia_night.dds",
+	"event_scenes/tgp_village_sea.dds":					"event_scenes/tgp_village_sea_night.dds",
+	"event_scenes/tgp_wedding_bedroom_asia.dds":		"event_scenes/tgp_wedding_bedroom_asia_night.dds",
+	"event_scenes/tgp_wedding_ceremony_asia.dds":		"event_scenes/tgp_wedding_ceremony_asia_night.dds",
 	"event_scenes/throneroom_east.dds":					"event_scenes/throneroom_east_night.dds",
 	"event_scenes/throneroom_india.dds":				"event_scenes/throneroom_india_night.dds",
 	"event_scenes/throneroom_mediterranean.dds":		"event_scenes/throneroom_mediterranean_night.dds",
@@ -355,6 +392,23 @@ nightify_environments = {
 	"event_scenes/pod_wolves.dds":							"POD_environment_event_night_light",
 	"event_scenes/raid_burning_night.dds":					"POD_environment_event_night_light",
 	"event_scenes/sittingroom_night.dds":					"POD_environment_event_night_light",
+	"event_scenes/tgp_crossroad_inn_asia_night.dds":		"POD_environment_event_night_light",
+	"event_scenes/tgp_examination_room_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_farm_asia_night.dds":					"POD_environment_event_night_light",
+	"event_scenes/tgp_feast_asia_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_holysite_asia_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_hunt_generic_asia_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_japan_throne_room_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_japanese_city_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_kitchen_asia_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_overflowing_river_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_physician_asia_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_relaxing_room_asia_night.dds":		"POD_environment_event_night_light",
+	"event_scenes/tgp_rice_fields_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_ruined_holding_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/tgp_study_asia_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_tavern_asia_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/tgp_wedding_ceremony_asia_night.dds":		"POD_environment_event_night_light",
 	"event_scenes/throneroom_east_night.dds":				"POD_environment_event_night_light",
 	"event_scenes/throneroom_west_night.dds":				"POD_environment_event_night_light",
 	"activity_backgrounds/contest_bg_melee_night.dds":		"POD_environment_event_night_light",
@@ -436,6 +490,14 @@ nightify_environments = {
 	"event_scenes/steppe_night.dds":						"POD_environment_event_night_deepblue",
 	"event_scenes/study_night.dds":							"POD_environment_event_night_deepblue",
 	"event_scenes/temple_night.dds":						"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_camp_asia_night.dds":					"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_chinese_city_night.dds":				"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_courtyard_asia_night.dds":			"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_docks_asia_night.dds":				"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_festival_ritual_japan_night.dds":		"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_garden_asia_night.dds":				"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_market_asia_night.dds":				"POD_environment_event_night_deepblue",
+	"event_scenes/tgp_village_sea_night.dds":				"POD_environment_event_night_deepblue",
 	"activity_backgrounds/contest_bg_archery_night.dds":	"POD_environment_event_night_deepblue",
 	"event_story/fp4_heroic_legend_night.dds":				"POD_environment_event_night_deepblue",
 
@@ -464,16 +526,23 @@ nightify_environments = {
 	"event_scenes/fp4_study_physician_indian_night.dds":		"POD_environment_event_night_purple",
 	"event_scenes/fp4_study_physician_mena_night.dds":			"POD_environment_event_night_purple",
 	"event_scenes/pod_cloister_crypt.dds":						"POD_environment_event_night_purple",
+	"event_scenes/tgp_asia_estate_night.dds":					"POD_environment_event_night_purple",
+	"event_scenes/tgp_asia_throne_room_night.dds":				"POD_environment_event_night_purple",
 	"event_scenes/throneroom_india_night.dds":					"POD_environment_event_night_purple",
 	"event_scenes/throneroom_mediterranean_night.dds":			"POD_environment_event_night_purple",
 	"activity_backgrounds/contest_bg_horseracing_night.dds":	"POD_environment_event_night_purple",
+	
+	# Pale with Rimlight
+	"event_scenes/tgp_study_japan_night.dds":			"environment_event_fp2_corridor_night",
+	"event_scenes/tgp_temple_asia_night.dds":			"environment_event_fp2_corridor_night",
+	"event_scenes/tgp_wedding_bedroom_asia_night.dds":	"environment_event_fp2_corridor_night",
 	
 	# Misc
 	"event_scenes/alley.dds":								"environment_event_alley",
 	"activity_backgrounds/contest_bg_boardgames_night.dds":	"environment_event_alley",
 
 	"event_scenes/armory_night.dds":	"environment_event_armory",
-	
+
 	"event_scenes/bp1_corridor_indian_night.dds":	"environment_event_bp1_corridor_indian_night",
 
 	"event_scenes/corridor.dds":				"environment_event_corridor",
@@ -488,20 +557,28 @@ nightify_environments = {
 	"event_scenes/pod_spires.dds":			"environment_event_dungeon",
 	"event_scenes/pod_veinous_stair.dds":	"environment_event_dungeon",
 
-	"event_scenes/feast.dds":			"environment_event_feast",
+	"event_scenes/feast.dds":				"environment_event_feast",
 	"event_scenes/pod_wyld_reaches.dds":	"environment_event_feast",
 
 	"event_scenes/fp2_corridor_night.dds":	"environment_event_fp2_corridor_night",
 
 	"event_scenes/pod_coa_tremere.dds":		"environment_event_study_physician",
+
+	"event_scenes/tgp_alley_night_asia.dds":	"environment_tgp_alley_night_asia",
+
+	"event_scenes/tgp_chinese_corridor_night.dds":	"environment_tgp_chinese_corridor_night",
+
+	"event_scenes/tgp_tanabata_festival_night_japan.dds":	"environment_tgp_tanabata_festival_night_japan",
 }
 
 
 # Used when switching illustrations to their vanilla nighttime versions that have a different soundscape
 nightify_ambience = {
-	"event_scenes/alley.dds":						"event:/SFX/Events/Backgrounds/city_alley_night",
-	"event_scenes/bp1_corridor_indian_night.dds":	"event:/SFX/Events/Backgrounds/castle_corridor_night",
-	"event_scenes/fp2_corridor_night.dds":			"event:/DLC/FP2/SFX/Events/corridor_night",
+	"event_scenes/alley.dds":								"event:/SFX/Events/Backgrounds/city_alley_night",
+	"event_scenes/bp1_corridor_indian_night.dds":			"event:/SFX/Events/Backgrounds/castle_corridor_night",
+	"event_scenes/fp2_corridor_night.dds":					"event:/DLC/FP2/SFX/Events/corridor_night",
+	"event_scenes/tgp_alley_night_asia.dds":				"event:/DLC/EP4/SFX/Events/Event_Backgrounds/tgp_alley_night_asia",
+	"event_scenes/tgp_chinese_corridor_night.dds":			"event:/DLC/EP4/SFX/Events/Event_Backgrounds/tgp_chinese_corridor_night",
 	# TODO: more nighttime soundscapes? quiet alleys? landscapes with no birds?
 }
 
@@ -522,8 +599,12 @@ replace_vanilla_environments = {
 	"environment_ep3_frontend_byzantine_main":	"POD_environment_ep3_frontend_byzantine_main",
 	"environment_ep3_frontend_adventurer_main":	"POD_environment_ep3_frontend_adventurer_main",
 	
-	# Placeholder for Khans of the Steppe
+	# Khans of the Steppe
 	"environment_mpo_frontend_nomad_main":	"POD_environment_mpo_frontend_nomad_main",
+	
+	# All Under Heaven
+	"environment_tgp_frontend_japan_main":		"POD_environment_tgp_frontend_japan_main",
+	"environment_tgp_frontend_celestial_main":	"POD_environment_tgp_frontend_celestial_main",
 }
 
 
@@ -544,6 +625,7 @@ replace_religion_triggers = {
 
 vanilla_religion_warnings = {
 	"religion:christianity_religion":	"is_POD_christian_religion_trigger = yes",
+	"faith:orthodox":					"is_POD_orthodox_religion_trigger = yes",
 	"religion:islam_religion":			"is_POD_muslim_religion_trigger = yes",
 	"religion:zoroastrianism_religion":	"is_POD_zoroastrian_religion_trigger = yes",
 	"religion:germanic_religion":		"is_POD_norse_religion_trigger = yes",

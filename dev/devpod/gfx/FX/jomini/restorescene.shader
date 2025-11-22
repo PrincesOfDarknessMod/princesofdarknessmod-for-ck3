@@ -97,6 +97,15 @@ PixelShader =
 		SampleModeV = "Clamp"
 	}
 
+	TextureSampler FogBlurTexture
+	{
+		Index = 9
+		MagFilter = "Point"
+		MinFilter = "Point"
+		MipFilter = "Point"
+		SampleModeU = "Clamp"
+		SampleModeV = "Clamp"
+	}
 
 	MainCode PixelShader
 	{
@@ -150,7 +159,6 @@ PixelShader =
 
 				// CfV (POD)
 				POD_TryApplyPostEffect(color, Input.uv);
-				// CfV end
 				
 			#ifdef DOF_ENABLED
 				float4 DofColor = PdxTex2DLod0( DepthOfFieldTexture, Input.uv );
@@ -165,7 +173,8 @@ PixelShader =
 				
 			#ifdef BLOOM_ENABLED
 				float3 bloom = PdxTex2DLod0( RestoreBloom, Input.uv ).rgb;
-				color.rgb = bloom.rgb + color.rgb; // todo * bloomscale?
+				// CfV (POD): reduce bloom
+				color.rgb = bloom.rgb * 0.5 + color.rgb; // todo * bloomscale?
 
 				#ifdef LENS_FLARE_ENABLED
 					float3 LensFlare = PdxTex2DLod0( LensFlareTexture, Input.uv ).rgb;
@@ -182,10 +191,16 @@ PixelShader =
 				#endif
 
 			#endif
+		
+			#ifdef FOG_BLUR_ENABLED
+				float4 FogBlurColor = PdxTex2DLod0( FogBlurTexture, Input.uv );
+				color.rgb = lerp( color.rgb, FogBlurColor.rgb, FogBlurColor.a );
+			#endif
 
 				// Tonemapping
-				color.rgb = Exposure(color.rgb);
-				color.rgb = ToneMap(color.rgb);
+				color.rgb = Exposure( color.rgb );
+				color.rgb = ColorContrast( color.rgb );
+				color.rgb = ToneMap( color.rgb );
 
 			#ifdef ALPHA
 				color.rgb = RestoreScene( saturate(color).rgb ).rgb;
@@ -218,7 +233,7 @@ PixelShader =
 				return float4(color.rgb, lumaM);
 			#else 
 				return color;
-			#endif			
+			#endif
 			}
 		]]
 	}
