@@ -332,6 +332,254 @@ PixelShader =
 			}
 		]]
 	}
+
+	MainCode PS_PODVeins
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			#define TAO 6.2831853
+			#define S smoothstep
+			#define SPEED 0.1
+			
+			float2 R(float2 u, float a) { return mul(float2x2(cos(a), sin(a), -sin(a), cos(a)), u); }
+			
+			float N(float2 uv, float t, float p) {
+				float2 a = float2(0.,0.), res = float2(0.,0.);
+				float s = 10.;
+				for (int j = 0; j < 30; j++) {
+					uv = R(uv, 1.);
+					a = R(a, 1.);
+					float2 L = uv * s + float(j) + a - t;
+					a += cos(L);
+					res += (.5 + .5 * sin(L)) / s;
+					s *= (1.2 - .07 * p);
+				}
+				return res.x + res.y;
+			}
+			
+			PDX_MAIN
+			{
+				float2 fragCoord = Input.UV0 * SpriteSize.xy;
+				float2 U = fragCoord / SpriteSize.y;
+				float T = mod(GuiTime * SPEED * TAO, TAO);
+				float H = clamp(.5 * sin(T) * sin(T / 2.) * exp(-T / 4.) + .5, 0., 1.);
+				//float H = iTime * 0.1;
+				float n = N(U, H * 5., .1) * 1.15;
+				float3 C = lerp(lerp(float3(0.,0.,0.), float3(1., 0., .2), S(1., 1., n)), lerp(float3(1., 0., .2), float3(1., .635, 0.), S(.5, 1., n)), S(0., 1., n));
+				
+				float4 tex = SampleImageSprite( Texture, Input.UV0 );
+				
+				#if defined(BNW)
+					float value = 1.0 - C.r;
+					return float4(value, value, value, tex.a);
+				#elif defined(ALPHA)
+					return float4( tex.rgb, S(1., 0., n) * tex.a );
+				#else
+					return float4(C, tex.a);
+				#endif
+			}
+		]]
+	}
+	
+	MainCode PS_PODGiger
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/MXyXzK
+			
+			#define AA 2
+
+			#define TIME GuiTime*-0.15
+			#define sat(x) clamp(x, 0., 1.)
+			#define screen(a, b) (1. - (1.-a) * (1.-b))
+			#define nmc(x) (-cos(x)*0.5+0.5)
+
+			#define STEEPNESS 0.8
+
+			static float2 e = float2(0.001, 0.);
+
+			float smin( float a, float b, float k ) {
+				// iq, sigmoid
+				k *= 0.301029995;//log(2.0);
+				float x = b-a;
+				return a + x/(1.0-exp2(x/k));
+			}
+
+			float circMap(float x) {
+				return sqrt(1. - x*x);
+			}
+
+			float2 sdRidges(float2 pos) {
+				pos.y *= 20.;
+				float dom = 17.;
+				
+				float y = pos.y + sin(pos.x + TIME * 0.2 + pos.y * 0.45) * 0.5;
+				y = mod(y, dom) - dom/2.;
+				float effect = abs(y) / (dom/2.);
+				
+				float chr = effect;//abs(y) <= 1. ? 0. : 1.; // Y
+				
+			// float topQ = 0.3;
+			
+				float bumps = nmc(effect * PI * 2.) * effect;
+				chr = 1.-effect;
+				
+				y = exp(-(-effect)*(-effect) * 10.);// * effect;
+				y += bumps * 0.9;
+			
+				y = sat(y);
+				return float2(y, chr);
+			}
+
+			float2 map(float2 pos, float2 uv) {
+				float skewAngle = pos.y + TIME * 0.1 + pos.x;
+				float skewAmp = 0.06;
+				pos.y += sin(skewAngle) * skewAmp;
+				pos.x += sin(skewAngle) * cos(skewAngle) * skewAmp * -0.5;
+
+				float f = 20. * PI;
+				float v = 0.;
+				float totFalloff = 0.;
+				
+				float chroma = 0.;
+				
+				for (int i = 0; i < 3; i++) {
+					float falloff = 1. / (float(i) + 1.);
+					v += (
+							(
+								cos(pos.x * 2. * f) +
+								cos(pos.y * 0.6 * f)
+							)/2. * 0.5 + 0.5
+						) * falloff;
+					totFalloff += falloff;
+					f *= 1.1;
+					
+					chroma += v * falloff;
+				}
+				v /= totFalloff;
+				chroma /= totFalloff;
+				v = sat(v);
+				v = pow(v, 2.) * 0.3;
+				
+				float2 sc = sdRidges(pos);
+				float2 sc2 = sdRidges(pos * float2(1., 4.)) * 0.33;
+				sc = -float2(
+					smin(-sc.x, -sc2.x, 0.04), // smax
+					smin(-sc.y, -sc2.y, 0.04)  // smax
+					);
+				
+				v = screen(v, sc.x * 0.6);
+				
+				//v = lerp(v, 1., sc.x);
+				
+				//chroma = screen(chroma, sc.y);
+				chroma = lerp(chroma, sc.y, 0.5);
+				chroma = lerp(chroma, pow(abs(uv.x * 2. - 1.) * 0.5, 0.66), 1.); // gradient from center x
+				
+				v = sat(v);
+				return float2(v, chroma);
+			}
+
+			float2 gradient(float2 pos, float2 uv) {
+				return float2(
+				map(pos + e.xy, uv).x,
+				map(pos + e.yx, uv).x
+				) - map(pos, uv).x;
+			}
+
+			float3 normal(float2 pos, float2 uv) {
+				float2 grad = gradient(pos,uv) * STEEPNESS;
+				return normalize(cross(
+					float3(e.x, 0., grad.x),
+					float3(0., e.x, grad.y)
+				));
+			}
+
+			float3 gigerPalette(float lum, float chroma) {
+				const float3 dark = float3(0.05, 0.04, 0.07);
+				const float3 midB = float3(0.49, 0.51, 0.58);
+				//const float3 midY = float3(0.53, 0.49, 0.47);
+				const float3 midY = float3(0.373,0.357,0.349);
+				const float3 light = float3(0.98, 0.98, 1.00);
+				
+				lum = sat(lum);
+				chroma = sat(chroma);
+				
+				float3 mid = lerp(midB, midY, chroma);
+				float3 col = lum < 0.5 ? 
+					lerp(dark, mid, lum * 2.) :
+					lerp(mid, light, (lum - 0.5) * 2.);
+				return col;
+			}
+
+			PDX_MAIN {
+				float2 fragCoord = Input.UV0 * SpriteSize.xy;
+				float3 avgCol = float3(0.,0.,0.);
+				float2 uv = float2(0.,0.);
+				float2 origPos = float2(0.,0.);
+				
+				for (int nn = 0; nn < AA; nn++) {
+					for (int mm = 0; mm < AA; mm++) {
+						float2 aa = float2(float(nn), float(mm)) / float(AA);
+					
+						uv = (fragCoord + aa) / SpriteSize.xy;
+						uv.y = 1.0 - uv.y;
+						float2 pos = (fragCoord + aa - SpriteSize.xy/2.) / SpriteSize.y * 2.;
+						origPos = pos;
+						pos.y -= TIME * 0.07;
+						pos.x -= TIME * 0.005;
+						float3 pos3 = float3(origPos, 0.);
+
+						float2 mapped = map(pos,uv);
+						float v = mapped.x;
+						float chroma = mapped.y;
+
+						float3 n = normal(pos,uv);
+
+						float th = TIME * PI * 2. * 0.1;
+						float2 timeCirc = float2(cos(th), sin(th));
+
+						float3 lightDir = normalize(float3(timeCirc, 1.));
+						float spec = max(dot(lightDir, n), 0.);
+
+						//v = v * spec;
+
+						float vignette = 1. - length(uv - float2(0.5,0.5)) / length(float2(0.5,0.5));
+						spec = lerp(spec, lerp(spec, 1., 0.1), vignette);
+
+						float highl = pow(v, 1.5) * 1.; // airbrush effect? bloom-ish?
+						float highl2 = pow(spec, 100.);
+
+						v *= spec * 0.5;
+						v += highl + highl2; 
+						v *= 0.8;
+
+						v = pow(v, lerp(0.25, 1.5, nmc(2.0 + pos.x * 0.25)));
+
+						float3 col = gigerPalette(v, chroma);
+
+						vignette = pow(vignette, 1.);
+						col *= lerp(0.2, 1., vignette);
+
+						//col = float3(chroma);
+
+						//col = float3(v);
+						//col = float3(highl);
+						//col = n;
+						avgCol += col;
+					}
+				}
+				avgCol /= float(AA * AA);
+				
+				float alpha = SampleImageSprite( Texture, Input.UV0 ).a;
+				return float4(avgCol, alpha);
+			}
+		]]
+	}
 }
 
 BlendState BlendState
@@ -424,5 +672,59 @@ Effect PODYomiDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_PODYomi"
+	Defines = { "DISABLED" }
+}
+
+Effect PODVeins
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+}
+
+Effect PODVeinsDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "DISABLED" }
+}
+
+Effect PODVeinsBNW
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "BNW" }
+}
+
+Effect PODVeinsBNWDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "BNW" "DISABLED" }
+}
+
+Effect PODVeinsAlpha
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "ALPHA" }
+}
+
+Effect PODVeinsAlphaDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "ALPHA" "DISABLED" }
+}
+
+Effect PODGiger
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODGiger"
+}
+
+Effect PODGigerDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODGiger"
 	Defines = { "DISABLED" }
 }
