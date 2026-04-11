@@ -160,7 +160,6 @@ PixelShader =
 
 				//Currently, we're only using 2 channels, leaving 2 channels available.
 				#ifdef SECOND_COLOR_MASK
-					// CfV (POD): using the older (pre-1.19) version of the script because the new one breaks our custom clothing colors
 					float MaskOffset = 4.0f;
 					for( int i = 0; i < 2; ++i )
 					{
