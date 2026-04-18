@@ -1,0 +1,1982 @@
+﻿##########################################
+######   POD COMBAT EFFECTS   ######
+##########################################
+
+# ─── INITIALIZATION ────────────────────────────────────────────────
+
+pod_combat_initialize_effect = {
+	# Thin wrapper for simple 1v1 combat — PC vs a single target, no allies
+	# or knights. Delegates to pod_combat_initialize_group_effect with MODE=0,
+	# which populates slot 0 (PC) and slot 5 (opponent) and leaves the rest
+	# empty. The unified initiative + workspace flow handles it from there.
+	# $OPPONENT$ = the target character
+	pod_combat_initialize_group_effect = { OPPONENT = $OPPONENT$ MODE = 0 }
+}
+
+# ─── TURN MANAGEMENT ──────────────────────────────────────────────
+
+pod_combat_end_player_turn_effect = {
+	# Player turn is over. Always process the remaining actors in initiative
+	# order via the group turn loop — 1v1 and NvN share the same code path.
+	pod_combat_process_group_turns_effect = yes
+}
+
+# ─── RESOURCE MANIPULATION ────────────────────────────────────────
+
+pod_combat_spend_ap_effect = {
+	# $AMOUNT$ = AP to spend
+	change_variable = {
+		name = pod_combat_current_ap
+		add = {
+			value = $AMOUNT$
+			multiply = -1
+		}
+	}
+}
+
+pod_combat_check_retaliation_effect = {
+	# Called after every damage-dealing move resolves. Checks whether the
+	# target (opponent) has a retaliation stance and whether the trigger
+	# condition was met:
+	#   retaliate_if_hit  — fires when the attack dealt damage (last_damage > 0)
+	#   retaliate_if_missed — fires when the attack missed (last_was_missed = yes)
+	#
+	# Retaliation damage inherits the damage_source and damage_type from
+	# the skill that set up the stance:
+	#   - Superficial: goes through the actor's soak check (can be soaked)
+	#   - Aggravated: soak at half effectiveness (-50%), tracked as aggravated damage
+	# The _agg companion variable (1 = aggravated, absent = superficial)
+	# is set by the generator alongside the retaliation amount.
+	#
+	# $TARGET_SIDE$ = "opponent" (the side that has the retaliation stance)
+	# $ACTOR_SIDE$  = "player"  (the side that takes retaliation damage)
+
+	# Retaliate on hit
+	if = {
+		limit = {
+			has_variable = pod_combat_$TARGET_SIDE$_retaliate_hit
+			has_variable = pod_combat_last_damage
+			var:pod_combat_last_damage > 0
+		}
+		# Soak check — aggravated retaliates at half soak, superficial at full
+		save_scope_value_as = {
+			name = retaliate_soak
+			value = var:pod_combat_$ACTOR_SIDE$_soak
+		}
+		if = {
+			limit = { has_variable = pod_combat_$TARGET_SIDE$_retaliate_hit_agg }
+			save_scope_value_as = {
+				name = retaliate_soak
+				value = { value = var:pod_combat_$ACTOR_SIDE$_soak divide = 2 floor = yes }
+			}
+		}
+		random_list = {
+			0 = {
+				modifier = { add = scope:retaliate_soak }
+				set_variable = { name = pod_combat_last_was_retaliate_soaked value = yes }
+			}
+			100 = {
+				modifier = { add = { value = scope:retaliate_soak multiply = -1 } }
+				save_scope_value_as = {
+					name = retaliate_hp
+					value = {
+						value = var:pod_combat_$ACTOR_SIDE$_hp
+						subtract = var:pod_combat_$TARGET_SIDE$_retaliate_hit
+						min = 0
+					}
+				}
+				set_variable = { name = pod_combat_$ACTOR_SIDE$_hp value = scope:retaliate_hp }
+				if = {
+					limit = { has_variable = pod_combat_$TARGET_SIDE$_retaliate_hit_agg }
+					change_variable = { name = pod_combat_$ACTOR_SIDE$_agg_damage add = var:pod_combat_$TARGET_SIDE$_retaliate_hit }
+				}
+				set_variable = { name = pod_combat_last_was_retaliated value = yes }
+			}
+		}
+		remove_variable = pod_combat_$TARGET_SIDE$_retaliate_hit
+		remove_variable = pod_combat_$TARGET_SIDE$_retaliate_hit_agg
+	}
+
+	# Retaliate on miss
+	if = {
+		limit = {
+			has_variable = pod_combat_$TARGET_SIDE$_retaliate_miss
+			has_variable = pod_combat_last_was_missed
+		}
+		# Soak check — aggravated at half, superficial at full
+		save_scope_value_as = {
+			name = retaliate_soak
+			value = var:pod_combat_$ACTOR_SIDE$_soak
+		}
+		if = {
+			limit = { has_variable = pod_combat_$TARGET_SIDE$_retaliate_miss_agg }
+			save_scope_value_as = {
+				name = retaliate_soak
+				value = { value = var:pod_combat_$ACTOR_SIDE$_soak divide = 2 floor = yes }
+			}
+		}
+		random_list = {
+			0 = {
+				modifier = { add = scope:retaliate_soak }
+				set_variable = { name = pod_combat_last_was_retaliate_soaked value = yes }
+			}
+			100 = {
+				modifier = { add = { value = scope:retaliate_soak multiply = -1 } }
+				save_scope_value_as = {
+					name = retaliate_hp
+					value = {
+						value = var:pod_combat_$ACTOR_SIDE$_hp
+						subtract = var:pod_combat_$TARGET_SIDE$_retaliate_miss
+						min = 0
+					}
+				}
+				set_variable = { name = pod_combat_$ACTOR_SIDE$_hp value = scope:retaliate_hp }
+				if = {
+					limit = { has_variable = pod_combat_$TARGET_SIDE$_retaliate_miss_agg }
+					change_variable = { name = pod_combat_$ACTOR_SIDE$_agg_damage add = var:pod_combat_$TARGET_SIDE$_retaliate_miss }
+				}
+				set_variable = { name = pod_combat_last_was_retaliated value = yes }
+			}
+		}
+		remove_variable = pod_combat_$TARGET_SIDE$_retaliate_miss
+		remove_variable = pod_combat_$TARGET_SIDE$_retaliate_miss_agg
+	}
+}
+
+pod_combat_apply_ap_drain_effect = {
+	# Apply any AP drain debuff from the previous round to the current
+	# actor. Reads pod_combat_player_ap_drain from the workspace (loaded
+	# from pod_combat_c{N}_ap_drain). Clears the drain after application
+	# so it only fires once.
+	if = {
+		limit = { has_variable = pod_combat_player_ap_drain }
+		change_variable = {
+			name = pod_combat_current_ap
+			add = {
+				value = var:pod_combat_player_ap_drain
+				multiply = -1
+			}
+		}
+		# Clamp to minimum 1 AP so the actor can always do something
+		if = {
+			limit = { var:pod_combat_current_ap < 1 }
+			set_variable = { name = pod_combat_current_ap value = 1 }
+		}
+		remove_variable = pod_combat_player_ap_drain
+	}
+}
+
+pod_combat_deal_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (who takes damage)
+	# $AMOUNT$ = damage amount
+	# NOTE: pod_combat_last_was_blocked and pod_combat_last_was_soaked must be
+	#        cleared by the MOVE effect before calling this, NOT here — because
+	#        Reckless Charge calls this twice and the 2nd call would erase the 1st.
+
+	# Check if target is guarding and not feinted
+	if = {
+		limit = {
+			has_variable = pod_combat_$TARGET_SIDE$_is_guarding
+			NOT = { has_variable = pod_combat_$TARGET_SIDE$_feinted }
+		}
+		# Guard blocks the attack — consume the guard. The log-routing
+		# step uses pod_combat_last_was_blocked (not a flag) to pick the
+		# "Blocked!" message, so we no longer set pod_combat_last_action.
+		remove_variable = pod_combat_$TARGET_SIDE$_is_guarding
+		set_variable = { name = pod_combat_last_was_blocked value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		# ── Soak check ──
+		# Read target's soak chance into a scope for the random_list
+		save_scope_value_as = {
+			name = target_soak
+			value = var:pod_combat_$TARGET_SIDE$_soak
+		}
+
+		random_list = {
+			# Soaked — damage negated
+			0 = {
+				modifier = { add = scope:target_soak }
+				set_variable = { name = pod_combat_last_was_soaked value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			# Not soaked — apply full damage
+			100 = {
+				modifier = {
+					add = {
+						value = scope:target_soak
+						multiply = -1
+					}
+				}
+
+				# Apply HP damage (clamped to 0)
+				save_scope_value_as = {
+					name = new_hp
+					value = {
+						value = var:pod_combat_$TARGET_SIDE$_hp
+						subtract = $AMOUNT$
+						min = 0
+					}
+				}
+				set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+
+				# Apply morale spillover (HP damage * 0.5, floored)
+				save_scope_value_as = {
+					name = morale_spill
+					value = {
+						value = $AMOUNT$
+						multiply = pod_combat_morale_from_hp_ratio
+						floor = yes
+					}
+				}
+				if = {
+					limit = { scope:morale_spill > 0 }
+					save_scope_value_as = {
+						name = new_morale
+						value = {
+							value = var:pod_combat_$TARGET_SIDE$_morale
+							subtract = scope:morale_spill
+							min = 0
+						}
+					}
+					set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+				}
+
+				set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+				# Victory check runs at the end of pod_combat_save_workspace_effect
+				# once the slot data is flushed. No in-pipeline check needed here —
+				# combat-end detection is handled at the move-complete boundary.
+			}
+		}
+	}
+}
+
+# ── Actor stealth consumption ──────────────────────────────────
+# Stealth persists until the stealthed character attacks OR is attacked.
+# When an attack is attacked, the damage pipeline consumes the target's
+# stealth flag via the $TARGET_SIDE$ check at the top of each damage
+# effect. When the stealthed character acts (attacks), we consume it
+# here — called at the END of each damage effect so the +30 hit bonus
+# still applies to this attack, then gets reverted for future actions.
+# The actor side is always "player" (workspace convention).
+pod_combat_consume_actor_stealth_effect = {
+	if = {
+		limit = { has_variable = pod_combat_player_is_stealthed }
+		remove_variable = pod_combat_player_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted
+		save_scope_value_as = {
+			name = new_hit_after_actor_stealth
+			value = { value = var:pod_combat_player_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_player_hit_chance value = scope:new_hit_after_actor_stealth }
+		# Keep current_hit_chance in sync in case the damage pipeline
+		# already copied it elsewhere in the same turn.
+		set_variable = { name = pod_combat_current_hit_chance value = scope:new_hit_after_actor_stealth }
+	}
+}
+
+pod_combat_deal_physical_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (who takes damage)
+	# $AMOUNT$ = damage amount
+	# Physical/Superficial: hit chance → dodge → guard → soak → damage
+
+	# Stealth then dodge — each negates the entire attack; stealth is consumed first so a stealthed dodger keeps their dodge
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = hit_chance
+			value = var:pod_combat_current_hit_chance
+		}
+
+		random_list = {
+			# Miss — attack didn't connect
+			0 = {
+				modifier = {
+					add = {
+						value = 100
+						subtract = scope:hit_chance
+					}
+				}
+				set_variable = { name = pod_combat_last_was_missed value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			# Hit — proceed with guard/soak/damage checks
+			0 = {
+				modifier = { add = scope:hit_chance }
+				pod_combat_deal_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+pod_combat_deal_morale_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = morale damage (bypasses HP entirely)
+	# Mental damage: auto-hit, no guard, no soak, but dodge still works
+
+	# Stealth then dodge — each negates the entire attack; stealth is consumed first so a stealthed dodger keeps their dodge
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = new_morale
+			value = {
+				value = var:pod_combat_$TARGET_SIDE$_morale
+				subtract = $AMOUNT$
+				min = 0
+			}
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+		set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+		set_variable = { name = pod_combat_last_was_morale_damage value = yes }
+		# Victory check runs at the end of pod_combat_save_workspace_effect.
+	}
+}
+
+pod_combat_restore_morale_effect = {
+	# $SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = morale to restore
+	save_scope_value_as = {
+		name = new_morale
+		value = {
+			value = var:pod_combat_$SIDE$_morale
+			add = $AMOUNT$
+			max = pod_combat_max_morale
+		}
+	}
+	set_variable = { name = pod_combat_$SIDE$_morale value = scope:new_morale }
+	set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+	set_variable = { name = pod_combat_last_was_morale_heal value = yes }
+}
+
+# ─── VICTORY CHECK ────────────────────────────────────────────────
+# Victory detection is now handled exclusively by
+# pod_combat_check_group_victory_effect, called once at the end of
+# pod_combat_save_workspace_effect when slot data is flushed and the
+# per-slot _alive flags are accurate. The old in-pipeline
+# pod_combat_check_end_effect wrapper has been retired — calling it
+# during the damage pipeline read stale slot variables and never
+# detected kills, so it was dead code that only burned compute.
+
+# ─── AUTO-RESOLVE ──────────────────────────────────────────────────
+
+pod_combat_auto_resolve_effect = {
+	# Save PC scope alias to avoid bare `root` references in set_variable
+	save_scope_as = combat_pc
+
+	# Simple prowess comparison with random factor
+	save_scope_value_as = {
+		name = player_score
+		value = {
+			value = prowess
+			add = {
+				integer_range = { min = 0 max = prowess }
+			}
+		}
+	}
+	var:pod_combat_opponent = {
+		save_scope_value_as = {
+			name = opponent_score
+			value = {
+				value = prowess
+				add = {
+					integer_range = { min = 0 max = prowess }
+				}
+			}
+		}
+	}
+
+	if = {
+		limit = { scope:player_score >= scope:opponent_score }
+		set_variable = { name = pod_combat_winner value = scope:combat_pc }
+		set_variable = { name = pod_combat_loser value = var:pod_combat_opponent }
+	}
+	else = {
+		set_variable = { name = pod_combat_winner value = var:pod_combat_opponent }
+		set_variable = { name = pod_combat_loser value = scope:combat_pc }
+	}
+
+	# Set final HP/Morale for display
+	set_variable = { name = pod_combat_opponent_morale value = 0 }
+	set_variable = { name = pod_combat_is_over value = yes }
+	# Combat window stays open — player clicks "End Combat" to dismiss
+}
+
+# ─── COMBAT LOG ────────────────────────────────────────────────────
+# Rolling log of the last 30 actions. Entry 1 = most recent.
+# Each entry stores: msg ID (1-57), actor slot (0-9), target slot (0-9, -1 = none), damage, result flag.
+#
+# Message IDs assigned in CSV order — see pod_combat_skills_master.csv
+# Result codes: 0 = normal, 1 = guard-blocked, 2 = soaked, 3 = missed, 4 = countered, 5 = dodged
+
+pod_combat_push_log_effect = {
+	# Shift existing entries down (29→30, 28→29, ..., 1→2)
+	if = {
+		limit = { exists = var:pod_combat_log_29 }
+		set_variable = { name = pod_combat_log_30 value = var:pod_combat_log_29 }
+		set_variable = { name = pod_combat_log_30_actor value = var:pod_combat_log_29_actor }
+		set_variable = { name = pod_combat_log_30_target value = var:pod_combat_log_29_target }
+		set_variable = { name = pod_combat_log_30_damage value = var:pod_combat_log_29_damage }
+		set_variable = { name = pod_combat_log_30_blocked value = var:pod_combat_log_29_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_28 }
+		set_variable = { name = pod_combat_log_29 value = var:pod_combat_log_28 }
+		set_variable = { name = pod_combat_log_29_actor value = var:pod_combat_log_28_actor }
+		set_variable = { name = pod_combat_log_29_target value = var:pod_combat_log_28_target }
+		set_variable = { name = pod_combat_log_29_damage value = var:pod_combat_log_28_damage }
+		set_variable = { name = pod_combat_log_29_blocked value = var:pod_combat_log_28_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_27 }
+		set_variable = { name = pod_combat_log_28 value = var:pod_combat_log_27 }
+		set_variable = { name = pod_combat_log_28_actor value = var:pod_combat_log_27_actor }
+		set_variable = { name = pod_combat_log_28_target value = var:pod_combat_log_27_target }
+		set_variable = { name = pod_combat_log_28_damage value = var:pod_combat_log_27_damage }
+		set_variable = { name = pod_combat_log_28_blocked value = var:pod_combat_log_27_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_26 }
+		set_variable = { name = pod_combat_log_27 value = var:pod_combat_log_26 }
+		set_variable = { name = pod_combat_log_27_actor value = var:pod_combat_log_26_actor }
+		set_variable = { name = pod_combat_log_27_target value = var:pod_combat_log_26_target }
+		set_variable = { name = pod_combat_log_27_damage value = var:pod_combat_log_26_damage }
+		set_variable = { name = pod_combat_log_27_blocked value = var:pod_combat_log_26_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_25 }
+		set_variable = { name = pod_combat_log_26 value = var:pod_combat_log_25 }
+		set_variable = { name = pod_combat_log_26_actor value = var:pod_combat_log_25_actor }
+		set_variable = { name = pod_combat_log_26_target value = var:pod_combat_log_25_target }
+		set_variable = { name = pod_combat_log_26_damage value = var:pod_combat_log_25_damage }
+		set_variable = { name = pod_combat_log_26_blocked value = var:pod_combat_log_25_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_24 }
+		set_variable = { name = pod_combat_log_25 value = var:pod_combat_log_24 }
+		set_variable = { name = pod_combat_log_25_actor value = var:pod_combat_log_24_actor }
+		set_variable = { name = pod_combat_log_25_target value = var:pod_combat_log_24_target }
+		set_variable = { name = pod_combat_log_25_damage value = var:pod_combat_log_24_damage }
+		set_variable = { name = pod_combat_log_25_blocked value = var:pod_combat_log_24_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_23 }
+		set_variable = { name = pod_combat_log_24 value = var:pod_combat_log_23 }
+		set_variable = { name = pod_combat_log_24_actor value = var:pod_combat_log_23_actor }
+		set_variable = { name = pod_combat_log_24_target value = var:pod_combat_log_23_target }
+		set_variable = { name = pod_combat_log_24_damage value = var:pod_combat_log_23_damage }
+		set_variable = { name = pod_combat_log_24_blocked value = var:pod_combat_log_23_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_22 }
+		set_variable = { name = pod_combat_log_23 value = var:pod_combat_log_22 }
+		set_variable = { name = pod_combat_log_23_actor value = var:pod_combat_log_22_actor }
+		set_variable = { name = pod_combat_log_23_target value = var:pod_combat_log_22_target }
+		set_variable = { name = pod_combat_log_23_damage value = var:pod_combat_log_22_damage }
+		set_variable = { name = pod_combat_log_23_blocked value = var:pod_combat_log_22_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_21 }
+		set_variable = { name = pod_combat_log_22 value = var:pod_combat_log_21 }
+		set_variable = { name = pod_combat_log_22_actor value = var:pod_combat_log_21_actor }
+		set_variable = { name = pod_combat_log_22_target value = var:pod_combat_log_21_target }
+		set_variable = { name = pod_combat_log_22_damage value = var:pod_combat_log_21_damage }
+		set_variable = { name = pod_combat_log_22_blocked value = var:pod_combat_log_21_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_20 }
+		set_variable = { name = pod_combat_log_21 value = var:pod_combat_log_20 }
+		set_variable = { name = pod_combat_log_21_actor value = var:pod_combat_log_20_actor }
+		set_variable = { name = pod_combat_log_21_target value = var:pod_combat_log_20_target }
+		set_variable = { name = pod_combat_log_21_damage value = var:pod_combat_log_20_damage }
+		set_variable = { name = pod_combat_log_21_blocked value = var:pod_combat_log_20_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_19 }
+		set_variable = { name = pod_combat_log_20 value = var:pod_combat_log_19 }
+		set_variable = { name = pod_combat_log_20_actor value = var:pod_combat_log_19_actor }
+		set_variable = { name = pod_combat_log_20_target value = var:pod_combat_log_19_target }
+		set_variable = { name = pod_combat_log_20_damage value = var:pod_combat_log_19_damage }
+		set_variable = { name = pod_combat_log_20_blocked value = var:pod_combat_log_19_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_18 }
+		set_variable = { name = pod_combat_log_19 value = var:pod_combat_log_18 }
+		set_variable = { name = pod_combat_log_19_actor value = var:pod_combat_log_18_actor }
+		set_variable = { name = pod_combat_log_19_target value = var:pod_combat_log_18_target }
+		set_variable = { name = pod_combat_log_19_damage value = var:pod_combat_log_18_damage }
+		set_variable = { name = pod_combat_log_19_blocked value = var:pod_combat_log_18_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_17 }
+		set_variable = { name = pod_combat_log_18 value = var:pod_combat_log_17 }
+		set_variable = { name = pod_combat_log_18_actor value = var:pod_combat_log_17_actor }
+		set_variable = { name = pod_combat_log_18_target value = var:pod_combat_log_17_target }
+		set_variable = { name = pod_combat_log_18_damage value = var:pod_combat_log_17_damage }
+		set_variable = { name = pod_combat_log_18_blocked value = var:pod_combat_log_17_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_16 }
+		set_variable = { name = pod_combat_log_17 value = var:pod_combat_log_16 }
+		set_variable = { name = pod_combat_log_17_actor value = var:pod_combat_log_16_actor }
+		set_variable = { name = pod_combat_log_17_target value = var:pod_combat_log_16_target }
+		set_variable = { name = pod_combat_log_17_damage value = var:pod_combat_log_16_damage }
+		set_variable = { name = pod_combat_log_17_blocked value = var:pod_combat_log_16_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_15 }
+		set_variable = { name = pod_combat_log_16 value = var:pod_combat_log_15 }
+		set_variable = { name = pod_combat_log_16_actor value = var:pod_combat_log_15_actor }
+		set_variable = { name = pod_combat_log_16_target value = var:pod_combat_log_15_target }
+		set_variable = { name = pod_combat_log_16_damage value = var:pod_combat_log_15_damage }
+		set_variable = { name = pod_combat_log_16_blocked value = var:pod_combat_log_15_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_14 }
+		set_variable = { name = pod_combat_log_15 value = var:pod_combat_log_14 }
+		set_variable = { name = pod_combat_log_15_actor value = var:pod_combat_log_14_actor }
+		set_variable = { name = pod_combat_log_15_target value = var:pod_combat_log_14_target }
+		set_variable = { name = pod_combat_log_15_damage value = var:pod_combat_log_14_damage }
+		set_variable = { name = pod_combat_log_15_blocked value = var:pod_combat_log_14_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_13 }
+		set_variable = { name = pod_combat_log_14 value = var:pod_combat_log_13 }
+		set_variable = { name = pod_combat_log_14_actor value = var:pod_combat_log_13_actor }
+		set_variable = { name = pod_combat_log_14_target value = var:pod_combat_log_13_target }
+		set_variable = { name = pod_combat_log_14_damage value = var:pod_combat_log_13_damage }
+		set_variable = { name = pod_combat_log_14_blocked value = var:pod_combat_log_13_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_12 }
+		set_variable = { name = pod_combat_log_13 value = var:pod_combat_log_12 }
+		set_variable = { name = pod_combat_log_13_actor value = var:pod_combat_log_12_actor }
+		set_variable = { name = pod_combat_log_13_target value = var:pod_combat_log_12_target }
+		set_variable = { name = pod_combat_log_13_damage value = var:pod_combat_log_12_damage }
+		set_variable = { name = pod_combat_log_13_blocked value = var:pod_combat_log_12_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_11 }
+		set_variable = { name = pod_combat_log_12 value = var:pod_combat_log_11 }
+		set_variable = { name = pod_combat_log_12_actor value = var:pod_combat_log_11_actor }
+		set_variable = { name = pod_combat_log_12_target value = var:pod_combat_log_11_target }
+		set_variable = { name = pod_combat_log_12_damage value = var:pod_combat_log_11_damage }
+		set_variable = { name = pod_combat_log_12_blocked value = var:pod_combat_log_11_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_10 }
+		set_variable = { name = pod_combat_log_11 value = var:pod_combat_log_10 }
+		set_variable = { name = pod_combat_log_11_actor value = var:pod_combat_log_10_actor }
+		set_variable = { name = pod_combat_log_11_target value = var:pod_combat_log_10_target }
+		set_variable = { name = pod_combat_log_11_damage value = var:pod_combat_log_10_damage }
+		set_variable = { name = pod_combat_log_11_blocked value = var:pod_combat_log_10_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_9 }
+		set_variable = { name = pod_combat_log_10 value = var:pod_combat_log_9 }
+		set_variable = { name = pod_combat_log_10_actor value = var:pod_combat_log_9_actor }
+		set_variable = { name = pod_combat_log_10_target value = var:pod_combat_log_9_target }
+		set_variable = { name = pod_combat_log_10_damage value = var:pod_combat_log_9_damage }
+		set_variable = { name = pod_combat_log_10_blocked value = var:pod_combat_log_9_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_8 }
+		set_variable = { name = pod_combat_log_9 value = var:pod_combat_log_8 }
+		set_variable = { name = pod_combat_log_9_actor value = var:pod_combat_log_8_actor }
+		set_variable = { name = pod_combat_log_9_target value = var:pod_combat_log_8_target }
+		set_variable = { name = pod_combat_log_9_damage value = var:pod_combat_log_8_damage }
+		set_variable = { name = pod_combat_log_9_blocked value = var:pod_combat_log_8_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_7 }
+		set_variable = { name = pod_combat_log_8 value = var:pod_combat_log_7 }
+		set_variable = { name = pod_combat_log_8_actor value = var:pod_combat_log_7_actor }
+		set_variable = { name = pod_combat_log_8_target value = var:pod_combat_log_7_target }
+		set_variable = { name = pod_combat_log_8_damage value = var:pod_combat_log_7_damage }
+		set_variable = { name = pod_combat_log_8_blocked value = var:pod_combat_log_7_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_6 }
+		set_variable = { name = pod_combat_log_7 value = var:pod_combat_log_6 }
+		set_variable = { name = pod_combat_log_7_actor value = var:pod_combat_log_6_actor }
+		set_variable = { name = pod_combat_log_7_target value = var:pod_combat_log_6_target }
+		set_variable = { name = pod_combat_log_7_damage value = var:pod_combat_log_6_damage }
+		set_variable = { name = pod_combat_log_7_blocked value = var:pod_combat_log_6_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_5 }
+		set_variable = { name = pod_combat_log_6 value = var:pod_combat_log_5 }
+		set_variable = { name = pod_combat_log_6_actor value = var:pod_combat_log_5_actor }
+		set_variable = { name = pod_combat_log_6_target value = var:pod_combat_log_5_target }
+		set_variable = { name = pod_combat_log_6_damage value = var:pod_combat_log_5_damage }
+		set_variable = { name = pod_combat_log_6_blocked value = var:pod_combat_log_5_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_4 }
+		set_variable = { name = pod_combat_log_5 value = var:pod_combat_log_4 }
+		set_variable = { name = pod_combat_log_5_actor value = var:pod_combat_log_4_actor }
+		set_variable = { name = pod_combat_log_5_target value = var:pod_combat_log_4_target }
+		set_variable = { name = pod_combat_log_5_damage value = var:pod_combat_log_4_damage }
+		set_variable = { name = pod_combat_log_5_blocked value = var:pod_combat_log_4_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_3 }
+		set_variable = { name = pod_combat_log_4 value = var:pod_combat_log_3 }
+		set_variable = { name = pod_combat_log_4_actor value = var:pod_combat_log_3_actor }
+		set_variable = { name = pod_combat_log_4_target value = var:pod_combat_log_3_target }
+		set_variable = { name = pod_combat_log_4_damage value = var:pod_combat_log_3_damage }
+		set_variable = { name = pod_combat_log_4_blocked value = var:pod_combat_log_3_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_2 }
+		set_variable = { name = pod_combat_log_3 value = var:pod_combat_log_2 }
+		set_variable = { name = pod_combat_log_3_actor value = var:pod_combat_log_2_actor }
+		set_variable = { name = pod_combat_log_3_target value = var:pod_combat_log_2_target }
+		set_variable = { name = pod_combat_log_3_damage value = var:pod_combat_log_2_damage }
+		set_variable = { name = pod_combat_log_3_blocked value = var:pod_combat_log_2_blocked }
+	}
+	if = {
+		limit = { exists = var:pod_combat_log_1 }
+		set_variable = { name = pod_combat_log_2 value = var:pod_combat_log_1 }
+		set_variable = { name = pod_combat_log_2_actor value = var:pod_combat_log_1_actor }
+		set_variable = { name = pod_combat_log_2_target value = var:pod_combat_log_1_target }
+		set_variable = { name = pod_combat_log_2_damage value = var:pod_combat_log_1_damage }
+		set_variable = { name = pod_combat_log_2_blocked value = var:pod_combat_log_1_blocked }
+	}
+
+	# Write newest entry (position 1)
+	# Actor stored as slot index (0-9) so GUI can look up the character.
+	# Target stored as slot index (0-9) of pod_combat_selected_target, or -1 if unset.
+	# Defensive fallback to turn_side if current_actor is somehow missing.
+	# result field:
+	#   0 = normal hit
+	#   1 = guard-blocked
+	#   2 = soaked
+	#   3 = missed
+	#   4 = countered (reserved)
+	#   5 = dodged
+	#   6 = hit + retaliated (attacker took counter-damage)
+	#   7 = retaliation soaked (counter-damage was soaked by attacker)
+	#   8 = buff/debuff applied (no damage, utility move)
+	#   9 = morale damage only
+	#  10 = HP healed
+	#  11 = morale healed
+	set_variable = { name = pod_combat_log_1 value = var:pod_combat_log_msg_id }
+	if = {
+		limit = { has_variable = pod_combat_current_actor }
+		set_variable = { name = pod_combat_log_1_actor value = var:pod_combat_current_actor }
+	}
+	else = {
+		set_variable = { name = pod_combat_log_1_actor value = var:pod_combat_current_turn_side }
+	}
+	if = {
+		limit = { has_variable = pod_combat_selected_target }
+		set_variable = { name = pod_combat_log_1_target value = var:pod_combat_selected_target }
+	}
+	else = {
+		set_variable = { name = pod_combat_log_1_target value = -1 }
+	}
+	set_variable = { name = pod_combat_log_1_damage value = var:pod_combat_last_damage }
+	# Result state — checked in priority order. First match wins.
+	if = {
+		limit = { has_variable = pod_combat_last_was_dodged }
+		set_variable = { name = pod_combat_log_1_blocked value = 5 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_last_was_blocked }
+		set_variable = { name = pod_combat_log_1_blocked value = 1 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_last_was_missed }
+		set_variable = { name = pod_combat_log_1_blocked value = 3 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_last_was_soaked }
+		set_variable = { name = pod_combat_log_1_blocked value = 2 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_last_was_retaliated }
+		set_variable = { name = pod_combat_log_1_blocked value = 6 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_last_was_retaliate_soaked }
+		set_variable = { name = pod_combat_log_1_blocked value = 7 }
+	}
+	else_if = {
+		# Morale damage only (Mental attacks, Intimidate, etc.)
+		limit = { has_variable = pod_combat_last_was_morale_damage }
+		set_variable = { name = pod_combat_log_1_blocked value = 9 }
+	}
+	else_if = {
+		# HP healed
+		limit = { has_variable = pod_combat_last_was_heal }
+		set_variable = { name = pod_combat_log_1_blocked value = 10 }
+	}
+	else_if = {
+		# Morale healed (Rally, etc.)
+		limit = { has_variable = pod_combat_last_was_morale_heal }
+		set_variable = { name = pod_combat_log_1_blocked value = 11 }
+	}
+	else_if = {
+		# Utility moves (pure buff/debuff, no damage, no heal) get code 8
+		limit = {
+			has_variable = pod_combat_last_damage
+			var:pod_combat_last_damage = 0
+			NOT = { has_variable = pod_combat_last_was_dodged }
+			NOT = { has_variable = pod_combat_last_was_blocked }
+			NOT = { has_variable = pod_combat_last_was_missed }
+			NOT = { has_variable = pod_combat_last_was_soaked }
+		}
+		set_variable = { name = pod_combat_log_1_blocked value = 8 }
+	}
+	else = {
+		set_variable = { name = pod_combat_log_1_blocked value = 0 }
+	}
+}
+
+# ─── HEALTH TRACK WRITE-BACK ──────────────────────────────────────
+# Apply combat damage to each combatant's actual PoD health track.
+# Called at end of each round and at combat end, BEFORE cleanup.
+# Splits damage into aggravated (tracked by agg_damage counter) and superficial.
+# Aggravated: halved soak, applied to POD_health_aggravated_damage_num.
+# Superficial: remainder, applied to POD_health_damage_num.
+# Aggravated can push out superficial if the track is full.
+#
+# Unified flow: all combats (including 1v1) use the group writeback, which
+# iterates every populated slot. A 1v1 is just two slots (PC + primary
+# opponent) and the same loop handles it correctly.
+
+pod_combat_apply_health_track_effect = {
+	# Fatality mode determines how (or if) combat damage is written back
+	# to each combatant's PoD health track.
+	#
+	#   practice — sparring only; no wounds written back at all.
+	#   no       — non-lethal; wounds written but track is capped so
+	#              no one's track is completely full (at least 1 empty box).
+	#   anything else (possible/default/always) — normal writeback.
+
+	if = {
+		limit = {
+			has_variable = pod_combat_sc_fatality
+			var:pod_combat_sc_fatality = flag:practice
+		}
+		# Practice duel — intentionally skip writeback.
+		# Combat damage stays in the minigame state but is never applied
+		# to the characters' actual PoD health tracks.
+	}
+	else = {
+		# Write combat damage to PoD health tracks
+		pod_combat_group_health_writeback_effect = yes
+
+		# Non-fatal duels: ensure no combatant's track is completely full
+		if = {
+			limit = {
+				has_variable = pod_combat_sc_fatality
+				var:pod_combat_sc_fatality = flag:no
+			}
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 0 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 1 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 2 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 3 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 4 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 5 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 6 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 7 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 8 }
+			pod_combat_cap_nonfatal_slot_effect = { SLOT = 9 }
+		}
+	}
+}
+
+pod_combat_cap_nonfatal_slot_effect = {
+	# After health writeback, ensure combatant in slot $SLOT$ still has
+	# at least 1 empty health box. If their track is completely full,
+	# reduce superficial damage by 1 (or aggravated if no superficial).
+	if = {
+		limit = { has_variable = pod_combat_c$SLOT$_char }
+		var:pod_combat_c$SLOT$_char = {
+			save_scope_value_as = {
+				name = nf_empty
+				value = POD_empty_damage_boxes
+			}
+		}
+		if = {
+			limit = { scope:nf_empty <= 0 }
+			var:pod_combat_c$SLOT$_char = {
+				if = {
+					limit = {
+						has_variable = POD_health_damage_num
+						var:POD_health_damage_num >= 1
+					}
+					change_variable = { name = POD_health_damage_num add = -1 }
+				}
+				else_if = {
+					limit = {
+						has_variable = POD_health_aggravated_damage_num
+						var:POD_health_aggravated_damage_num >= 1
+					}
+					change_variable = { name = POD_health_aggravated_damage_num add = -1 }
+				}
+				POD_update_wound_trait_xp = yes
+			}
+		}
+	}
+}
+
+# ─── SUPERNATURAL DAMAGE EFFECTS ─────────────────────────────────
+
+pod_combat_deal_supernatural_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = damage amount
+	# Supernatural/Superficial: auto-hit, no guard, dodge → soak → damage
+	# NOTE: Caller must clear pod_combat_last_was_blocked/soaked/missed first!
+
+	# Stealth then dodge — each negates the entire attack; stealth is consumed first so a stealthed dodger keeps their dodge
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = target_soak
+			value = var:pod_combat_$TARGET_SIDE$_soak
+		}
+
+		random_list = {
+			# Soaked — damage negated
+			0 = {
+				modifier = { add = scope:target_soak }
+				set_variable = { name = pod_combat_last_was_soaked value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			# Not soaked — apply damage
+			100 = {
+				modifier = {
+					add = {
+						value = scope:target_soak
+						multiply = -1
+					}
+				}
+
+				save_scope_value_as = {
+					name = new_hp
+					value = {
+						value = var:pod_combat_$TARGET_SIDE$_hp
+						subtract = $AMOUNT$
+						min = 0
+					}
+				}
+				set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+
+				# Morale spillover
+				save_scope_value_as = {
+					name = morale_spill
+					value = {
+						value = $AMOUNT$
+						multiply = pod_combat_morale_from_hp_ratio
+						floor = yes
+					}
+				}
+				if = {
+					limit = { scope:morale_spill > 0 }
+					save_scope_value_as = {
+						name = new_morale
+						value = {
+							value = var:pod_combat_$TARGET_SIDE$_morale
+							subtract = scope:morale_spill
+							min = 0
+						}
+					}
+					set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+				}
+
+				set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+pod_combat_deal_physical_bypass_guard_hp_damage_effect = {
+	# Physical bypass guard: hit chance → dodge → soak → damage (skips guard)
+	# Used by Lightning Strike, etc.
+
+	# Stealth then dodge — each negates the entire attack; stealth is consumed first so a stealthed dodger keeps their dodge
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = hit_chance
+			value = var:pod_combat_current_hit_chance
+		}
+
+		random_list = {
+			# Miss
+			0 = {
+				modifier = {
+					add = {
+						value = 100
+						subtract = scope:hit_chance
+					}
+				}
+				set_variable = { name = pod_combat_last_was_missed value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			# Hit — skip guard, straight to soak/damage
+			0 = {
+				modifier = { add = scope:hit_chance }
+				# Delegate to the soak-only path (reuse supernatural for soak-only check)
+				save_scope_value_as = {
+					name = target_soak
+					value = var:pod_combat_$TARGET_SIDE$_soak
+				}
+				random_list = {
+					0 = {
+						modifier = { add = scope:target_soak }
+						set_variable = { name = pod_combat_last_was_soaked value = yes }
+						set_variable = { name = pod_combat_last_damage value = 0 }
+					}
+					100 = {
+						modifier = { add = { value = scope:target_soak multiply = -1 } }
+						save_scope_value_as = {
+							name = new_hp
+							value = { value = var:pod_combat_$TARGET_SIDE$_hp subtract = $AMOUNT$ min = 0 }
+						}
+						set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+						save_scope_value_as = {
+							name = morale_spill
+							value = { value = $AMOUNT$ multiply = pod_combat_morale_from_hp_ratio floor = yes }
+						}
+						if = {
+							limit = { scope:morale_spill > 0 }
+							save_scope_value_as = {
+								name = new_morale
+								value = { value = var:pod_combat_$TARGET_SIDE$_morale subtract = scope:morale_spill min = 0 }
+							}
+							set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+						}
+						set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+					}
+				}
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+# ─── AGGRAVATED DAMAGE EFFECTS ───────────────────────────────────
+# Aggravated damage halves the target's soak chance, making it much harder to resist.
+# Also tracks aggravated damage separately for PoD health write-back.
+
+pod_combat_deal_physical_aggravated_hp_damage_effect = {
+	# Physical/Aggravated: hit chance → dodge → guard → soak (halved) → damage
+	# $TARGET_SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = damage amount
+
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = hit_chance
+			value = var:pod_combat_current_hit_chance
+		}
+
+		random_list = {
+			0 = {
+				modifier = { add = { value = 100 subtract = scope:hit_chance } }
+				set_variable = { name = pod_combat_last_was_missed value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			0 = {
+				modifier = { add = scope:hit_chance }
+				# Guard check
+				if = {
+					limit = {
+						has_variable = pod_combat_$TARGET_SIDE$_is_guarding
+						NOT = { has_variable = pod_combat_$TARGET_SIDE$_feinted }
+					}
+					remove_variable = pod_combat_$TARGET_SIDE$_is_guarding
+					set_variable = { name = pod_combat_last_was_blocked value = yes }
+					set_variable = { name = pod_combat_last_damage value = 0 }
+				}
+				else = {
+					# Aggravated soak check — soak at half effectiveness.
+					# Aggravated damage is harder to resist but not impossible.
+					save_scope_value_as = {
+						name = agg_soak
+						value = { value = var:pod_combat_$TARGET_SIDE$_soak divide = 2 floor = yes }
+					}
+					random_list = {
+						0 = {
+							modifier = { add = scope:agg_soak }
+							set_variable = { name = pod_combat_last_was_soaked value = yes }
+							set_variable = { name = pod_combat_last_damage value = 0 }
+						}
+						100 = {
+							modifier = { add = { value = scope:agg_soak multiply = -1 } }
+							save_scope_value_as = {
+								name = new_hp
+								value = { value = var:pod_combat_$TARGET_SIDE$_hp subtract = $AMOUNT$ min = 0 }
+							}
+							set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+							change_variable = { name = pod_combat_$TARGET_SIDE$_agg_damage add = $AMOUNT$ }
+							save_scope_value_as = {
+								name = morale_spill
+								value = { value = $AMOUNT$ multiply = pod_combat_morale_from_hp_ratio floor = yes }
+							}
+							if = {
+								limit = { scope:morale_spill > 0 }
+								save_scope_value_as = {
+									name = new_morale
+									value = { value = var:pod_combat_$TARGET_SIDE$_morale subtract = scope:morale_spill min = 0 }
+								}
+								set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+							}
+							set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+						}
+					}
+				}
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+pod_combat_deal_supernatural_aggravated_hp_damage_effect = {
+	# Supernatural/Aggravated: auto-hit, no guard, dodge → soak (halved) → damage
+	# $TARGET_SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = damage amount
+
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		# Aggravated soak check — soak at half effectiveness
+		save_scope_value_as = {
+			name = agg_soak
+			value = { value = var:pod_combat_$TARGET_SIDE$_soak divide = 2 floor = yes }
+		}
+		random_list = {
+			0 = {
+				modifier = { add = scope:agg_soak }
+				set_variable = { name = pod_combat_last_was_soaked value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			100 = {
+				modifier = { add = { value = scope:agg_soak multiply = -1 } }
+				save_scope_value_as = {
+					name = new_hp
+					value = { value = var:pod_combat_$TARGET_SIDE$_hp subtract = $AMOUNT$ min = 0 }
+				}
+				set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+				change_variable = { name = pod_combat_$TARGET_SIDE$_agg_damage add = $AMOUNT$ }
+				save_scope_value_as = {
+					name = morale_spill
+					value = { value = $AMOUNT$ multiply = pod_combat_morale_from_hp_ratio floor = yes }
+				}
+				if = {
+					limit = { scope:morale_spill > 0 }
+					save_scope_value_as = {
+						name = new_morale
+						value = { value = var:pod_combat_$TARGET_SIDE$_morale subtract = scope:morale_spill min = 0 }
+					}
+					set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+				}
+				set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = {
+	# Physical/Aggravated + bypass guard: hit chance → dodge → soak (halved) → damage
+	# $TARGET_SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = damage amount
+
+	if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
+		# Revert the +30 hit chance bonus stealth granted now that stealth is consumed
+		save_scope_value_as = {
+			name = new_hit_after_stealth
+			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else_if = {
+		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_dodging }
+		remove_variable = pod_combat_$TARGET_SIDE$_is_dodging
+		set_variable = { name = pod_combat_last_was_dodged value = yes }
+		set_variable = { name = pod_combat_last_damage value = 0 }
+	}
+	else = {
+		save_scope_value_as = {
+			name = hit_chance
+			value = var:pod_combat_current_hit_chance
+		}
+		random_list = {
+			0 = {
+				modifier = { add = { value = 100 subtract = scope:hit_chance } }
+				set_variable = { name = pod_combat_last_was_missed value = yes }
+				set_variable = { name = pod_combat_last_damage value = 0 }
+			}
+			0 = {
+				modifier = { add = scope:hit_chance }
+				# Aggravated soak check — soak at half effectiveness
+				save_scope_value_as = {
+					name = agg_soak
+					value = { value = var:pod_combat_$TARGET_SIDE$_soak divide = 2 floor = yes }
+				}
+				random_list = {
+					0 = {
+						modifier = { add = scope:agg_soak }
+						set_variable = { name = pod_combat_last_was_soaked value = yes }
+						set_variable = { name = pod_combat_last_damage value = 0 }
+					}
+					100 = {
+						modifier = { add = { value = scope:agg_soak multiply = -1 } }
+						save_scope_value_as = {
+							name = new_hp
+							value = { value = var:pod_combat_$TARGET_SIDE$_hp subtract = $AMOUNT$ min = 0 }
+						}
+						set_variable = { name = pod_combat_$TARGET_SIDE$_hp value = scope:new_hp }
+						change_variable = { name = pod_combat_$TARGET_SIDE$_agg_damage add = $AMOUNT$ }
+						save_scope_value_as = {
+							name = morale_spill
+							value = { value = $AMOUNT$ multiply = pod_combat_morale_from_hp_ratio floor = yes }
+						}
+						if = {
+							limit = { scope:morale_spill > 0 }
+							save_scope_value_as = {
+								name = new_morale
+								value = { value = var:pod_combat_$TARGET_SIDE$_morale subtract = scope:morale_spill min = 0 }
+							}
+							set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_morale }
+						}
+						set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+					}
+				}
+			}
+		}
+	}
+	# Consume the actor's stealth (if any) now that the attack has resolved
+	pod_combat_consume_actor_stealth_effect = yes
+}
+
+# ─── ELEMENTAL / METAL / HOLY DAMAGE WRAPPERS ───────────────────────
+# Fire, Sunlight, Silver, Gold, and Holy are "promoted" damage sources.
+# Mechanically they reuse the Physical pipeline (hit → guard → soak → damage),
+# but against vulnerable creature types they are ALWAYS aggravated:
+#   Fire     — aggravated vs vampires
+#   Sunlight — aggravated vs vampires
+#   Silver   — aggravated vs werewolves and Bastet
+#   Gold     — aggravated vs Mokole
+#   Holy     — aggravated vs vampires, demons, Kuei-jin, and wraiths
+# Non-vulnerable targets take the skill's baseline damage_type from CSV
+# (these wrappers only cover the baseline-Superficial case; baseline-Aggravated
+# skills route straight to pod_combat_deal_physical_aggravated_hp_damage_effect
+# in the Python generator since they're already aggravated for everyone).
+#
+# All wrappers assume $TARGET_SIDE$ = opponent in practice — they look up the
+# target's character reference via var:pod_combat_opponent. They accept the
+# TARGET_SIDE parameter for symmetry with the rest of the damage pipeline.
+
+pod_combat_deal_fire_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (always "opponent" in practice)
+	# $AMOUNT$ = damage amount
+	# Fire: aggravated vs vampires, else physical superficial.
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_vampire_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_sunlight_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (always "opponent" in practice)
+	# $AMOUNT$ = damage amount
+	# Sunlight: aggravated vs vampires, else physical superficial.
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_vampire_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_silver_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (always "opponent" in practice)
+	# $AMOUNT$ = damage amount
+	# Silver: aggravated vs werewolves and Bastet, else physical superficial.
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = {
+				OR = {
+					POD_is_werewolf_trigger = yes
+					POD_is_bastet_trigger = yes
+				}
+			}
+		}
+		pod_combat_deal_physical_aggravated_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_gold_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (always "opponent" in practice)
+	# $AMOUNT$ = damage amount
+	# Gold: aggravated vs Mokole, else physical superficial.
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_mokole_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_holy_hp_damage_effect = {
+	# $TARGET_SIDE$ = "player" or "opponent" (always "opponent" in practice)
+	# $AMOUNT$ = damage amount
+	# Holy: aggravated vs vampires, demons, Kuei-jin, and wraiths;
+	# else physical superficial. Used by True Faith, hunter blessed weapons,
+	# celestial/angelic magic, and any blessed-weapon style skill.
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = {
+				OR = {
+					POD_is_vampire_trigger = yes
+					POD_is_demon_trigger = yes
+					is_kueijin_trigger = yes
+					POD_is_wraith_trigger = yes
+				}
+			}
+		}
+		pod_combat_deal_physical_aggravated_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+# ─── BYPASS-GUARD ELEMENTAL VARIANTS ────────────────────────────────
+# Same promotion logic as above but skip the guard check. Used by moves
+# with the 'bypass_guard' special (e.g. Lightning Strike style attacks).
+
+pod_combat_deal_fire_bypass_guard_hp_damage_effect = {
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_vampire_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_sunlight_bypass_guard_hp_damage_effect = {
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_vampire_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_silver_bypass_guard_hp_damage_effect = {
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = {
+				OR = {
+					POD_is_werewolf_trigger = yes
+					POD_is_bastet_trigger = yes
+				}
+			}
+		}
+		pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_gold_bypass_guard_hp_damage_effect = {
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = { POD_is_mokole_trigger = yes }
+		}
+		pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+pod_combat_deal_holy_bypass_guard_hp_damage_effect = {
+	if = {
+		limit = {
+			exists = var:pod_combat_opponent
+			var:pod_combat_opponent = {
+				OR = {
+					POD_is_vampire_trigger = yes
+					POD_is_demon_trigger = yes
+					is_kueijin_trigger = yes
+					POD_is_wraith_trigger = yes
+				}
+			}
+		}
+		pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+	else = {
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ }
+	}
+}
+
+# ─── HEALING EFFECTS ────────────────────────────────────────────────
+# Three variants so the Python generator can route based on damage_type:
+#   Superficial — mundane/quick healing (bandages, Regeneration, feeding).
+#                 Cannot heal through aggravated wounds; HP is capped at
+#                 (max_hp - agg_damage) so aggravated damage remains a
+#                 lasting wound until it is specifically cured.
+#   Aggravated  — rare / potent healing (Obeah Mend, Fortitude high-level,
+#                 soul-drain). Restores HP AND reduces the agg_damage counter
+#                 by the amount healed, so aggravated wounds are properly
+#                 cleared for write-back to the real PoD health track.
+#   Legacy      — pod_combat_restore_hp_effect. Unconditional heal capped at
+#                 max_hp with no agg_damage interaction. Used when a skill
+#                 leaves damage_type blank (no type distinction).
+
+pod_combat_restore_hp_superficial_effect = {
+	# $SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = superficial HP to restore
+	# Ceiling: max_hp minus current aggravated damage, so aggravated wounds
+	# cannot be healed by superficial means.
+	save_scope_value_as = {
+		name = sup_ceiling
+		value = {
+			value = var:pod_combat_$SIDE$_max_hp
+			subtract = var:pod_combat_$SIDE$_agg_damage
+		}
+	}
+	save_scope_value_as = {
+		name = new_hp
+		value = {
+			value = var:pod_combat_$SIDE$_hp
+			add = $AMOUNT$
+			max = scope:sup_ceiling
+		}
+	}
+	set_variable = { name = pod_combat_$SIDE$_hp value = scope:new_hp }
+	set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+	set_variable = { name = pod_combat_last_was_heal value = yes }
+}
+
+pod_combat_restore_hp_aggravated_effect = {
+	# $SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = aggravated HP to restore
+	# Reduces the agg_damage counter by up to $AMOUNT$ (bounded by the current
+	# counter so we don't go negative), then adds $AMOUNT$ to HP capped at
+	# max_hp. This keeps the health write-back consistent: if we cured 2
+	# aggravated wounds mid-combat, those 2 wounds won't reappear on the PoD
+	# health track when combat ends.
+	save_scope_value_as = {
+		name = agg_heal
+		value = {
+			value = $AMOUNT$
+			max = var:pod_combat_$SIDE$_agg_damage
+		}
+	}
+	change_variable = {
+		name = pod_combat_$SIDE$_agg_damage
+		add = {
+			value = scope:agg_heal
+			multiply = -1
+		}
+	}
+	save_scope_value_as = {
+		name = new_hp
+		value = {
+			value = var:pod_combat_$SIDE$_hp
+			add = $AMOUNT$
+			max = var:pod_combat_$SIDE$_max_hp
+		}
+	}
+	set_variable = { name = pod_combat_$SIDE$_hp value = scope:new_hp }
+	set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+	set_variable = { name = pod_combat_last_was_heal value = yes }
+}
+
+pod_combat_restore_hp_effect = {
+	# $SIDE$ = "player" or "opponent"
+	# $AMOUNT$ = HP to restore
+	# Legacy unconditional heal: no distinction between superficial and
+	# aggravated. Used by skills that leave damage_type blank.
+	save_scope_value_as = {
+		name = new_hp
+		value = {
+			value = var:pod_combat_$SIDE$_hp
+			add = $AMOUNT$
+			max = var:pod_combat_$SIDE$_max_hp
+		}
+	}
+	set_variable = { name = pod_combat_$SIDE$_hp value = scope:new_hp }
+	set_variable = { name = pod_combat_last_damage value = $AMOUNT$ }
+	set_variable = { name = pod_combat_last_was_heal value = yes }
+}
+
+# ─── END COMBAT (INLINE) ──────────────────────────────────────────
+# Replaces the old pod_combat.0090 event. Runs inline from the victory
+# check, auto-resolve, or forfeit path — no event popup, no scope
+# boundary. For duel-driven combat (pod_combat_sc_driven), the
+# dispatcher reconstructs PoD scopes and fires the follow-up event.
+# For standalone/debug combat, shows a result toast.
+
+pod_combat_end_combat_effect = {
+	# Re-entry guard: the skill button's GUI execute and the "End Combat"
+	# button both call this when pod_combat_is_over is set. The first call
+	# removes pod_combat_active (SC-driven) or runs full cleanup (standalone),
+	# so subsequent calls must be no-ops.
+	if = {
+		limit = { NOT = { has_variable = pod_combat_active } }
+		# Already ended — nothing to do
+	}
+	else = {
+
+	# Write combat damage back to the PoD health track.
+	pod_combat_apply_health_track_effect = yes
+
+	# If launched via configure_start_single_combat_effect, fire the
+	# post-combat dispatch event immediately. The event rebuilds all
+	# scopes it needs from stashed character variables on the PC, so it
+	# doesn't depend on the current scope chain. (An earlier version fired
+	# with days = 1 to escape the GUI execute context entirely; no longer
+	# needed once scope reconstruction was moved into the event itself.)
+	#
+	# The combat window closes immediately (pod_combat_active removed).
+	# The stash variables persist on the PC until the event fires the
+	# follow-up and cleans them up.
+	if = {
+		limit = { has_variable = pod_combat_sc_driven }
+		# Close the combat window immediately but keep pod_combat_is_over
+		# as a re-entry guard (the victory check gates on NOT is_over).
+		# pod_combat.9999 handles full cleanup after firing the follow-up.
+		remove_variable = pod_combat_active
+		trigger_event = { id = pod_combat.9999 }
+	}
+
+	# For standalone/debug combat (no duel override), show a toast
+	# and clean up immediately (no scope bridge needed).
+	else = {
+		if = {
+			limit = {
+				has_variable = pod_combat_winner
+				var:pod_combat_winner ?= root
+			}
+			send_interface_toast = {
+				title = pod_combat_result_victory_toast
+				left_icon = root
+			}
+		}
+		else = {
+			send_interface_toast = {
+				title = pod_combat_result_defeat_toast
+				left_icon = root
+			}
+		}
+		pod_combat_cleanup_effect = yes
+	}
+
+	} # end re-entry guard
+}
+
+# ─── CLEANUP ───────────────────────────────────────────────────────
+
+pod_combat_cleanup_effect = {
+	# Release all tier variables (both round and combat duration) across
+	# all 10 slots. The underlying stat vars (soak, hit_chance) are removed
+	# by pod_combat_group_cleanup_effect separately.
+	pod_combat_clear_combat_tiers_effect = yes
+
+	# Clear discipline battle modifiers from all combatants.
+	# POD_enemy/ally_knight_set_discipline_battle_effect add persistent
+	# character_modifiers during init; strip them now that combat is over.
+	# Must run before pod_combat_group_cleanup_effect removes the char refs.
+	if = {
+		limit = { exists = var:pod_combat_c0_char }
+		var:pod_combat_c0_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c1_char }
+		var:pod_combat_c1_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c2_char }
+		var:pod_combat_c2_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c3_char }
+		var:pod_combat_c3_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c4_char }
+		var:pod_combat_c4_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c5_char }
+		var:pod_combat_c5_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c6_char }
+		var:pod_combat_c6_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c7_char }
+		var:pod_combat_c7_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c8_char }
+		var:pod_combat_c8_char = { POD_clear_discipline_battle_effect = yes }
+	}
+	if = {
+		limit = { exists = var:pod_combat_c9_char }
+		var:pod_combat_c9_char = { POD_clear_discipline_battle_effect = yes }
+	}
+
+	# Remove all combat variables from the player character
+	remove_variable = pod_combat_active
+	remove_variable = pod_combat_is_over
+	# Defensive removal of the single-combat override stash — normally
+	# cleared by pod_combat.9999 (the post-combat dispatch event), but if
+	# cleanup runs without going through the dispatch we don't want orphan
+	# vars lingering on the PC between fights.
+	remove_variable = pod_combat_sc_driven
+	remove_variable = pod_combat_sc_initiator
+	remove_variable = pod_combat_sc_attacker
+	remove_variable = pod_combat_sc_defender
+	remove_variable = pod_combat_sc_follow_up
+	remove_variable = pod_combat_sc_invalidation
+	remove_variable = pod_combat_sc_fatality
+	remove_variable = pod_combat_sc_fixed
+	remove_variable = pod_combat_sc_locale
+	remove_variable = pod_combat_opponent
+	remove_variable = pod_combat_actor_char
+	remove_variable = pod_combat_round
+	remove_variable = pod_combat_current_ap
+	remove_variable = pod_combat_current_turn_side
+	remove_variable = pod_combat_player_hp
+	remove_variable = pod_combat_player_max_hp
+	remove_variable = pod_combat_player_initial_hp
+	remove_variable = pod_combat_player_soak
+	remove_variable = pod_combat_player_morale
+	remove_variable = pod_combat_opponent_hp
+	remove_variable = pod_combat_opponent_max_hp
+	remove_variable = pod_combat_opponent_initial_hp
+	remove_variable = pod_combat_opponent_soak
+	remove_variable = pod_combat_opponent_morale
+	remove_variable = pod_combat_player_is_guarding
+	remove_variable = pod_combat_player_feinted
+	remove_variable = pod_combat_opponent_is_guarding
+	remove_variable = pod_combat_opponent_feinted
+	remove_variable = pod_combat_winner
+	remove_variable = pod_combat_loser
+	remove_variable = pod_combat_last_action
+	remove_variable = pod_combat_last_damage
+	remove_variable = pod_combat_last_actor_side
+	remove_variable = pod_combat_ai_last_move
+	remove_variable = pod_combat_ai_saved_enemy_target
+	remove_variable = pod_combat_ai_last_swap_target
+	remove_variable = pod_combat_last_was_blocked
+	remove_variable = pod_combat_last_was_soaked
+	remove_variable = pod_combat_last_was_missed
+	remove_variable = pod_combat_last_was_dodged
+	remove_variable = pod_combat_last_was_retaliated
+	remove_variable = pod_combat_last_was_retaliate_soaked
+	remove_variable = pod_combat_last_was_morale_damage
+	remove_variable = pod_combat_last_was_heal
+	remove_variable = pod_combat_last_was_morale_heal
+	# Damage system tracking
+	remove_variable = pod_combat_player_base_soak
+	remove_variable = pod_combat_opponent_base_soak
+	remove_variable = pod_combat_player_base_hit_chance
+	remove_variable = pod_combat_opponent_base_hit_chance
+	remove_variable = pod_combat_player_energy_used
+	remove_variable = pod_combat_opponent_energy_used
+	remove_variable = pod_combat_player_agg_damage
+	remove_variable = pod_combat_opponent_agg_damage
+	remove_variable = pod_combat_player_agg_total
+	remove_variable = pod_combat_opponent_agg_total
+	remove_variable = pod_combat_player_is_dodging
+	remove_variable = pod_combat_opponent_is_dodging
+	remove_variable = pod_combat_player_is_stealthed
+	remove_variable = pod_combat_opponent_is_stealthed
+	remove_variable = pod_combat_c0_is_stealthed
+	remove_variable = pod_combat_c1_is_stealthed
+	remove_variable = pod_combat_c2_is_stealthed
+	remove_variable = pod_combat_c3_is_stealthed
+	remove_variable = pod_combat_c4_is_stealthed
+	remove_variable = pod_combat_c5_is_stealthed
+	remove_variable = pod_combat_c6_is_stealthed
+	remove_variable = pod_combat_c7_is_stealthed
+	remove_variable = pod_combat_c8_is_stealthed
+	remove_variable = pod_combat_c9_is_stealthed
+	# Initiative bonus and AP drain (workspace + per-slot)
+	remove_variable = pod_combat_player_init_bonus
+	remove_variable = pod_combat_opponent_init_bonus
+	remove_variable = pod_combat_player_ap_drain
+	remove_variable = pod_combat_opponent_ap_drain
+	remove_variable = pod_combat_c0_init_bonus
+	remove_variable = pod_combat_c1_init_bonus
+	remove_variable = pod_combat_c2_init_bonus
+	remove_variable = pod_combat_c3_init_bonus
+	remove_variable = pod_combat_c4_init_bonus
+	remove_variable = pod_combat_c5_init_bonus
+	remove_variable = pod_combat_c6_init_bonus
+	remove_variable = pod_combat_c7_init_bonus
+	remove_variable = pod_combat_c8_init_bonus
+	remove_variable = pod_combat_c9_init_bonus
+	remove_variable = pod_combat_c0_ap_drain
+	remove_variable = pod_combat_c1_ap_drain
+	remove_variable = pod_combat_c2_ap_drain
+	remove_variable = pod_combat_c3_ap_drain
+	remove_variable = pod_combat_c4_ap_drain
+	remove_variable = pod_combat_c5_ap_drain
+	remove_variable = pod_combat_c6_ap_drain
+	remove_variable = pod_combat_c7_ap_drain
+	remove_variable = pod_combat_c8_ap_drain
+	remove_variable = pod_combat_c9_ap_drain
+	remove_variable = pod_combat_player_retaliate_hit
+	remove_variable = pod_combat_opponent_retaliate_hit
+	remove_variable = pod_combat_player_retaliate_miss
+	remove_variable = pod_combat_opponent_retaliate_miss
+	remove_variable = pod_combat_c0_retaliate_hit
+	remove_variable = pod_combat_c1_retaliate_hit
+	remove_variable = pod_combat_c2_retaliate_hit
+	remove_variable = pod_combat_c3_retaliate_hit
+	remove_variable = pod_combat_c4_retaliate_hit
+	remove_variable = pod_combat_c5_retaliate_hit
+	remove_variable = pod_combat_c6_retaliate_hit
+	remove_variable = pod_combat_c7_retaliate_hit
+	remove_variable = pod_combat_c8_retaliate_hit
+	remove_variable = pod_combat_c9_retaliate_hit
+	remove_variable = pod_combat_c0_retaliate_miss
+	remove_variable = pod_combat_c1_retaliate_miss
+	remove_variable = pod_combat_c2_retaliate_miss
+	remove_variable = pod_combat_c3_retaliate_miss
+	remove_variable = pod_combat_c4_retaliate_miss
+	remove_variable = pod_combat_c5_retaliate_miss
+	remove_variable = pod_combat_c6_retaliate_miss
+	remove_variable = pod_combat_c7_retaliate_miss
+	remove_variable = pod_combat_c8_retaliate_miss
+	remove_variable = pod_combat_c9_retaliate_miss
+	remove_variable = pod_combat_player_retaliate_hit_agg
+	remove_variable = pod_combat_opponent_retaliate_hit_agg
+	remove_variable = pod_combat_player_retaliate_miss_agg
+	remove_variable = pod_combat_opponent_retaliate_miss_agg
+	remove_variable = pod_combat_c0_retaliate_hit_agg
+	remove_variable = pod_combat_c1_retaliate_hit_agg
+	remove_variable = pod_combat_c2_retaliate_hit_agg
+	remove_variable = pod_combat_c3_retaliate_hit_agg
+	remove_variable = pod_combat_c4_retaliate_hit_agg
+	remove_variable = pod_combat_c5_retaliate_hit_agg
+	remove_variable = pod_combat_c6_retaliate_hit_agg
+	remove_variable = pod_combat_c7_retaliate_hit_agg
+	remove_variable = pod_combat_c8_retaliate_hit_agg
+	remove_variable = pod_combat_c9_retaliate_hit_agg
+	remove_variable = pod_combat_c0_retaliate_miss_agg
+	remove_variable = pod_combat_c1_retaliate_miss_agg
+	remove_variable = pod_combat_c2_retaliate_miss_agg
+	remove_variable = pod_combat_c3_retaliate_miss_agg
+	remove_variable = pod_combat_c4_retaliate_miss_agg
+	remove_variable = pod_combat_c5_retaliate_miss_agg
+	remove_variable = pod_combat_c6_retaliate_miss_agg
+	remove_variable = pod_combat_c7_retaliate_miss_agg
+	remove_variable = pod_combat_c8_retaliate_miss_agg
+	remove_variable = pod_combat_c9_retaliate_miss_agg
+	remove_variable = pod_combat_player_prowess
+	remove_variable = pod_combat_opponent_prowess
+	remove_variable = pod_combat_player_hit_chance
+	remove_variable = pod_combat_opponent_hit_chance
+	remove_variable = pod_combat_current_hit_chance
+	remove_variable = pod_combat_log_msg_id
+	# Combat log entries (30 total)
+	remove_variable = pod_combat_log_1
+	remove_variable = pod_combat_log_1_actor
+	remove_variable = pod_combat_log_1_target
+	remove_variable = pod_combat_log_1_damage
+	remove_variable = pod_combat_log_1_blocked
+	remove_variable = pod_combat_log_2
+	remove_variable = pod_combat_log_2_actor
+	remove_variable = pod_combat_log_2_target
+	remove_variable = pod_combat_log_2_damage
+	remove_variable = pod_combat_log_2_blocked
+	remove_variable = pod_combat_log_3
+	remove_variable = pod_combat_log_3_actor
+	remove_variable = pod_combat_log_3_target
+	remove_variable = pod_combat_log_3_damage
+	remove_variable = pod_combat_log_3_blocked
+	remove_variable = pod_combat_log_4
+	remove_variable = pod_combat_log_4_actor
+	remove_variable = pod_combat_log_4_target
+	remove_variable = pod_combat_log_4_damage
+	remove_variable = pod_combat_log_4_blocked
+	remove_variable = pod_combat_log_5
+	remove_variable = pod_combat_log_5_actor
+	remove_variable = pod_combat_log_5_target
+	remove_variable = pod_combat_log_5_damage
+	remove_variable = pod_combat_log_5_blocked
+	remove_variable = pod_combat_log_6
+	remove_variable = pod_combat_log_6_actor
+	remove_variable = pod_combat_log_6_target
+	remove_variable = pod_combat_log_6_damage
+	remove_variable = pod_combat_log_6_blocked
+	remove_variable = pod_combat_log_7
+	remove_variable = pod_combat_log_7_actor
+	remove_variable = pod_combat_log_7_target
+	remove_variable = pod_combat_log_7_damage
+	remove_variable = pod_combat_log_7_blocked
+	remove_variable = pod_combat_log_8
+	remove_variable = pod_combat_log_8_actor
+	remove_variable = pod_combat_log_8_target
+	remove_variable = pod_combat_log_8_damage
+	remove_variable = pod_combat_log_8_blocked
+	remove_variable = pod_combat_log_9
+	remove_variable = pod_combat_log_9_actor
+	remove_variable = pod_combat_log_9_target
+	remove_variable = pod_combat_log_9_damage
+	remove_variable = pod_combat_log_9_blocked
+	remove_variable = pod_combat_log_10
+	remove_variable = pod_combat_log_10_actor
+	remove_variable = pod_combat_log_10_target
+	remove_variable = pod_combat_log_10_damage
+	remove_variable = pod_combat_log_10_blocked
+	remove_variable = pod_combat_log_11
+	remove_variable = pod_combat_log_11_actor
+	remove_variable = pod_combat_log_11_target
+	remove_variable = pod_combat_log_11_damage
+	remove_variable = pod_combat_log_11_blocked
+	remove_variable = pod_combat_log_12
+	remove_variable = pod_combat_log_12_actor
+	remove_variable = pod_combat_log_12_target
+	remove_variable = pod_combat_log_12_damage
+	remove_variable = pod_combat_log_12_blocked
+	remove_variable = pod_combat_log_13
+	remove_variable = pod_combat_log_13_actor
+	remove_variable = pod_combat_log_13_target
+	remove_variable = pod_combat_log_13_damage
+	remove_variable = pod_combat_log_13_blocked
+	remove_variable = pod_combat_log_14
+	remove_variable = pod_combat_log_14_actor
+	remove_variable = pod_combat_log_14_target
+	remove_variable = pod_combat_log_14_damage
+	remove_variable = pod_combat_log_14_blocked
+	remove_variable = pod_combat_log_15
+	remove_variable = pod_combat_log_15_actor
+	remove_variable = pod_combat_log_15_target
+	remove_variable = pod_combat_log_15_damage
+	remove_variable = pod_combat_log_15_blocked
+	remove_variable = pod_combat_log_16
+	remove_variable = pod_combat_log_16_actor
+	remove_variable = pod_combat_log_16_target
+	remove_variable = pod_combat_log_16_damage
+	remove_variable = pod_combat_log_16_blocked
+	remove_variable = pod_combat_log_17
+	remove_variable = pod_combat_log_17_actor
+	remove_variable = pod_combat_log_17_target
+	remove_variable = pod_combat_log_17_damage
+	remove_variable = pod_combat_log_17_blocked
+	remove_variable = pod_combat_log_18
+	remove_variable = pod_combat_log_18_actor
+	remove_variable = pod_combat_log_18_target
+	remove_variable = pod_combat_log_18_damage
+	remove_variable = pod_combat_log_18_blocked
+	remove_variable = pod_combat_log_19
+	remove_variable = pod_combat_log_19_actor
+	remove_variable = pod_combat_log_19_target
+	remove_variable = pod_combat_log_19_damage
+	remove_variable = pod_combat_log_19_blocked
+	remove_variable = pod_combat_log_20
+	remove_variable = pod_combat_log_20_actor
+	remove_variable = pod_combat_log_20_target
+	remove_variable = pod_combat_log_20_damage
+	remove_variable = pod_combat_log_20_blocked
+	remove_variable = pod_combat_log_21
+	remove_variable = pod_combat_log_21_actor
+	remove_variable = pod_combat_log_21_target
+	remove_variable = pod_combat_log_21_damage
+	remove_variable = pod_combat_log_21_blocked
+	remove_variable = pod_combat_log_22
+	remove_variable = pod_combat_log_22_actor
+	remove_variable = pod_combat_log_22_target
+	remove_variable = pod_combat_log_22_damage
+	remove_variable = pod_combat_log_22_blocked
+	remove_variable = pod_combat_log_23
+	remove_variable = pod_combat_log_23_actor
+	remove_variable = pod_combat_log_23_target
+	remove_variable = pod_combat_log_23_damage
+	remove_variable = pod_combat_log_23_blocked
+	remove_variable = pod_combat_log_24
+	remove_variable = pod_combat_log_24_actor
+	remove_variable = pod_combat_log_24_target
+	remove_variable = pod_combat_log_24_damage
+	remove_variable = pod_combat_log_24_blocked
+	remove_variable = pod_combat_log_25
+	remove_variable = pod_combat_log_25_actor
+	remove_variable = pod_combat_log_25_target
+	remove_variable = pod_combat_log_25_damage
+	remove_variable = pod_combat_log_25_blocked
+	remove_variable = pod_combat_log_26
+	remove_variable = pod_combat_log_26_actor
+	remove_variable = pod_combat_log_26_target
+	remove_variable = pod_combat_log_26_damage
+	remove_variable = pod_combat_log_26_blocked
+	remove_variable = pod_combat_log_27
+	remove_variable = pod_combat_log_27_actor
+	remove_variable = pod_combat_log_27_target
+	remove_variable = pod_combat_log_27_damage
+	remove_variable = pod_combat_log_27_blocked
+	remove_variable = pod_combat_log_28
+	remove_variable = pod_combat_log_28_actor
+	remove_variable = pod_combat_log_28_target
+	remove_variable = pod_combat_log_28_damage
+	remove_variable = pod_combat_log_28_blocked
+	remove_variable = pod_combat_log_29
+	remove_variable = pod_combat_log_29_actor
+	remove_variable = pod_combat_log_29_target
+	remove_variable = pod_combat_log_29_damage
+	remove_variable = pod_combat_log_29_blocked
+	remove_variable = pod_combat_log_30
+	remove_variable = pod_combat_log_30_actor
+	remove_variable = pod_combat_log_30_target
+	remove_variable = pod_combat_log_30_damage
+	remove_variable = pod_combat_log_30_blocked
+	# Clean up group combat slot variables
+	pod_combat_group_cleanup_effect = yes
+}

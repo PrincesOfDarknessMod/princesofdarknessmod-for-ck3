@@ -1,0 +1,3510 @@
+﻿######################################
+######   POD COMBAT VALUES   ######
+######################################
+
+# ─── COMBAT VARIABLE REFERENCE ─────────────────────────────────────────────
+#
+# All combat state is stored as character variables on the PLAYER character.
+# Group combat uses a 10-slot system (slots 0-4 = player team, 5-9 = enemy
+# team). A shared WORKSPACE (pod_combat_player_* / pod_combat_opponent_*)
+# holds whichever combatant is acting and whichever one is the current
+# target; the workspace is loaded from / saved back to the appropriate
+# slot at each action boundary by pod_combat_{load,save}_workspace_effect.
+# Skill effects read and write only the workspace, so the same generated
+# code runs for the PC, AI coterie, the primary opponent, and knights.
+#
+# ── Core state ──────────────────────────────────────────────────
+#   pod_combat_active                 — flag: combat is in progress
+#   pod_combat_is_over                — flag: combat is over (re-entry guard)
+#   pod_combat_mode                   — 0=1v1, 1=1vN, 2=Nv1, 3=NvN
+#   pod_combat_round                  — current round number
+#   pod_combat_current_actor          — slot index of the acting combatant (0-9)
+#   pod_combat_current_ap             — AP remaining this turn
+#   pod_combat_current_turn_side      — 0 = player-team turn, 1 = enemy-team turn
+#   pod_combat_player_team_size       — number of occupied ally slots (0-4)
+#   pod_combat_enemy_team_size        — number of occupied enemy slots (5-9)
+#   pod_combat_pc_target              — the PC's persistent target slot (1-9)
+#   pod_combat_selected_target        — slot loaded into opponent workspace
+#
+# ── Per-slot stats (N = 0-9) ─────────────────────────────────────
+#   pod_combat_c{N}_char              — character ref occupying the slot
+#   pod_combat_c{N}_alive             — 1 if slot is active, 0 if KO'd
+#   pod_combat_c{N}_team              — 0 = player team, 1 = enemy team
+#   pod_combat_c{N}_hp / _max_hp      — current HP / health track length
+#   pod_combat_c{N}_initial_hp        — HP at combat start (for write-back)
+#   pod_combat_c{N}_agg_damage        — aggravated HP taken (round-scoped)
+#   pod_combat_c{N}_agg_total         — aggravated HP taken (combat total)
+#   pod_combat_c{N}_morale            — current Morale
+#   pod_combat_c{N}_prowess           — current prowess
+#   pod_combat_c{N}_soak              — live soak chance (0-100)
+#   pod_combat_c{N}_base_soak         — soak before any tier effects
+#   pod_combat_c{N}_hit_chance        — live hit chance (20-95)
+#   pod_combat_c{N}_base_hit_chance   — hit chance before any tier effects
+#   pod_combat_c{N}_initiative        — initiative roll this round
+#   pod_combat_c{N}_init_bonus        — next-round initiative modifier
+#   pod_combat_c{N}_ap_drain          — AP drained from next turn
+#   pod_combat_c{N}_energy_used       — counter for AI energy-attrition weighting
+#
+# ── Per-slot stance flags (N = 0-9) ─────────────────────────────
+# All persist across rounds; only cleared when consumed or at combat end.
+#   pod_combat_c{N}_is_guarding       — Guard stance active
+#   pod_combat_c{N}_is_dodging        — Dodge stance active
+#   pod_combat_c{N}_is_stealthed      — Stealth active (includes +30 hit)
+#   pod_combat_c{N}_feinted           — feint marker (round-scoped)
+#   pod_combat_c{N}_retaliate_hit     — retaliation damage if hit
+#   pod_combat_c{N}_retaliate_miss    — retaliation damage if missed
+#   pod_combat_c{N}_retaliate_{hit,miss}_agg  — aggravated variants
+#
+# ── Tier variables (per slot) ─────────────────────────────────────
+# Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). Live stats are
+# rebuilt from base + sum of active tier magnitudes. See pod_combat_tier_effects.txt.
+#   pod_combat_c{N}_{stat}_{direction}_{duration}_tier
+#     stat:      soak | hit
+#     direction: buff | debuff
+#     duration:  round (cleared at round end) | combat (lasts the fight)
+#
+# ── Workspace (acting combatant + current target) ────────────────
+# Mirrors the per-slot fields for whoever is currently acting / targeted.
+#   pod_combat_player_*               — actor's stats (loaded from current_actor slot)
+#   pod_combat_opponent_*             — target's stats (loaded from selected_target slot)
+# The same tier, stance, retaliation, and base_* fields exist on both sides.
+#   pod_combat_current_hit_chance     — active attacker's hit chance this attack
+#
+# ── Result / display ─────────────────────────────────────────────
+#   pod_combat_winner                 — character ref: who won (or team leader)
+#   pod_combat_loser                  — character ref: who lost
+#   pod_combat_last_action            — flag: last skill key (for log display)
+#   pod_combat_last_damage            — last damage amount dealt
+#   pod_combat_last_actor_side        — 0 = player-team acted, 1 = enemy-team acted
+#   pod_combat_last_was_blocked       — flag: last attack was guard-blocked
+#   pod_combat_last_was_soaked        — flag: last attack was soaked
+#   pod_combat_last_was_missed        — flag: last attack missed the hit roll
+#   pod_combat_last_was_dodged        — flag: last attack dodged or caught by stealth
+#   pod_combat_last_was_retaliated    — flag: target fired a retaliation stance
+#   pod_combat_last_was_heal          — flag: last action was a heal
+#   pod_combat_last_was_morale_*      — flags: morale damage / heal variants
+#   pod_combat_ai_last_move           — flag: AI's last move (for anti-repetition)
+#
+# Hit chance formula: 60 + (own prowess − target prowess) / 2, clamped 20-95.
+# ────────────────────────────────────────────────────────────────────
+
+###### BASE CONSTANTS ######
+
+pod_combat_base_ap = 6
+
+# Legacy 1v1-era constants. Max HP is per-slot now (c{N}_max_hp, set from
+# the character's PoD health track at init) and hit chance is computed by
+# pod_combat_calculate_all_hit_chances_effect / recalc_player_hit_chance,
+# so nothing reads these three. Kept as defined symbols so any external
+# reference doesn't error out; candidates for removal in a future pass.
+pod_combat_max_hp = 20
+
+pod_combat_initiative_value = {
+	value = prowess
+}
+
+pod_combat_hit_chance_base = 60
+
+# Morale is still shared across all slots (fixed 20 cap).
+pod_combat_max_morale = 20
+
+pod_combat_morale_from_hp_ratio = {
+	value = 2
+}
+
+###### CURRENT VALUE ACCESSORS ######
+# Used by GUI and triggers to read combat state.
+# Guarded with has_variable so CK3 doesn't log errors when the GUI
+# evaluates these script values outside an active combat.
+
+pod_combat_current_ap_value = {
+	if = { limit = { has_variable = pod_combat_current_ap } value = var:pod_combat_current_ap }
+}
+
+pod_combat_round_value = {
+	if = { limit = { has_variable = pod_combat_round } value = var:pod_combat_round }
+}
+
+pod_combat_player_hp_value = {
+	if = { limit = { has_variable = pod_combat_player_hp } value = var:pod_combat_player_hp }
+}
+
+pod_combat_player_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_player_max_hp } value = var:pod_combat_player_max_hp }
+}
+
+pod_combat_player_soak_value = {
+	if = { limit = { has_variable = pod_combat_player_soak } value = var:pod_combat_player_soak }
+}
+
+pod_combat_player_morale_value = {
+	if = { limit = { has_variable = pod_combat_player_morale } value = var:pod_combat_player_morale }
+}
+
+pod_combat_opponent_hp_value = {
+	if = { limit = { has_variable = pod_combat_opponent_hp } value = var:pod_combat_opponent_hp }
+}
+
+pod_combat_opponent_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_opponent_max_hp } value = var:pod_combat_opponent_max_hp }
+}
+
+pod_combat_opponent_soak_value = {
+	if = { limit = { has_variable = pod_combat_opponent_soak } value = var:pod_combat_opponent_soak }
+}
+
+pod_combat_opponent_morale_value = {
+	if = { limit = { has_variable = pod_combat_opponent_morale } value = var:pod_combat_opponent_morale }
+}
+
+pod_combat_player_prowess_value = {
+	if = { limit = { has_variable = pod_combat_player_prowess } value = var:pod_combat_player_prowess }
+}
+
+pod_combat_opponent_prowess_value = {
+	if = { limit = { has_variable = pod_combat_opponent_prowess } value = var:pod_combat_opponent_prowess }
+}
+
+pod_combat_player_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_player_hit_chance } value = var:pod_combat_player_hit_chance }
+}
+
+pod_combat_opponent_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_opponent_hit_chance } value = var:pod_combat_opponent_hit_chance }
+}
+
+###### GROUP COMBAT ACTOR / TARGET ######
+# Used by GUI to highlight the current actor and selected target
+
+pod_combat_current_actor_value = {
+	if = { limit = { has_variable = pod_combat_current_actor } value = var:pod_combat_current_actor }
+}
+
+pod_combat_selected_target_value = {
+	if = { limit = { has_variable = pod_combat_selected_target } value = var:pod_combat_selected_target }
+}
+
+pod_combat_pc_target_value = {
+	# Drives the TARGETED badge on combat cards. Reads from the PC's
+	# persistent target choice (not the transient selected_target, which can
+	# be clobbered during AI turns). Defaults to -1 when unset so nothing
+	# highlights before combat starts.
+	value = -1
+	if = { limit = { has_variable = pod_combat_pc_target } value = var:pod_combat_pc_target }
+}
+
+pod_combat_player_agg_damage_value = {
+	# Aggravated HP damage the player has taken this combat (workspace var).
+	# Used by heal-availability gates to decide whether an aggravated heal would
+	# actually accomplish anything. Falls back to 0 when the workspace is unset.
+	if = { limit = { has_variable = pod_combat_player_agg_damage } value = var:pod_combat_player_agg_damage }
+}
+
+pod_combat_player_sup_ceiling_value = {
+	# The effective ceiling for SUPERFICIAL HP healing on the player workspace:
+	#   max_hp - agg_damage
+	# Aggravated damage blocks the top of the HP track, so only the space below
+	# this ceiling can be refilled by pod_combat_restore_hp_superficial_effect.
+	# The heal-availability trigger uses this to grey out superficial-heal buttons
+	# when the player has nothing left to heal (e.g., 5/10 HP with 5 aggravated).
+	if = { limit = { has_variable = pod_combat_player_max_hp } value = var:pod_combat_player_max_hp }
+	if = { limit = { has_variable = pod_combat_player_agg_damage } subtract = var:pod_combat_player_agg_damage }
+	min = 0
+}
+
+###### GUI PERCENTAGE VALUES ######
+# Return 0–100 for progressbar_standard (max = 100)
+
+pod_combat_player_hp_pct = {
+	value = var:pod_combat_player_hp
+	multiply = 100
+	divide = pod_combat_player_max_hp_value
+	min = 0
+	max = 100
+}
+
+pod_combat_player_morale_pct = {
+	value = var:pod_combat_player_morale
+	multiply = 100
+	divide = pod_combat_max_morale
+	min = 0
+	max = 100
+}
+
+pod_combat_player_total_damage_sv = {
+	value = var:pod_combat_player_max_hp
+	subtract = var:pod_combat_player_hp
+	min = 0
+}
+
+pod_combat_player_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_player_agg_total } add = var:pod_combat_player_agg_total }
+	if = { limit = { has_variable = pod_combat_player_agg_damage } add = var:pod_combat_player_agg_damage }
+	max = pod_combat_player_total_damage_sv
+}
+
+pod_combat_opponent_hp_pct = {
+	value = var:pod_combat_opponent_hp
+	multiply = 100
+	divide = pod_combat_opponent_max_hp_value
+	min = 0
+	max = 100
+}
+
+pod_combat_opponent_morale_pct = {
+	value = var:pod_combat_opponent_morale
+	multiply = 100
+	divide = pod_combat_max_morale
+	min = 0
+	max = 100
+}
+
+pod_combat_opponent_total_damage_sv = {
+	value = var:pod_combat_opponent_max_hp
+	subtract = var:pod_combat_opponent_hp
+	min = 0
+}
+
+pod_combat_opponent_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_opponent_agg_total } add = var:pod_combat_opponent_agg_total }
+	if = { limit = { has_variable = pod_combat_opponent_agg_damage } add = var:pod_combat_opponent_agg_damage }
+	max = pod_combat_opponent_total_damage_sv
+}
+
+###### PER-SLOT COMBAT VALUES (GROUP COMBAT) ######
+# Generated accessors for combatant slots 0-9
+# Slots 0-4 = player team, slots 5-9 = enemy team
+
+pod_combat_c0_hp_value = {
+	if = { limit = { has_variable = pod_combat_c0_hp } value = var:pod_combat_c0_hp }
+}
+pod_combat_c0_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c0_max_hp } value = var:pod_combat_c0_max_hp }
+}
+pod_combat_c0_morale_value = {
+	if = { limit = { has_variable = pod_combat_c0_morale } value = var:pod_combat_c0_morale }
+}
+pod_combat_c0_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c0_morale }
+		value = var:pod_combat_c0_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c0_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c0_max_hp }
+		value = var:pod_combat_c0_max_hp
+		subtract = var:pod_combat_c0_hp
+		min = 0
+	}
+}
+pod_combat_c0_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c0_agg_total } add = var:pod_combat_c0_agg_total }
+	if = { limit = { has_variable = pod_combat_c0_agg_damage } add = var:pod_combat_c0_agg_damage }
+	max = pod_combat_c0_total_damage_sv
+}
+pod_combat_c0_soak_value = {
+	if = { limit = { has_variable = pod_combat_c0_soak } value = var:pod_combat_c0_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c0_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c0_hit_chance }
+		value = var:pod_combat_c0_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c0_hit_chance } has_variable = pod_combat_c0_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c0_prowess
+			# Subtract currently targeted enemy's prowess
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_pc_target }
+					has_variable = pod_combat_c5_prowess
+				}
+				subtract = var:pod_combat_c5_prowess
+			}
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c0_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c0_prowess } value = var:pod_combat_c0_prowess }
+}
+pod_combat_c0_alive_value = {
+	if = { limit = { has_variable = pod_combat_c0_alive } value = var:pod_combat_c0_alive }
+}
+pod_combat_c0_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c0_is_guarding } value = 1 }
+}
+pod_combat_c0_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c0_is_dodging } value = 1 }
+}
+pod_combat_c0_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c0_is_stealthed } value = 1 }
+}
+pod_combat_c0_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c0_initiative } value = var:pod_combat_c0_initiative }
+}
+pod_combat_c0_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c0_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c0_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c0_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c0_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c0_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c0_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c0_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c0_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c0_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c0_initiative } add = 1 }
+	}
+}
+
+pod_combat_c1_hp_value = {
+	if = { limit = { has_variable = pod_combat_c1_hp } value = var:pod_combat_c1_hp }
+}
+pod_combat_c1_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c1_max_hp } value = var:pod_combat_c1_max_hp }
+}
+pod_combat_c1_morale_value = {
+	if = { limit = { has_variable = pod_combat_c1_morale } value = var:pod_combat_c1_morale }
+}
+pod_combat_c1_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c1_morale }
+		value = var:pod_combat_c1_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c1_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c1_max_hp }
+		value = var:pod_combat_c1_max_hp
+		subtract = var:pod_combat_c1_hp
+		min = 0
+	}
+}
+pod_combat_c1_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c1_agg_total } add = var:pod_combat_c1_agg_total }
+	if = { limit = { has_variable = pod_combat_c1_agg_damage } add = var:pod_combat_c1_agg_damage }
+	max = pod_combat_c1_total_damage_sv
+}
+pod_combat_c1_soak_value = {
+	if = { limit = { has_variable = pod_combat_c1_soak } value = var:pod_combat_c1_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c1_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c1_hit_chance }
+		value = var:pod_combat_c1_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c1_hit_chance } has_variable = pod_combat_c1_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c1_prowess
+			# Subtract currently targeted enemy's prowess
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_pc_target }
+					has_variable = pod_combat_c5_prowess
+				}
+				subtract = var:pod_combat_c5_prowess
+			}
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c1_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c1_prowess } value = var:pod_combat_c1_prowess }
+}
+pod_combat_c1_alive_value = {
+	if = { limit = { has_variable = pod_combat_c1_alive } value = var:pod_combat_c1_alive }
+}
+pod_combat_c1_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c1_is_guarding } value = 1 }
+}
+pod_combat_c1_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c1_is_dodging } value = 1 }
+}
+pod_combat_c1_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c1_is_stealthed } value = 1 }
+}
+pod_combat_c1_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c1_initiative } value = var:pod_combat_c1_initiative }
+}
+pod_combat_c1_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c1_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c1_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c1_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c1_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c1_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c1_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c1_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c1_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c1_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c1_initiative } add = 1 }
+	}
+}
+
+pod_combat_c2_hp_value = {
+	if = { limit = { has_variable = pod_combat_c2_hp } value = var:pod_combat_c2_hp }
+}
+pod_combat_c2_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c2_max_hp } value = var:pod_combat_c2_max_hp }
+}
+pod_combat_c2_morale_value = {
+	if = { limit = { has_variable = pod_combat_c2_morale } value = var:pod_combat_c2_morale }
+}
+pod_combat_c2_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c2_morale }
+		value = var:pod_combat_c2_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c2_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c2_max_hp }
+		value = var:pod_combat_c2_max_hp
+		subtract = var:pod_combat_c2_hp
+		min = 0
+	}
+}
+pod_combat_c2_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c2_agg_total } add = var:pod_combat_c2_agg_total }
+	if = { limit = { has_variable = pod_combat_c2_agg_damage } add = var:pod_combat_c2_agg_damage }
+	max = pod_combat_c2_total_damage_sv
+}
+pod_combat_c2_soak_value = {
+	if = { limit = { has_variable = pod_combat_c2_soak } value = var:pod_combat_c2_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c2_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c2_hit_chance }
+		value = var:pod_combat_c2_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c2_hit_chance } has_variable = pod_combat_c2_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c2_prowess
+			# Subtract currently targeted enemy's prowess
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_pc_target }
+					has_variable = pod_combat_c5_prowess
+				}
+				subtract = var:pod_combat_c5_prowess
+			}
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c2_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c2_prowess } value = var:pod_combat_c2_prowess }
+}
+pod_combat_c2_alive_value = {
+	if = { limit = { has_variable = pod_combat_c2_alive } value = var:pod_combat_c2_alive }
+}
+pod_combat_c2_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c2_is_guarding } value = 1 }
+}
+pod_combat_c2_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c2_is_dodging } value = 1 }
+}
+pod_combat_c2_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c2_is_stealthed } value = 1 }
+}
+pod_combat_c2_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c2_initiative } value = var:pod_combat_c2_initiative }
+}
+pod_combat_c2_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c2_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c2_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c2_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c2_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c2_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c2_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c2_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c2_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c2_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c2_initiative } add = 1 }
+	}
+}
+
+pod_combat_c3_hp_value = {
+	if = { limit = { has_variable = pod_combat_c3_hp } value = var:pod_combat_c3_hp }
+}
+pod_combat_c3_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c3_max_hp } value = var:pod_combat_c3_max_hp }
+}
+pod_combat_c3_morale_value = {
+	if = { limit = { has_variable = pod_combat_c3_morale } value = var:pod_combat_c3_morale }
+}
+pod_combat_c3_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c3_morale }
+		value = var:pod_combat_c3_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c3_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c3_max_hp }
+		value = var:pod_combat_c3_max_hp
+		subtract = var:pod_combat_c3_hp
+		min = 0
+	}
+}
+pod_combat_c3_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c3_agg_total } add = var:pod_combat_c3_agg_total }
+	if = { limit = { has_variable = pod_combat_c3_agg_damage } add = var:pod_combat_c3_agg_damage }
+	max = pod_combat_c3_total_damage_sv
+}
+pod_combat_c3_soak_value = {
+	if = { limit = { has_variable = pod_combat_c3_soak } value = var:pod_combat_c3_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c3_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c3_hit_chance }
+		value = var:pod_combat_c3_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c3_hit_chance } has_variable = pod_combat_c3_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c3_prowess
+			# Subtract currently targeted enemy's prowess
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_pc_target }
+					has_variable = pod_combat_c5_prowess
+				}
+				subtract = var:pod_combat_c5_prowess
+			}
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c3_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c3_prowess } value = var:pod_combat_c3_prowess }
+}
+pod_combat_c3_alive_value = {
+	if = { limit = { has_variable = pod_combat_c3_alive } value = var:pod_combat_c3_alive }
+}
+pod_combat_c3_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c3_is_guarding } value = 1 }
+}
+pod_combat_c3_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c3_is_dodging } value = 1 }
+}
+pod_combat_c3_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c3_is_stealthed } value = 1 }
+}
+pod_combat_c3_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c3_initiative } value = var:pod_combat_c3_initiative }
+}
+pod_combat_c3_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c3_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c3_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c3_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c3_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c3_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c3_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c3_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c3_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c3_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c3_initiative } add = 1 }
+	}
+}
+
+pod_combat_c4_hp_value = {
+	if = { limit = { has_variable = pod_combat_c4_hp } value = var:pod_combat_c4_hp }
+}
+pod_combat_c4_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c4_max_hp } value = var:pod_combat_c4_max_hp }
+}
+pod_combat_c4_morale_value = {
+	if = { limit = { has_variable = pod_combat_c4_morale } value = var:pod_combat_c4_morale }
+}
+pod_combat_c4_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c4_morale }
+		value = var:pod_combat_c4_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c4_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c4_max_hp }
+		value = var:pod_combat_c4_max_hp
+		subtract = var:pod_combat_c4_hp
+		min = 0
+	}
+}
+pod_combat_c4_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c4_agg_total } add = var:pod_combat_c4_agg_total }
+	if = { limit = { has_variable = pod_combat_c4_agg_damage } add = var:pod_combat_c4_agg_damage }
+	max = pod_combat_c4_total_damage_sv
+}
+pod_combat_c4_soak_value = {
+	if = { limit = { has_variable = pod_combat_c4_soak } value = var:pod_combat_c4_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c4_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c4_hit_chance }
+		value = var:pod_combat_c4_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c4_hit_chance } has_variable = pod_combat_c4_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c4_prowess
+			# Subtract currently targeted enemy's prowess
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
+			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_pc_target }
+					has_variable = pod_combat_c5_prowess
+				}
+				subtract = var:pod_combat_c5_prowess
+			}
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c4_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c4_prowess } value = var:pod_combat_c4_prowess }
+}
+pod_combat_c4_alive_value = {
+	if = { limit = { has_variable = pod_combat_c4_alive } value = var:pod_combat_c4_alive }
+}
+pod_combat_c4_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c4_is_guarding } value = 1 }
+}
+pod_combat_c4_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c4_is_dodging } value = 1 }
+}
+pod_combat_c4_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c4_is_stealthed } value = 1 }
+}
+pod_combat_c4_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c4_initiative } value = var:pod_combat_c4_initiative }
+}
+pod_combat_c4_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c4_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c4_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c4_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c4_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c4_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c4_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c4_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c4_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c4_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c4_initiative } add = 1 }
+	}
+}
+
+pod_combat_c5_hp_value = {
+	if = { limit = { has_variable = pod_combat_c5_hp } value = var:pod_combat_c5_hp }
+}
+pod_combat_c5_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c5_max_hp } value = var:pod_combat_c5_max_hp }
+}
+pod_combat_c5_morale_value = {
+	if = { limit = { has_variable = pod_combat_c5_morale } value = var:pod_combat_c5_morale }
+}
+pod_combat_c5_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c5_morale }
+		value = var:pod_combat_c5_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c5_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c5_max_hp }
+		value = var:pod_combat_c5_max_hp
+		subtract = var:pod_combat_c5_hp
+		min = 0
+	}
+}
+pod_combat_c5_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c5_agg_total } add = var:pod_combat_c5_agg_total }
+	if = { limit = { has_variable = pod_combat_c5_agg_damage } add = var:pod_combat_c5_agg_damage }
+	max = pod_combat_c5_total_damage_sv
+}
+pod_combat_c5_soak_value = {
+	if = { limit = { has_variable = pod_combat_c5_soak } value = var:pod_combat_c5_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c5_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c5_hit_chance }
+		value = var:pod_combat_c5_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c5_hit_chance } has_variable = pod_combat_c5_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c5_prowess
+			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c5_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c5_prowess } value = var:pod_combat_c5_prowess }
+}
+pod_combat_c5_alive_value = {
+	if = { limit = { has_variable = pod_combat_c5_alive } value = var:pod_combat_c5_alive }
+}
+pod_combat_c5_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c5_is_guarding } value = 1 }
+}
+pod_combat_c5_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c5_is_dodging } value = 1 }
+}
+pod_combat_c5_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c5_is_stealthed } value = 1 }
+}
+pod_combat_c5_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c5_initiative } value = var:pod_combat_c5_initiative }
+}
+pod_combat_c5_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c5_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c5_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c5_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c5_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c5_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c5_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c5_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c5_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c5_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c5_initiative } add = 1 }
+	}
+}
+
+pod_combat_c6_hp_value = {
+	if = { limit = { has_variable = pod_combat_c6_hp } value = var:pod_combat_c6_hp }
+}
+pod_combat_c6_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c6_max_hp } value = var:pod_combat_c6_max_hp }
+}
+pod_combat_c6_morale_value = {
+	if = { limit = { has_variable = pod_combat_c6_morale } value = var:pod_combat_c6_morale }
+}
+pod_combat_c6_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c6_morale }
+		value = var:pod_combat_c6_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c6_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c6_max_hp }
+		value = var:pod_combat_c6_max_hp
+		subtract = var:pod_combat_c6_hp
+		min = 0
+	}
+}
+pod_combat_c6_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c6_agg_total } add = var:pod_combat_c6_agg_total }
+	if = { limit = { has_variable = pod_combat_c6_agg_damage } add = var:pod_combat_c6_agg_damage }
+	max = pod_combat_c6_total_damage_sv
+}
+pod_combat_c6_soak_value = {
+	if = { limit = { has_variable = pod_combat_c6_soak } value = var:pod_combat_c6_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c6_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c6_hit_chance }
+		value = var:pod_combat_c6_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c6_hit_chance } has_variable = pod_combat_c6_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c6_prowess
+			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c6_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c6_prowess } value = var:pod_combat_c6_prowess }
+}
+pod_combat_c6_alive_value = {
+	if = { limit = { has_variable = pod_combat_c6_alive } value = var:pod_combat_c6_alive }
+}
+pod_combat_c6_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c6_is_guarding } value = 1 }
+}
+pod_combat_c6_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c6_is_dodging } value = 1 }
+}
+pod_combat_c6_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c6_is_stealthed } value = 1 }
+}
+pod_combat_c6_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c6_initiative } value = var:pod_combat_c6_initiative }
+}
+pod_combat_c6_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c6_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c6_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c6_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c6_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c6_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c6_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c6_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c6_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c6_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c6_initiative } add = 1 }
+	}
+}
+
+pod_combat_c7_hp_value = {
+	if = { limit = { has_variable = pod_combat_c7_hp } value = var:pod_combat_c7_hp }
+}
+pod_combat_c7_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c7_max_hp } value = var:pod_combat_c7_max_hp }
+}
+pod_combat_c7_morale_value = {
+	if = { limit = { has_variable = pod_combat_c7_morale } value = var:pod_combat_c7_morale }
+}
+pod_combat_c7_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c7_morale }
+		value = var:pod_combat_c7_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c7_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c7_max_hp }
+		value = var:pod_combat_c7_max_hp
+		subtract = var:pod_combat_c7_hp
+		min = 0
+	}
+}
+pod_combat_c7_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c7_agg_total } add = var:pod_combat_c7_agg_total }
+	if = { limit = { has_variable = pod_combat_c7_agg_damage } add = var:pod_combat_c7_agg_damage }
+	max = pod_combat_c7_total_damage_sv
+}
+pod_combat_c7_soak_value = {
+	if = { limit = { has_variable = pod_combat_c7_soak } value = var:pod_combat_c7_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c7_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c7_hit_chance }
+		value = var:pod_combat_c7_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c7_hit_chance } has_variable = pod_combat_c7_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c7_prowess
+			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c7_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c7_prowess } value = var:pod_combat_c7_prowess }
+}
+pod_combat_c7_alive_value = {
+	if = { limit = { has_variable = pod_combat_c7_alive } value = var:pod_combat_c7_alive }
+}
+pod_combat_c7_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c7_is_guarding } value = 1 }
+}
+pod_combat_c7_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c7_is_dodging } value = 1 }
+}
+pod_combat_c7_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c7_is_stealthed } value = 1 }
+}
+pod_combat_c7_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c7_initiative } value = var:pod_combat_c7_initiative }
+}
+pod_combat_c7_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c7_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c7_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c7_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c7_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c7_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c7_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c7_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c7_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c7_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c7_initiative } add = 1 }
+	}
+}
+
+pod_combat_c8_hp_value = {
+	if = { limit = { has_variable = pod_combat_c8_hp } value = var:pod_combat_c8_hp }
+}
+pod_combat_c8_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c8_max_hp } value = var:pod_combat_c8_max_hp }
+}
+pod_combat_c8_morale_value = {
+	if = { limit = { has_variable = pod_combat_c8_morale } value = var:pod_combat_c8_morale }
+}
+pod_combat_c8_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c8_morale }
+		value = var:pod_combat_c8_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c8_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c8_max_hp }
+		value = var:pod_combat_c8_max_hp
+		subtract = var:pod_combat_c8_hp
+		min = 0
+	}
+}
+pod_combat_c8_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c8_agg_total } add = var:pod_combat_c8_agg_total }
+	if = { limit = { has_variable = pod_combat_c8_agg_damage } add = var:pod_combat_c8_agg_damage }
+	max = pod_combat_c8_total_damage_sv
+}
+pod_combat_c8_soak_value = {
+	if = { limit = { has_variable = pod_combat_c8_soak } value = var:pod_combat_c8_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c8_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c8_hit_chance }
+		value = var:pod_combat_c8_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c8_hit_chance } has_variable = pod_combat_c8_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c8_prowess
+			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c8_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c8_prowess } value = var:pod_combat_c8_prowess }
+}
+pod_combat_c8_alive_value = {
+	if = { limit = { has_variable = pod_combat_c8_alive } value = var:pod_combat_c8_alive }
+}
+pod_combat_c8_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c8_is_guarding } value = 1 }
+}
+pod_combat_c8_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c8_is_dodging } value = 1 }
+}
+pod_combat_c8_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c8_is_stealthed } value = 1 }
+}
+pod_combat_c8_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c8_initiative } value = var:pod_combat_c8_initiative }
+}
+pod_combat_c8_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c8_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c8_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c8_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c8_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c8_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c8_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c8_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c8_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative >= var:pod_combat_c8_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c8_initiative } add = 1 }
+	}
+}
+
+pod_combat_c9_hp_value = {
+	if = { limit = { has_variable = pod_combat_c9_hp } value = var:pod_combat_c9_hp }
+}
+pod_combat_c9_max_hp_value = {
+	if = { limit = { has_variable = pod_combat_c9_max_hp } value = var:pod_combat_c9_max_hp }
+}
+pod_combat_c9_morale_value = {
+	if = { limit = { has_variable = pod_combat_c9_morale } value = var:pod_combat_c9_morale }
+}
+pod_combat_c9_morale_pct = {
+	if = { limit = { has_variable = pod_combat_c9_morale }
+		value = var:pod_combat_c9_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+	}
+	min = 0
+	max = 100
+}
+pod_combat_c9_total_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c9_max_hp }
+		value = var:pod_combat_c9_max_hp
+		subtract = var:pod_combat_c9_hp
+		min = 0
+	}
+}
+pod_combat_c9_agg_damage_sv = {
+	if = { limit = { has_variable = pod_combat_c9_agg_total } add = var:pod_combat_c9_agg_total }
+	if = { limit = { has_variable = pod_combat_c9_agg_damage } add = var:pod_combat_c9_agg_damage }
+	max = pod_combat_c9_total_damage_sv
+}
+pod_combat_c9_soak_value = {
+	if = { limit = { has_variable = pod_combat_c9_soak } value = var:pod_combat_c9_soak }
+	min = 0
+	max = 100
+}
+pod_combat_c9_hit_chance_value = {
+	if = { limit = { has_variable = pod_combat_c9_hit_chance }
+		value = var:pod_combat_c9_hit_chance
+	}
+	if = { limit = { NOT = { has_variable = pod_combat_c9_hit_chance } has_variable = pod_combat_c9_prowess }
+		value = 60
+		add = {
+			value = var:pod_combat_c9_prowess
+			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
+			divide = 2
+		}
+	}
+	min = 20
+	max = 95
+}
+pod_combat_c9_prowess_value = {
+	if = { limit = { has_variable = pod_combat_c9_prowess } value = var:pod_combat_c9_prowess }
+}
+pod_combat_c9_alive_value = {
+	if = { limit = { has_variable = pod_combat_c9_alive } value = var:pod_combat_c9_alive }
+}
+pod_combat_c9_is_guarding_value = {
+	if = { limit = { has_variable = pod_combat_c9_is_guarding } value = 1 }
+}
+pod_combat_c9_is_dodging_value = {
+	if = { limit = { has_variable = pod_combat_c9_is_dodging } value = 1 }
+}
+pod_combat_c9_is_stealthed_value = {
+	if = { limit = { has_variable = pod_combat_c9_is_stealthed } value = 1 }
+}
+pod_combat_c9_initiative_value = {
+	if = { limit = { has_variable = pod_combat_c9_initiative } value = var:pod_combat_c9_initiative }
+}
+pod_combat_c9_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c9_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c9_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c9_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c9_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 3 } value = 30 }
+}
+pod_combat_c9_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c9_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 3 } value = 30 }
+}
+pod_combat_c9_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 1 } value = 10 }
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 2 } value = 20 }
+	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 3 } value = 30 }
+}
+pod_combat_c9_turn_order_value = {
+	if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 }
+		value = 1
+		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative >= var:pod_combat_c9_initiative } add = 1 }
+		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative >= var:pod_combat_c9_initiative } add = 1 }
+	}
+}
+
+
+###### EQUIPPED MOVE COUNT ######
+# Counts how many combat moves are currently equipped
+# One line per active non-passive skill (414 skills from master CSV)
+
+pod_combat_equipped_count = {
+	value = 0
+	# Base Physical
+	if = { limit = { has_variable = pod_combat_equipped_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heavy_blow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_quick_jab } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reckless_charge } add = 1 }
+	# Base Tactical
+	if = { limit = { has_variable = pod_combat_equipped_guard } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_feint } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_intimidate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rally } add = 1 }
+	# Hunter Generic
+	if = { limit = { has_variable = pod_combat_equipped_silver_dagger_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_torch_sweep } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_gold_arrow_shot } add = 1 }
+	# Hunter Qiao
+	if = { limit = { has_variable = pod_combat_equipped_steel_skin } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tigers_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ten_ox_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_celestial_eyes } add = 1 }
+	# Qiao Yu-an
+	if = { limit = { has_variable = pod_combat_equipped_sight_without_eyes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_of_heaven } add = 1 }
+	# Qiao Shi
+	if = { limit = { has_variable = pod_combat_equipped_thousand_fists } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_burning_ghosts } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hundred_warriors_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heaven_thunder_strike } add = 1 }
+	# Qiao Chien
+	if = { limit = { has_variable = pod_combat_equipped_stolen_serpent } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_eating_technique } add = 1 }
+	# Qiao Long Ling
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_the_dragon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mantle_of_heaven } add = 1 }
+	# Qiao Zhu-mao
+	if = { limit = { has_variable = pod_combat_equipped_wind_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mountain_stance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_celestial_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arrow_cutting } add = 1 }
+	# Hunter Red
+	if = { limit = { has_variable = pod_combat_equipped_red_vigil_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_red_march } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_red_forge } add = 1 }
+	# Hunter Acre
+	if = { limit = { has_variable = pod_combat_equipped_acre_judgment } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_acre_defender } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_acre_executor } add = 1 }
+	# Hunter Sisters
+	if = { limit = { has_variable = pod_combat_equipped_sisters_hosanna } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sisters_oratorio } add = 1 }
+	# Hunter Murnau
+	if = { limit = { has_variable = pod_combat_equipped_murnau_wreathed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_murnau_arcana } add = 1 }
+	# Hunter Oculi
+	if = { limit = { has_variable = pod_combat_equipped_oculi_sight } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_oculi_wine } add = 1 }
+	# True Faith
+	if = { limit = { has_variable = pod_combat_equipped_shield_of_faith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_holy_bulwark } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_miracle_of_protection } add = 1 }
+	# Patris
+	if = { limit = { has_variable = pod_combat_equipped_pry_open } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fathers_judgment } add = 1 }
+	# Filius
+	if = { limit = { has_variable = pod_combat_equipped_sunder } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_gods_armour } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rod_and_staff } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wrath_of_god } add = 1 }
+	# Spiritus
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_sanctity } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_restoration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_judgement_of_heaven } add = 1 }
+	# Sorcery of Hellfire
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_pact_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_surge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_inferno } add = 1 }
+	# Sorcery of Conjuration
+	if = { limit = { has_variable = pod_combat_equipped_conjure_servant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_bind_artifact } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_master_conjuration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reality_breach } add = 1 }
+	# Sorcery of Illusion
+	if = { limit = { has_variable = pod_combat_equipped_phantom_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_phantasmal_evasion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reality_fracture } add = 1 }
+	# Sorcery of Shadows
+	if = { limit = { has_variable = pod_combat_equipped_shadow_veil } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_deepening_shadows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_knight } add = 1 }
+	# Sorcery of Weather Control
+	if = { limit = { has_variable = pod_combat_equipped_storm_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lightning_strike_sorcery } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_storm_apocalypse } add = 1 }
+	# Sorcery of Healing
+	if = { limit = { has_variable = pod_combat_equipped_blessed_healing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_health_restoration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_perfect_healing } add = 1 }
+	# Sorcery of Ephemera
+	if = { limit = { has_variable = pod_combat_equipped_spirit_pact_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eternal_pact } add = 1 }
+	# Sorcery of Oneiromancy
+	if = { limit = { has_variable = pod_combat_equipped_nightmare_incarnate } add = 1 }
+	# Sorcery of Divination
+	if = { limit = { has_variable = pod_combat_equipped_omniscient_foresight } add = 1 }
+	# Sorcery of Fortune
+	if = { limit = { has_variable = pod_combat_equipped_luck_blessing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_destiny_fulfilled } add = 1 }
+	# Sorcery of Necromancy
+	if = { limit = { has_variable = pod_combat_equipped_wraith_touch } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wraith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_precision } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_incarnate } add = 1 }
+	# Theurgy Ignis
+	if = { limit = { has_variable = pod_combat_equipped_spirit_fire_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_fire_inferno } add = 1 }
+	# Theurgy Oraculi
+	if = { limit = { has_variable = pod_combat_equipped_oraculi_warding } add = 1 }
+	# Theurgy Necromantiae
+	if = { limit = { has_variable = pod_combat_equipped_binding_of_spirits } add = 1 }
+	# Vampire Innate
+	if = { limit = { has_variable = pod_combat_equipped_bite } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_surge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_heal } add = 1 }
+	# Celerity
+	if = { limit = { has_variable = pod_combat_equipped_cats_swiftness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_split_second } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lightning_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blur_of_motion } add = 1 }
+	# Fortitude
+	if = { limit = { has_variable = pod_combat_equipped_toughness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_prowess_from_pain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_armoured_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_knights_bane } add = 1 }
+	# Potence
+	if = { limit = { has_variable = pod_combat_equipped_lethal_body } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_brutal_feed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_earthshock } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_might_of_heroes } add = 1 }
+	# Presence
+	if = { limit = { has_variable = pod_combat_equipped_dread_gaze } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_awe } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_phobia } add = 1 }
+	# Auspex
+	if = { limit = { has_variable = pod_combat_equipped_clairvoyance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_prescience } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_psychic_burst } add = 1 }
+	# Dominate
+	if = { limit = { has_variable = pod_combat_equipped_compel } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_conditioning } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_possession } add = 1 }
+	# Obfuscate
+	if = { limit = { has_variable = pod_combat_equipped_vanish } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mask_of_thousand_faces } add = 1 }
+	# Animalism
+	if = { limit = { has_variable = pod_combat_equipped_subsume_the_spirit } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_drawing_out_the_beast } add = 1 }
+	# Protean
+	if = { limit = { has_variable = pod_combat_equipped_wolf_claws } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_earth_meld } add = 1 }
+	# Obtenebration
+	if = { limit = { has_variable = pod_combat_equipped_shadow_play } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arms_of_ahriman } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aegis_of_shadows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ahrimans_demesne } add = 1 }
+	# Vicissitude
+	if = { limit = { has_variable = pod_combat_equipped_bone_spurs } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_body_arsenal } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fleshcraft_barrier } add = 1 }
+	# Quietus
+	if = { limit = { has_variable = pod_combat_equipped_silence_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_taste_of_death } add = 1 }
+	# Serpentis
+	if = { limit = { has_variable = pod_combat_equipped_cobra_fangs } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_breath_of_basilisk } add = 1 }
+	# Valeren
+	if = { limit = { has_variable = pod_combat_equipped_valeren_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_valeren_ward } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mend_ghastly_wounds } add = 1 }
+	# Daimoinon
+	if = { limit = { has_variable = pod_combat_equipped_fear_of_void_below } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_psychomachia } add = 1 }
+	# Dementation
+	if = { limit = { has_variable = pod_combat_equipped_passion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_the_haunting } add = 1 }
+	# Temporis
+	if = { limit = { has_variable = pod_combat_equipped_patience_of_the_norns } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_clotho_unwinds } add = 1 }
+	# Abombwe
+	if = { limit = { has_variable = pod_combat_equipped_predator_form } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_power_from_darkness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stalking_darkness } add = 1 }
+	# Kai
+	if = { limit = { has_variable = pod_combat_equipped_devil_fist } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_black_wind } add = 1 }
+	# Path of Blood
+	if = { limit = { has_variable = pod_combat_equipped_blood_rage } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_theft_of_vitae } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_to_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_cauldron_of_blood } add = 1 }
+	# Path of Mars
+	if = { limit = { has_variable = pod_combat_equipped_warcry } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_strike_true } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fearless_heart } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_comrades_at_arms } add = 1 }
+	# Awakening of the Steel
+	if = { limit = { has_variable = pod_combat_equipped_grasp_of_the_mountain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_pierce_steels_skin } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_razors_shield } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_strike_at_the_true_flesh } add = 1 }
+	# Lures of Flames
+	if = { limit = { has_variable = pod_combat_equipped_small_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_medium_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_huge_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_massive_flames } add = 1 }
+	# Neptune's Might
+	if = { limit = { has_variable = pod_combat_equipped_prison_of_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_flowing_wall } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dehydrate } add = 1 }
+	# Movement of the Mind
+	if = { limit = { has_variable = pod_combat_equipped_force_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_repulse } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_control_tk } add = 1 }
+	# Weather Control
+	if = { limit = { has_variable = pod_combat_equipped_summon_fog } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rain_of_ice } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_control_lightning } add = 1 }
+	# Rego Elementum
+	if = { limit = { has_variable = pod_combat_equipped_elemental_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_elemental } add = 1 }
+	# Spirit Manipulation
+	if = { limit = { has_variable = pod_combat_equipped_astral_chant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voice_of_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_duality } add = 1 }
+	# Immanence of Set
+	if = { limit = { has_variable = pod_combat_equipped_dark_invocation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_serpents_blessing } add = 1 }
+	# Kraina of the Well
+	if = { limit = { has_variable = pod_combat_equipped_call_the_children } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heed_the_hell_bound_heart } add = 1 }
+	# Evil Eye
+	if = { limit = { has_variable = pod_combat_equipped_humiliation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_that_wounds } add = 1 }
+	# Way of Earth
+	if = { limit = { has_variable = pod_combat_equipped_endurance_of_stone } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kupalas_fury } add = 1 }
+	# Way of Wind
+	if = { limit = { has_variable = pod_combat_equipped_ride_the_tempest } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fury_of_the_night_sky } add = 1 }
+	# Way of Water
+	if = { limit = { has_variable = pod_combat_equipped_minions_of_the_deep } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_doom_tide } add = 1 }
+	# Way of Fire
+	if = { limit = { has_variable = pod_combat_equipped_combust } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heat_wave } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_volcanic_blast } add = 1 }
+	# Way of Sorrow
+	if = { limit = { has_variable = pod_combat_equipped_frustrations_of_nestrecha } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grief_incarnate } add = 1 }
+	# Shadow World
+	if = { limit = { has_variable = pod_combat_equipped_command_the_freshly_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_army_of_souls } add = 1 }
+	# World's Blood
+	if = { limit = { has_variable = pod_combat_equipped_roots_of_power } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arbor_of_protection } add = 1 }
+	# Hedayat Qalb
+	if = { limit = { has_variable = pod_combat_equipped_hikma_allah } add = 1 }
+	# Transylvanian Kraina
+	if = { limit = { has_variable = pod_combat_equipped_burebistas_throne } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kupalas_exhalation } add = 1 }
+	# Bialowieza Kraina
+	if = { limit = { has_variable = pod_combat_equipped_grondrskas_impasse } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_white_tower } add = 1 }
+	# Revelations of Duat
+	if = { limit = { has_variable = pod_combat_equipped_grace_of_anubis } add = 1 }
+	# Sepulchre Path
+	if = { limit = { has_variable = pod_combat_equipped_compel_soul } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_haunting_sepulchre } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_torment_sepulchre } add = 1 }
+	# Bone Path
+	if = { limit = { has_variable = pod_combat_equipped_seal_of_abamixtra } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_awaken_homuncular_servant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shambling_hordes } add = 1 }
+	# Cenotaph Path
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reveal_the_catene } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tread_upon_the_grave } add = 1 }
+	# Corpse in the Monster
+	if = { limit = { has_variable = pod_combat_equipped_mortuus_in_vultus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_algor_mortis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_benedicto_mortem } add = 1 }
+	# Grave's Decay
+	if = { limit = { has_variable = pod_combat_equipped_ashes_to_ashes_necro } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rigor_mortis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ashen_ladys_embrace } add = 1 }
+	# Vitreous Path
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_the_wraith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_decay } add = 1 }
+	# Path of the Twilight Garden
+	if = { limit = { has_variable = pod_combat_equipped_soul_drain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dark_humors } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_caul_of_the_neverborn } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lament_of_dhainu } add = 1 }
+	# Ash Path
+	if = { limit = { has_variable = pod_combat_equipped_tongue_of_dark_kingdoms } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_the_nether } add = 1 }
+	# Skull Path
+	if = { limit = { has_variable = pod_combat_equipped_calvaria_emissicius } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_consilium_mortuus } add = 1 }
+	# Nightshade Path
+	if = { limit = { has_variable = pod_combat_equipped_tend_the_body_garden } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_raise_the_green_one } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wails_and_whispers } add = 1 }
+	# Path of Haunting
+	if = { limit = { has_variable = pod_combat_equipped_song_of_the_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wisp } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_haunting_torment } add = 1 }
+	# Path of Woe
+	if = { limit = { has_variable = pod_combat_equipped_finding_the_locus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_expurgate_the_damned } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_purge_the_apostate } add = 1 }
+	# Hekau Alchemy
+	if = { limit = { has_variable = pod_combat_equipped_spark_of_ra } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ashes_to_ashes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dust_to_dust } add = 1 }
+	# Hekau Amulets
+	if = { limit = { has_variable = pod_combat_equipped_wood_ward } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_buckle_of_isis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_serqets_sting } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voracious_scarab } add = 1 }
+	# Hekau Celestial
+	if = { limit = { has_variable = pod_combat_equipped_grip_of_the_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_call_the_stars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rousing_apophis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_call_of_the_north_star } add = 1 }
+	# Hekau Effigy
+	if = { limit = { has_variable = pod_combat_equipped_simple_creature } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_divine_beast } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_scepter } add = 1 }
+	# Hekau Necromancy
+	if = { limit = { has_variable = pod_combat_equipped_deaths_hand } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_panoply_of_shadow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spear_of_anubis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_transfixing_gaze } add = 1 }
+	# Hekau Nomenclature
+	if = { limit = { has_variable = pod_combat_equipped_naming_the_warning } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fortify_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_riddle_of_the_sphinx } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_name_of_the_attribute } add = 1 }
+	# Fera Common
+	if = { limit = { has_variable = pod_combat_equipped_razor_claws } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_war_form } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_regeneration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_battle_howl } add = 1 }
+	# Werewolf General
+	if = { limit = { has_variable = pod_combat_equipped_heart_claw_attack } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shattering_howl_attack } add = 1 }
+	# Ragabash
+	if = { limit = { has_variable = pod_combat_equipped_blur_of_milky_eye } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fool_luck } add = 1 }
+	# Theurge
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_chaos } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_strike } add = 1 }
+	# Philodox
+	if = { limit = { has_variable = pod_combat_equipped_resist_pain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_judges_decree } add = 1 }
+	# Galliard
+	if = { limit = { has_variable = pod_combat_equipped_song_of_rage } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_howl_of_the_banshee } add = 1 }
+	# Ahroun
+	if = { limit = { has_variable = pod_combat_equipped_spirit_of_fray } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stoking_furys_furnace } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_inspiration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_unstoppable_warrior } add = 1 }
+	# Tribe Child of Gaia
+	if = { limit = { has_variable = pod_combat_equipped_spirit_friend } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mothers_touch } add = 1 }
+	# Tribe Black Fury
+	if = { limit = { has_variable = pod_combat_equipped_curse_of_aeolus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_maidens_vengeance } add = 1 }
+	# Tribe Bone Gnawer
+	if = { limit = { has_variable = pod_combat_equipped_hootenanny } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infest } add = 1 }
+	# Tribe Fianna
+	if = { limit = { has_variable = pod_combat_equipped_faerie_kin } add = 1 }
+	# Tribe Silent Strider
+	if = { limit = { has_variable = pod_combat_equipped_speed_beyond_thought } add = 1 }
+	# Tribe Silver Fang
+	if = { limit = { has_variable = pod_combat_equipped_leshiis_boon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_full_moons_wrath } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_renew_the_cycle } add = 1 }
+	# Tribe Shadow Lord
+	if = { limit = { has_variable = pod_combat_equipped_paralyzing_stare } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_durance } add = 1 }
+	# Tribe Stargazer
+	if = { limit = { has_variable = pod_combat_equipped_manipura } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_merciful_blow } add = 1 }
+	# Tribe Warder of Men
+	if = { limit = { has_variable = pod_combat_equipped_control_simple_machine } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_intrusion } add = 1 }
+	# Tribe Get of Fenris
+	if = { limit = { has_variable = pod_combat_equipped_visage_of_fenris } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_might_of_thor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_glory_scars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fenris_bite } add = 1 }
+	# Tribe Red Talon
+	if = { limit = { has_variable = pod_combat_equipped_wolf_at_the_door } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_primal_howl } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_snap_mans_chains } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_howl_of_death } add = 1 }
+	# Tribe Hakken
+	if = { limit = { has_variable = pod_combat_equipped_thousand_cranes } add = 1 }
+	# Tribe White Howler
+	if = { limit = { has_variable = pod_combat_equipped_waking_the_dead } add = 1 }
+	# Tribe Black Spiral Dancer
+	if = { limit = { has_variable = pod_combat_equipped_toxic_claws } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_terrify } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_burning_scars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wyrm_elemental } add = 1 }
+	# Bastet Common
+	if = { limit = { has_variable = pod_combat_equipped_cats_swiftness_bastet } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_withering_stare } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shriek } add = 1 }
+	# Tribe Bagheera
+	if = { limit = { has_variable = pod_combat_equipped_treeclimber } add = 1 }
+	# Tribe Bubasti
+	if = { limit = { has_variable = pod_combat_equipped_banish_cahlashs_brood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_wall } add = 1 }
+	# Tribe Khan
+	if = { limit = { has_variable = pod_combat_equipped_rhinos_favor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_skin_of_jade } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_raging_spirit_tiger } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dragonroar } add = 1 }
+	# Tribe Simba
+	if = { limit = { has_variable = pod_combat_equipped_bastet_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fireroar } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_king_of_beasts } add = 1 }
+	# Tribe Celican
+	if = { limit = { has_variable = pod_combat_equipped_chariot_of_lions } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_madness_of_crowds } add = 1 }
+	# Tribe Swara
+	if = { limit = { has_variable = pod_combat_equipped_diamond_claws } add = 1 }
+	# Mokole Common
+	if = { limit = { has_variable = pod_combat_equipped_dragonfear } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dragons_breath } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_armor_of_tortoise } add = 1 }
+	# Solar Rising Sun
+	if = { limit = { has_variable = pod_combat_equipped_rising_bellow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_of_the_raptor } add = 1 }
+	# Solar Noonday Sun
+	if = { limit = { has_variable = pod_combat_equipped_weak_arm_counter } add = 1 }
+	# Solar Setting Sun
+	if = { limit = { has_variable = pod_combat_equipped_warding_dance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_halo_of_the_sun } add = 1 }
+	# Solar Midnight Sun
+	if = { limit = { has_variable = pod_combat_equipped_dreamspeak } add = 1 }
+	# Solar Shrouded Sun
+	if = { limit = { has_variable = pod_combat_equipped_breaking_the_tomorrow_wall } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_malleable_spirit } add = 1 }
+	# Solar Decorated Sun
+	if = { limit = { has_variable = pod_combat_equipped_pack_tactics } add = 1 }
+	# Solar Eclipsed Sun
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_confidence } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lambent_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dragon_kings_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wrath_of_the_dragon } add = 1 }
+	# Stream Makara
+	if = { limit = { has_variable = pod_combat_equipped_shed_scales } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_thousand_arrows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_great_white_hill } add = 1 }
+	# Stream Zhong Lung
+	if = { limit = { has_variable = pod_combat_equipped_clap_of_thunder } add = 1 }
+	# Stream Gumagan
+	if = { limit = { has_variable = pod_combat_equipped_bloody_mindedness } add = 1 }
+	# Stream Mokole-mbembe
+	if = { limit = { has_variable = pod_combat_equipped_silver_claws_mokole } add = 1 }
+	# Demonic Arcana
+	if = { limit = { has_variable = pod_combat_equipped_sharpen_senses } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_preternatural_reflexes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_speed_of_thought } add = 1 }
+	# Demonic Lore
+	if = { limit = { has_variable = pod_combat_equipped_inhuman_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_anguish } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dread_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shield_of_spite } add = 1 }
+	# Lore of Corruption
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_corruption } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wave_of_mutilation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_unspeakable_survivor } add = 1 }
+	# Lore of the Herald
+	if = { limit = { has_variable = pod_combat_equipped_command_the_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mark_of_the_celestials } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hand_of_faith } add = 1 }
+	# Lore of the Life-Bringer
+	if = { limit = { has_variable = pod_combat_equipped_command_the_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_animate_construct } add = 1 }
+	# Lore of Creation
+	if = { limit = { has_variable = pod_combat_equipped_earth_meld_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_forge_weapon } add = 1 }
+	# Lore of the Seers
+	if = { limit = { has_variable = pod_combat_equipped_weave_illusion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_coherent_light } add = 1 }
+	# Lore of Beauty
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_weather } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_storm } add = 1 }
+	# Lore of the World
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_adhesion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_inertia } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_cohesion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_translate_force } add = 1 }
+	# Lore of the Living
+	if = { limit = { has_variable = pod_combat_equipped_command_animals_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_create_chimera } add = 1 }
+	# Lore of the Ethereal
+	if = { limit = { has_variable = pod_combat_equipped_command_the_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_extinguish_life } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_anchor_the_soul } add = 1 }
+	# Devil Fist
+	if = { limit = { has_variable = pod_combat_equipped_infernal_might } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kj_devil_fist } add = 1 }
+	# Black Wind
+	if = { limit = { has_variable = pod_combat_equipped_infernal_speed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kj_black_wind } add = 1 }
+	# Iron Mountain
+	if = { limit = { has_variable = pod_combat_equipped_infernal_fortitude } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_iron_mountain } add = 1 }
+	# Demon Regalia
+	if = { limit = { has_variable = pod_combat_equipped_infernal_glory } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_regalia } add = 1 }
+	# Kiai
+	if = { limit = { has_variable = pod_combat_equipped_battle_cry } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_scream_of_the_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_divine_cry } add = 1 }
+	# Prana
+	if = { limit = { has_variable = pod_combat_equipped_eightfold_yin_mantle } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_yang_phoenix } add = 1 }
+	# Obligation
+	if = { limit = { has_variable = pod_combat_equipped_soul_shackles } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voice_of_the_emperor } add = 1 }
+	# Ghost Arts
+	if = { limit = { has_variable = pod_combat_equipped_death_lines } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_ghost_metal } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_punch } add = 1 }
+	# Heavenly Arts
+	if = { limit = { has_variable = pod_combat_equipped_dance_of_the_kinnara } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_i_am_your_doom } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fate_of_one } add = 1 }
+	# Beast Arts
+	if = { limit = { has_variable = pod_combat_equipped_duke_of_the_wild } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stone_lion } add = 1 }
+	# Devil Arts
+	if = { limit = { has_variable = pod_combat_equipped_killing_shriek } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_self } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_crack_the_tortoise_shell } add = 1 }
+	# Ash and Flames Shintai
+	if = { limit = { has_variable = pod_combat_equipped_beautiful_spark } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_ash_and_fire } add = 1 }
+	# Blood Shintai
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_blood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_flow_like_blood } add = 1 }
+	# Bone Shintai
+	if = { limit = { has_variable = pod_combat_equipped_punishing_bone } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_bone } add = 1 }
+	# Illusion Shintai
+	if = { limit = { has_variable = pod_combat_equipped_rakshasa_blade } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_illusion } add = 1 }
+	# Poxes Shintai
+	if = { limit = { has_variable = pod_combat_equipped_hemorrhagic_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_the_stranger } add = 1 }
+	# Storms Shintai
+	if = { limit = { has_variable = pod_combat_equipped_thunderbolts_kiss } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_breath_of_the_sky } add = 1 }
+	# Smoke Shintai
+	if = { limit = { has_variable = pod_combat_equipped_body_of_smoke } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_smoke } add = 1 }
+}
+
+###### MAX EQUIPPED LIMIT ######
+# Maximum total equipped is 16 (4 per category * 4 categories)
+
+pod_combat_max_equipped = 16
+
+###### DISCIPLINE TRAIT CHECKS ######
+# Used by GUI to show/hide discipline skill rows.
+# Returns 1 if trait present, 0 if not.
+
+# --- Hunter ---
+pod_combat_has_hunter_sv = {
+	value = 0
+	if = { limit = { POD_is_supehunter_trigger = yes } add = 1 }
+}
+
+
+# --- Truefaith ---
+pod_combat_has_truefaith_sv = {
+	value = 0
+	if = { limit = { has_trait = truefaith } add = 1 }
+}
+
+
+# --- Sorcerer ---
+pod_combat_has_sorcerer_sv = {
+	value = 0
+	if = { limit = { has_trait = sorcerer } add = 1 }
+}
+
+
+# --- Theurgist ---
+pod_combat_has_theurgist_sv = {
+	value = 0
+	if = { limit = { has_trait = theurgist } add = 1 }
+}
+
+
+# --- Vampire ---
+pod_combat_has_vampire_sv = {
+	value = 0
+	if = { limit = { has_trait = vampire } add = 1 }
+}
+
+
+# --- Celerity ---
+pod_combat_has_celerity_sv = {
+	value = 0
+	if = { limit = { has_trait = celeritydiscipline } add = 1 }
+}
+
+pod_combat_has_celerity_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = celerityadvanced } add = 1 }
+}
+
+
+# --- Fortitude ---
+pod_combat_has_fortitude_sv = {
+	value = 0
+	if = { limit = { has_trait = fortitudediscipline } add = 1 }
+}
+
+pod_combat_has_fortitude_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = fortitudeadvanced } add = 1 }
+}
+
+
+# --- Potence ---
+pod_combat_has_potence_sv = {
+	value = 0
+	if = { limit = { has_trait = potencediscipline } add = 1 }
+}
+
+pod_combat_has_potence_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = potenceadvanced } add = 1 }
+}
+
+
+# --- Presence ---
+pod_combat_has_presence_sv = {
+	value = 0
+	if = { limit = { has_trait = presencediscipline } add = 1 }
+}
+
+pod_combat_has_presence_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = presenceadvanced } add = 1 }
+}
+
+
+# --- Auspex ---
+pod_combat_has_auspex_sv = {
+	value = 0
+	if = { limit = { has_trait = auspexdiscipline } add = 1 }
+}
+
+pod_combat_has_auspex_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = auspexadvanced } add = 1 }
+}
+
+
+# --- Dominate ---
+pod_combat_has_dominate_sv = {
+	value = 0
+	if = { limit = { has_trait = dominatediscipline } add = 1 }
+}
+
+pod_combat_has_dominate_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = dominateadvanced } add = 1 }
+}
+
+
+# --- Obfuscate ---
+pod_combat_has_obfuscate_sv = {
+	value = 0
+	if = { limit = { has_trait = obfuscatediscipline } add = 1 }
+}
+
+pod_combat_has_obfuscate_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = obfuscateadvanced } add = 1 }
+}
+
+
+# --- Animalism ---
+pod_combat_has_animalism_sv = {
+	value = 0
+	if = { limit = { has_trait = animalismdiscipline } add = 1 }
+}
+
+pod_combat_has_animalism_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = animalismadvanced } add = 1 }
+}
+
+
+# --- Protean ---
+pod_combat_has_protean_sv = {
+	value = 0
+	if = { limit = { has_trait = proteandiscipline } add = 1 }
+}
+
+pod_combat_has_protean_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = proteanadvanced } add = 1 }
+}
+
+
+# --- Obtenebration ---
+pod_combat_has_obtenebration_sv = {
+	value = 0
+	if = { limit = { has_trait = obtenebrationdiscipline } add = 1 }
+}
+
+pod_combat_has_obtenebration_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = obtenebrationadvanced } add = 1 }
+}
+
+
+# --- Vicissitude ---
+pod_combat_has_vicissitude_sv = {
+	value = 0
+	if = { limit = { has_trait = vicissitudediscipline } add = 1 }
+}
+
+pod_combat_has_vicissitude_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = vicissitudeadvanced } add = 1 }
+}
+
+
+# --- Quietus ---
+pod_combat_has_quietus_sv = {
+	value = 0
+	if = { limit = { has_trait = quietusdiscipline } add = 1 }
+}
+
+pod_combat_has_quietus_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = quietusadvanced } add = 1 }
+}
+
+
+# --- Serpentis ---
+pod_combat_has_serpentis_sv = {
+	value = 0
+	if = { limit = { has_trait = serpentisdiscipline } add = 1 }
+}
+
+pod_combat_has_serpentis_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = serpentisadvanced } add = 1 }
+}
+
+
+# --- Valeren ---
+pod_combat_has_valeren_sv = {
+	value = 0
+	if = { limit = { has_trait = valerendiscipline } add = 1 }
+}
+
+pod_combat_has_valeren_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = valerenadvanced } add = 1 }
+}
+
+
+# --- Daimonion ---
+pod_combat_has_daimonion_sv = {
+	value = 0
+	if = { limit = { has_trait = daimoniondiscipline } add = 1 }
+}
+
+pod_combat_has_daimonion_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = daimonionadvanced } add = 1 }
+}
+
+
+# --- Dementation ---
+pod_combat_has_dementation_sv = {
+	value = 0
+	if = { limit = { has_trait = dementationdiscipline } add = 1 }
+}
+
+pod_combat_has_dementation_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = dementationadvanced } add = 1 }
+}
+
+
+# --- Temporis ---
+pod_combat_has_temporis_sv = {
+	value = 0
+	if = { limit = { has_trait = temporisdiscipline } add = 1 }
+}
+
+pod_combat_has_temporis_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = temporisadvanced } add = 1 }
+}
+
+
+# --- Abombwe ---
+pod_combat_has_abombwe_sv = {
+	value = 0
+	if = { limit = { has_trait = abombwediscipline } add = 1 }
+}
+
+pod_combat_has_abombwe_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = abombweadvanced } add = 1 }
+}
+
+
+# --- Kai ---
+pod_combat_has_kai_sv = {
+	value = 0
+	if = { limit = { has_trait = kaidiscipline } add = 1 }
+}
+
+
+# --- Bloodsorcery ---
+pod_combat_has_bloodsorcery_sv = {
+	value = 0
+	if = { limit = { has_trait = bloodsorcerydiscipline } add = 1 }
+}
+
+pod_combat_has_bloodsorcery_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = bloodsorceryadvanced } add = 1 }
+}
+
+
+# --- Necromancy ---
+pod_combat_has_necromancy_sv = {
+	value = 0
+	if = { limit = { has_trait = necromancydiscipline } add = 1 }
+}
+
+pod_combat_has_necromancy_adv_sv = {
+	value = 0
+	if = { limit = { has_trait = necromancyadvanced } add = 1 }
+}
+
+
+# --- Mummy ---
+pod_combat_has_mummy_sv = {
+	value = 0
+	if = { limit = { has_trait = mummy } add = 1 }
+}
+
+
+# --- Werewolf_Childofgaia ---
+pod_combat_has_werewolf_childofgaia_sv = {
+	value = 0
+	if = { limit = { faith = faith:childofgaia } add = 1 }
+}
+
+
+# --- Werewolf_Blackfury ---
+pod_combat_has_werewolf_blackfury_sv = {
+	value = 0
+	if = { limit = { faith = faith:blackfury } add = 1 }
+}
+
+
+# --- Werewolf_Bonegnawer ---
+pod_combat_has_werewolf_bonegnawer_sv = {
+	value = 0
+	if = { limit = { faith = faith:bonegnawer } add = 1 }
+}
+
+
+# --- Werewolf_Fianna ---
+pod_combat_has_werewolf_fianna_sv = {
+	value = 0
+	if = { limit = { faith = faith:fianna } add = 1 }
+}
+
+
+# --- Werewolf_Silentstrider ---
+pod_combat_has_werewolf_silentstrider_sv = {
+	value = 0
+	if = { limit = { faith = faith:silentstrider } add = 1 }
+}
+
+
+# --- Werewolf_Silverfang ---
+pod_combat_has_werewolf_silverfang_sv = {
+	value = 0
+	if = { limit = { faith = faith:silverfang } add = 1 }
+}
+
+
+# --- Werewolf_Shadowlord ---
+pod_combat_has_werewolf_shadowlord_sv = {
+	value = 0
+	if = { limit = { faith = faith:shadowlord } add = 1 }
+}
+
+
+# --- Werewolf_Stargazer ---
+pod_combat_has_werewolf_stargazer_sv = {
+	value = 0
+	if = { limit = { faith = faith:stargazer } add = 1 }
+}
+
+
+# --- Werewolf_Warderofmen ---
+pod_combat_has_werewolf_warderofmen_sv = {
+	value = 0
+	if = { limit = { faith = faith:warderofmen } add = 1 }
+}
+
+
+# --- Werewolf_Getoffenris ---
+pod_combat_has_werewolf_getoffenris_sv = {
+	value = 0
+	if = { limit = { faith = faith:getoffenris } add = 1 }
+}
+
+
+# --- Werewolf_Redtalon ---
+pod_combat_has_werewolf_redtalon_sv = {
+	value = 0
+	if = { limit = { faith = faith:redtalon } add = 1 }
+}
+
+
+# --- Werewolf_Hakken ---
+pod_combat_has_werewolf_hakken_sv = {
+	value = 0
+	if = { limit = { faith = faith:hakken } add = 1 }
+}
+
+
+# --- Werewolf_Whitehowler ---
+pod_combat_has_werewolf_whitehowler_sv = {
+	value = 0
+	if = { limit = { has_perk = waking_the_dead_perk } add = 1 }
+}
+
+
+# --- Werewolf_Blackspiraldancer ---
+pod_combat_has_werewolf_blackspiraldancer_sv = {
+	value = 0
+	if = { limit = { faith = faith:blackspiraldancer } add = 1 }
+}
+
+
+# --- Bagheera ---
+pod_combat_has_bagheera_sv = {
+	value = 0
+	if = { limit = { faith = faith:bagheera } add = 1 }
+}
+
+
+# --- Bubasti ---
+pod_combat_has_bubasti_sv = {
+	value = 0
+	if = { limit = { faith = faith:bubasti } add = 1 }
+}
+
+
+# --- Khan ---
+pod_combat_has_khan_sv = {
+	value = 0
+	if = { limit = { faith = faith:khan } add = 1 }
+}
+
+
+# --- Simba ---
+pod_combat_has_simba_sv = {
+	value = 0
+	if = { limit = { faith = faith:simba } add = 1 }
+}
+
+
+# --- Ceilican ---
+pod_combat_has_ceilican_sv = {
+	value = 0
+	if = { limit = { faith = faith:ceilican } add = 1 }
+}
+
+
+# --- Swara ---
+pod_combat_has_swara_sv = {
+	value = 0
+	if = { limit = { faith = faith:swara } add = 1 }
+}
+
+
+# --- Rising_Sun ---
+pod_combat_has_rising_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = rising_sun } add = 1 }
+}
+
+
+# --- Noonday_Sun ---
+pod_combat_has_noonday_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = noonday_sun } add = 1 }
+}
+
+
+# --- Setting_Sun ---
+pod_combat_has_setting_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = setting_sun } add = 1 }
+}
+
+
+# --- Midnight_Sun ---
+pod_combat_has_midnight_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = midnight_sun } add = 1 }
+}
+
+
+# --- Shrouded_Sun ---
+pod_combat_has_shrouded_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = shrouded_sun } add = 1 }
+}
+
+
+# --- Decorated_Sun ---
+pod_combat_has_decorated_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = decorated_sun } add = 1 }
+}
+
+
+# --- Eclipsed_Sun ---
+pod_combat_has_eclipsed_sun_sv = {
+	value = 0
+	if = { limit = { has_trait = eclipsed_sun } add = 1 }
+}
+
+
+# --- Demon ---
+pod_combat_has_demon_sv = {
+	value = 0
+	if = { limit = { has_trait = demon } add = 1 }
+}
+
+
+# --- Kueijin ---
+pod_combat_has_kueijin_sv = {
+	value = 0
+	if = { limit = { has_trait = kueijin } add = 1 }
+}
+
+# --- Any discipline (checks all 20 basic discipline traits) ---
+pod_combat_has_any_discipline_sv = {
+	value = 0
+	if = { limit = { has_trait = potencediscipline } add = 1 }
+	if = { limit = { has_trait = celeritydiscipline } add = 1 }
+	if = { limit = { has_trait = fortitudediscipline } add = 1 }
+	if = { limit = { has_trait = proteandiscipline } add = 1 }
+	if = { limit = { has_trait = dominatediscipline } add = 1 }
+	if = { limit = { has_trait = presencediscipline } add = 1 }
+	if = { limit = { has_trait = obfuscatediscipline } add = 1 }
+	if = { limit = { has_trait = obtenebrationdiscipline } add = 1 }
+	if = { limit = { has_trait = serpentisdiscipline } add = 1 }
+	if = { limit = { has_trait = daimoniondiscipline } add = 1 }
+	if = { limit = { has_trait = necromancydiscipline } add = 1 }
+	if = { limit = { has_trait = vicissitudediscipline } add = 1 }
+	if = { limit = { has_trait = valerendiscipline } add = 1 }
+	if = { limit = { has_trait = quietusdiscipline } add = 1 }
+	if = { limit = { has_trait = kaidiscipline } add = 1 }
+	if = { limit = { has_trait = animalismdiscipline } add = 1 }
+	if = { limit = { has_trait = dementationdiscipline } add = 1 }
+	if = { limit = { has_trait = abombwediscipline } add = 1 }
+	if = { limit = { has_trait = temporisdiscipline } add = 1 }
+	if = { limit = { has_trait = auspexdiscipline } add = 1 }
+}
+
+###### VAMPIRE TRAIT CHECK ######
+# Returns 1 if character is a vampire, 0 if not
+
+pod_combat_is_vampire_sv = {
+	value = 0
+	if = { limit = { POD_is_vampire_trigger = yes } add = 1 }
+}
+
+###### COMBAT LOG VALUES ######
+# Each log entry (1-30, 1=newest) has: msg ID, actor slot (0-9), target slot (0-9 or -1), damage, blocked
+
+pod_combat_log_1_sv = { value = var:pod_combat_log_1 }
+pod_combat_log_1_actor_sv = { value = var:pod_combat_log_1_actor }
+pod_combat_log_1_target_sv = { value = var:pod_combat_log_1_target }
+pod_combat_log_1_damage_sv = { value = var:pod_combat_log_1_damage }
+pod_combat_log_1_blocked_sv = { value = var:pod_combat_log_1_blocked }
+
+pod_combat_log_2_sv = { value = var:pod_combat_log_2 }
+pod_combat_log_2_actor_sv = { value = var:pod_combat_log_2_actor }
+pod_combat_log_2_target_sv = { value = var:pod_combat_log_2_target }
+pod_combat_log_2_damage_sv = { value = var:pod_combat_log_2_damage }
+pod_combat_log_2_blocked_sv = { value = var:pod_combat_log_2_blocked }
+
+pod_combat_log_3_sv = { value = var:pod_combat_log_3 }
+pod_combat_log_3_actor_sv = { value = var:pod_combat_log_3_actor }
+pod_combat_log_3_target_sv = { value = var:pod_combat_log_3_target }
+pod_combat_log_3_damage_sv = { value = var:pod_combat_log_3_damage }
+pod_combat_log_3_blocked_sv = { value = var:pod_combat_log_3_blocked }
+
+pod_combat_log_4_sv = { value = var:pod_combat_log_4 }
+pod_combat_log_4_actor_sv = { value = var:pod_combat_log_4_actor }
+pod_combat_log_4_target_sv = { value = var:pod_combat_log_4_target }
+pod_combat_log_4_damage_sv = { value = var:pod_combat_log_4_damage }
+pod_combat_log_4_blocked_sv = { value = var:pod_combat_log_4_blocked }
+
+pod_combat_log_5_sv = { value = var:pod_combat_log_5 }
+pod_combat_log_5_actor_sv = { value = var:pod_combat_log_5_actor }
+pod_combat_log_5_target_sv = { value = var:pod_combat_log_5_target }
+pod_combat_log_5_damage_sv = { value = var:pod_combat_log_5_damage }
+pod_combat_log_5_blocked_sv = { value = var:pod_combat_log_5_blocked }
+
+pod_combat_log_6_sv = { value = var:pod_combat_log_6 }
+pod_combat_log_6_actor_sv = { value = var:pod_combat_log_6_actor }
+pod_combat_log_6_target_sv = { value = var:pod_combat_log_6_target }
+pod_combat_log_6_damage_sv = { value = var:pod_combat_log_6_damage }
+pod_combat_log_6_blocked_sv = { value = var:pod_combat_log_6_blocked }
+
+pod_combat_log_7_sv = { value = var:pod_combat_log_7 }
+pod_combat_log_7_actor_sv = { value = var:pod_combat_log_7_actor }
+pod_combat_log_7_target_sv = { value = var:pod_combat_log_7_target }
+pod_combat_log_7_damage_sv = { value = var:pod_combat_log_7_damage }
+pod_combat_log_7_blocked_sv = { value = var:pod_combat_log_7_blocked }
+
+pod_combat_log_8_sv = { value = var:pod_combat_log_8 }
+pod_combat_log_8_actor_sv = { value = var:pod_combat_log_8_actor }
+pod_combat_log_8_target_sv = { value = var:pod_combat_log_8_target }
+pod_combat_log_8_damage_sv = { value = var:pod_combat_log_8_damage }
+pod_combat_log_8_blocked_sv = { value = var:pod_combat_log_8_blocked }
+
+pod_combat_log_9_sv = { value = var:pod_combat_log_9 }
+pod_combat_log_9_actor_sv = { value = var:pod_combat_log_9_actor }
+pod_combat_log_9_target_sv = { value = var:pod_combat_log_9_target }
+pod_combat_log_9_damage_sv = { value = var:pod_combat_log_9_damage }
+pod_combat_log_9_blocked_sv = { value = var:pod_combat_log_9_blocked }
+
+pod_combat_log_10_sv = { value = var:pod_combat_log_10 }
+pod_combat_log_10_actor_sv = { value = var:pod_combat_log_10_actor }
+pod_combat_log_10_target_sv = { value = var:pod_combat_log_10_target }
+pod_combat_log_10_damage_sv = { value = var:pod_combat_log_10_damage }
+pod_combat_log_10_blocked_sv = { value = var:pod_combat_log_10_blocked }
+
+pod_combat_log_11_sv = { value = var:pod_combat_log_11 }
+pod_combat_log_11_actor_sv = { value = var:pod_combat_log_11_actor }
+pod_combat_log_11_target_sv = { value = var:pod_combat_log_11_target }
+pod_combat_log_11_damage_sv = { value = var:pod_combat_log_11_damage }
+pod_combat_log_11_blocked_sv = { value = var:pod_combat_log_11_blocked }
+
+pod_combat_log_12_sv = { value = var:pod_combat_log_12 }
+pod_combat_log_12_actor_sv = { value = var:pod_combat_log_12_actor }
+pod_combat_log_12_target_sv = { value = var:pod_combat_log_12_target }
+pod_combat_log_12_damage_sv = { value = var:pod_combat_log_12_damage }
+pod_combat_log_12_blocked_sv = { value = var:pod_combat_log_12_blocked }
+
+pod_combat_log_13_sv = { value = var:pod_combat_log_13 }
+pod_combat_log_13_actor_sv = { value = var:pod_combat_log_13_actor }
+pod_combat_log_13_target_sv = { value = var:pod_combat_log_13_target }
+pod_combat_log_13_damage_sv = { value = var:pod_combat_log_13_damage }
+pod_combat_log_13_blocked_sv = { value = var:pod_combat_log_13_blocked }
+
+pod_combat_log_14_sv = { value = var:pod_combat_log_14 }
+pod_combat_log_14_actor_sv = { value = var:pod_combat_log_14_actor }
+pod_combat_log_14_target_sv = { value = var:pod_combat_log_14_target }
+pod_combat_log_14_damage_sv = { value = var:pod_combat_log_14_damage }
+pod_combat_log_14_blocked_sv = { value = var:pod_combat_log_14_blocked }
+
+pod_combat_log_15_sv = { value = var:pod_combat_log_15 }
+pod_combat_log_15_actor_sv = { value = var:pod_combat_log_15_actor }
+pod_combat_log_15_target_sv = { value = var:pod_combat_log_15_target }
+pod_combat_log_15_damage_sv = { value = var:pod_combat_log_15_damage }
+pod_combat_log_15_blocked_sv = { value = var:pod_combat_log_15_blocked }
+
+pod_combat_log_16_sv = { value = var:pod_combat_log_16 }
+pod_combat_log_16_actor_sv = { value = var:pod_combat_log_16_actor }
+pod_combat_log_16_target_sv = { value = var:pod_combat_log_16_target }
+pod_combat_log_16_damage_sv = { value = var:pod_combat_log_16_damage }
+pod_combat_log_16_blocked_sv = { value = var:pod_combat_log_16_blocked }
+
+pod_combat_log_17_sv = { value = var:pod_combat_log_17 }
+pod_combat_log_17_actor_sv = { value = var:pod_combat_log_17_actor }
+pod_combat_log_17_target_sv = { value = var:pod_combat_log_17_target }
+pod_combat_log_17_damage_sv = { value = var:pod_combat_log_17_damage }
+pod_combat_log_17_blocked_sv = { value = var:pod_combat_log_17_blocked }
+
+pod_combat_log_18_sv = { value = var:pod_combat_log_18 }
+pod_combat_log_18_actor_sv = { value = var:pod_combat_log_18_actor }
+pod_combat_log_18_target_sv = { value = var:pod_combat_log_18_target }
+pod_combat_log_18_damage_sv = { value = var:pod_combat_log_18_damage }
+pod_combat_log_18_blocked_sv = { value = var:pod_combat_log_18_blocked }
+
+pod_combat_log_19_sv = { value = var:pod_combat_log_19 }
+pod_combat_log_19_actor_sv = { value = var:pod_combat_log_19_actor }
+pod_combat_log_19_target_sv = { value = var:pod_combat_log_19_target }
+pod_combat_log_19_damage_sv = { value = var:pod_combat_log_19_damage }
+pod_combat_log_19_blocked_sv = { value = var:pod_combat_log_19_blocked }
+
+pod_combat_log_20_sv = { value = var:pod_combat_log_20 }
+pod_combat_log_20_actor_sv = { value = var:pod_combat_log_20_actor }
+pod_combat_log_20_target_sv = { value = var:pod_combat_log_20_target }
+pod_combat_log_20_damage_sv = { value = var:pod_combat_log_20_damage }
+pod_combat_log_20_blocked_sv = { value = var:pod_combat_log_20_blocked }
+
+pod_combat_log_21_sv = { value = var:pod_combat_log_21 }
+pod_combat_log_21_actor_sv = { value = var:pod_combat_log_21_actor }
+pod_combat_log_21_target_sv = { value = var:pod_combat_log_21_target }
+pod_combat_log_21_damage_sv = { value = var:pod_combat_log_21_damage }
+pod_combat_log_21_blocked_sv = { value = var:pod_combat_log_21_blocked }
+
+pod_combat_log_22_sv = { value = var:pod_combat_log_22 }
+pod_combat_log_22_actor_sv = { value = var:pod_combat_log_22_actor }
+pod_combat_log_22_target_sv = { value = var:pod_combat_log_22_target }
+pod_combat_log_22_damage_sv = { value = var:pod_combat_log_22_damage }
+pod_combat_log_22_blocked_sv = { value = var:pod_combat_log_22_blocked }
+
+pod_combat_log_23_sv = { value = var:pod_combat_log_23 }
+pod_combat_log_23_actor_sv = { value = var:pod_combat_log_23_actor }
+pod_combat_log_23_target_sv = { value = var:pod_combat_log_23_target }
+pod_combat_log_23_damage_sv = { value = var:pod_combat_log_23_damage }
+pod_combat_log_23_blocked_sv = { value = var:pod_combat_log_23_blocked }
+
+pod_combat_log_24_sv = { value = var:pod_combat_log_24 }
+pod_combat_log_24_actor_sv = { value = var:pod_combat_log_24_actor }
+pod_combat_log_24_target_sv = { value = var:pod_combat_log_24_target }
+pod_combat_log_24_damage_sv = { value = var:pod_combat_log_24_damage }
+pod_combat_log_24_blocked_sv = { value = var:pod_combat_log_24_blocked }
+
+pod_combat_log_25_sv = { value = var:pod_combat_log_25 }
+pod_combat_log_25_actor_sv = { value = var:pod_combat_log_25_actor }
+pod_combat_log_25_target_sv = { value = var:pod_combat_log_25_target }
+pod_combat_log_25_damage_sv = { value = var:pod_combat_log_25_damage }
+pod_combat_log_25_blocked_sv = { value = var:pod_combat_log_25_blocked }
+
+pod_combat_log_26_sv = { value = var:pod_combat_log_26 }
+pod_combat_log_26_actor_sv = { value = var:pod_combat_log_26_actor }
+pod_combat_log_26_target_sv = { value = var:pod_combat_log_26_target }
+pod_combat_log_26_damage_sv = { value = var:pod_combat_log_26_damage }
+pod_combat_log_26_blocked_sv = { value = var:pod_combat_log_26_blocked }
+
+pod_combat_log_27_sv = { value = var:pod_combat_log_27 }
+pod_combat_log_27_actor_sv = { value = var:pod_combat_log_27_actor }
+pod_combat_log_27_target_sv = { value = var:pod_combat_log_27_target }
+pod_combat_log_27_damage_sv = { value = var:pod_combat_log_27_damage }
+pod_combat_log_27_blocked_sv = { value = var:pod_combat_log_27_blocked }
+
+pod_combat_log_28_sv = { value = var:pod_combat_log_28 }
+pod_combat_log_28_actor_sv = { value = var:pod_combat_log_28_actor }
+pod_combat_log_28_target_sv = { value = var:pod_combat_log_28_target }
+pod_combat_log_28_damage_sv = { value = var:pod_combat_log_28_damage }
+pod_combat_log_28_blocked_sv = { value = var:pod_combat_log_28_blocked }
+
+pod_combat_log_29_sv = { value = var:pod_combat_log_29 }
+pod_combat_log_29_actor_sv = { value = var:pod_combat_log_29_actor }
+pod_combat_log_29_target_sv = { value = var:pod_combat_log_29_target }
+pod_combat_log_29_damage_sv = { value = var:pod_combat_log_29_damage }
+pod_combat_log_29_blocked_sv = { value = var:pod_combat_log_29_blocked }
+
+pod_combat_log_30_sv = { value = var:pod_combat_log_30 }
+pod_combat_log_30_actor_sv = { value = var:pod_combat_log_30_actor }
+pod_combat_log_30_target_sv = { value = var:pod_combat_log_30_target }
+pod_combat_log_30_damage_sv = { value = var:pod_combat_log_30_damage }
+pod_combat_log_30_blocked_sv = { value = var:pod_combat_log_30_blocked }
+
+# Turn-change detection: nonzero = actors differ between adjacent entries
+pod_combat_log_turn_change_1_2 = {
+	value = var:pod_combat_log_1_actor
+	subtract = var:pod_combat_log_2_actor
+}
+pod_combat_log_turn_change_2_3 = {
+	value = var:pod_combat_log_2_actor
+	subtract = var:pod_combat_log_3_actor
+}
+pod_combat_log_turn_change_3_4 = {
+	value = var:pod_combat_log_3_actor
+	subtract = var:pod_combat_log_4_actor
+}
+pod_combat_log_turn_change_4_5 = {
+	value = var:pod_combat_log_4_actor
+	subtract = var:pod_combat_log_5_actor
+}
+pod_combat_log_turn_change_5_6 = {
+	value = var:pod_combat_log_5_actor
+	subtract = var:pod_combat_log_6_actor
+}
+pod_combat_log_turn_change_6_7 = {
+	value = var:pod_combat_log_6_actor
+	subtract = var:pod_combat_log_7_actor
+}
+pod_combat_log_turn_change_7_8 = {
+	value = var:pod_combat_log_7_actor
+	subtract = var:pod_combat_log_8_actor
+}
+pod_combat_log_turn_change_8_9 = {
+	value = var:pod_combat_log_8_actor
+	subtract = var:pod_combat_log_9_actor
+}
+pod_combat_log_turn_change_9_10 = {
+	value = var:pod_combat_log_9_actor
+	subtract = var:pod_combat_log_10_actor
+}
+pod_combat_log_turn_change_10_11 = {
+	value = var:pod_combat_log_10_actor
+	subtract = var:pod_combat_log_11_actor
+}
+pod_combat_log_turn_change_11_12 = {
+	value = var:pod_combat_log_11_actor
+	subtract = var:pod_combat_log_12_actor
+}
+pod_combat_log_turn_change_12_13 = {
+	value = var:pod_combat_log_12_actor
+	subtract = var:pod_combat_log_13_actor
+}
+pod_combat_log_turn_change_13_14 = {
+	value = var:pod_combat_log_13_actor
+	subtract = var:pod_combat_log_14_actor
+}
+pod_combat_log_turn_change_14_15 = {
+	value = var:pod_combat_log_14_actor
+	subtract = var:pod_combat_log_15_actor
+}
+pod_combat_log_turn_change_15_16 = {
+	value = var:pod_combat_log_15_actor
+	subtract = var:pod_combat_log_16_actor
+}
+pod_combat_log_turn_change_16_17 = {
+	value = var:pod_combat_log_16_actor
+	subtract = var:pod_combat_log_17_actor
+}
+pod_combat_log_turn_change_17_18 = {
+	value = var:pod_combat_log_17_actor
+	subtract = var:pod_combat_log_18_actor
+}
+pod_combat_log_turn_change_18_19 = {
+	value = var:pod_combat_log_18_actor
+	subtract = var:pod_combat_log_19_actor
+}
+pod_combat_log_turn_change_19_20 = {
+	value = var:pod_combat_log_19_actor
+	subtract = var:pod_combat_log_20_actor
+}
+pod_combat_log_turn_change_20_21 = {
+	value = var:pod_combat_log_20_actor
+	subtract = var:pod_combat_log_21_actor
+}
+pod_combat_log_turn_change_21_22 = {
+	value = var:pod_combat_log_21_actor
+	subtract = var:pod_combat_log_22_actor
+}
+pod_combat_log_turn_change_22_23 = {
+	value = var:pod_combat_log_22_actor
+	subtract = var:pod_combat_log_23_actor
+}
+pod_combat_log_turn_change_23_24 = {
+	value = var:pod_combat_log_23_actor
+	subtract = var:pod_combat_log_24_actor
+}
+pod_combat_log_turn_change_24_25 = {
+	value = var:pod_combat_log_24_actor
+	subtract = var:pod_combat_log_25_actor
+}
+pod_combat_log_turn_change_25_26 = {
+	value = var:pod_combat_log_25_actor
+	subtract = var:pod_combat_log_26_actor
+}
+pod_combat_log_turn_change_26_27 = {
+	value = var:pod_combat_log_26_actor
+	subtract = var:pod_combat_log_27_actor
+}
+pod_combat_log_turn_change_27_28 = {
+	value = var:pod_combat_log_27_actor
+	subtract = var:pod_combat_log_28_actor
+}
+pod_combat_log_turn_change_28_29 = {
+	value = var:pod_combat_log_28_actor
+	subtract = var:pod_combat_log_29_actor
+}
+pod_combat_log_turn_change_29_30 = {
+	value = var:pod_combat_log_29_actor
+	subtract = var:pod_combat_log_30_actor
+}
+
+###### AGGRAVATED DAMAGE TRACKING ######
+# Track aggravated damage separately for health write-back. Workspace
+# vars hold this-round accumulation; once the round ends the count is
+# rolled into each slot's _agg_total and the per-round counter resets.
+#   pod_combat_player_agg_damage    — aggravated HP taken by the actor this round
+#   pod_combat_opponent_agg_damage  — aggravated HP taken by the current target this round
+# Per-slot versions (pod_combat_c{N}_agg_damage, pod_combat_c{N}_agg_total)
+# are synced through the workspace bridge.
+
+###### FERA TRAIT SVS ######
+
+pod_combat_is_fera_sv = {
+	value = 0
+	if = { limit = { pod_combat_is_fera_trigger = yes } add = 1 }
+}
+
+pod_combat_has_werewolf_sv = {
+	value = 0
+	if = { limit = { has_trait = werewolf } add = 1 }
+}
+
+pod_combat_has_bastet_sv = {
+	value = 0
+	if = { limit = { has_trait = bastet } add = 1 }
+}
+
+pod_combat_has_mokole_sv = {
+	value = 0
+	if = { limit = { has_trait = mokole } add = 1 }
+}
+
+pod_combat_has_ahroun_sv = {
+	value = 0
+	if = { limit = { has_trait = ahroun } add = 1 }
+}
+
+pod_combat_has_galliard_sv = {
+	value = 0
+	if = { limit = { has_trait = galliard } add = 1 }
+}
+
+pod_combat_has_philodox_sv = {
+	value = 0
+	if = { limit = { has_trait = philodox } add = 1 }
+}
+
+pod_combat_has_ragabash_sv = {
+	value = 0
+	if = { limit = { has_trait = ragabash } add = 1 }
+}
+
+pod_combat_has_theurge_sv = {
+	value = 0
+	if = { limit = { has_trait = theurge } add = 1 }
+}
+
+pod_combat_has_fera_perk_gifts_sv = {
+	value = 0
+}
+
+###### COMBAT SKILL CATEGORY COUNTS ######
+
+pod_combat_max_per_category = { value = 4 }
+
+pod_combat_atk_count = {
+	value = 0
+	# Base Physical
+	if = { limit = { has_variable = pod_combat_equipped_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heavy_blow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_quick_jab } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reckless_charge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_silver_dagger_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_torch_sweep } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_gold_arrow_shot } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tigers_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ten_ox_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_thousand_fists } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_burning_ghosts } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hundred_warriors_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heaven_thunder_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_eating_technique } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wind_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_red_vigil_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_red_forge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_acre_judgment } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_acre_executor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_oculi_wine } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fathers_judgment } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sunder } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wrath_of_god } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_judgement_of_heaven } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_pact_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_surge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hellfire_inferno } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_conjure_servant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_master_conjuration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reality_breach } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_knight } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_storm_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lightning_strike_sorcery } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_storm_apocalypse } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_pact_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wraith_touch } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wraith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_incarnate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_fire_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_fire_inferno } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_binding_of_spirits } add = 1 }
+	# Vampire attacks
+	if = { limit = { has_variable = pod_combat_equipped_bite } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lightning_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_knights_bane } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lethal_body } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_brutal_feed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_earthshock } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_might_of_heroes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_psychic_burst } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_drawing_out_the_beast } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wolf_claws } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arms_of_ahriman } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_bone_spurs } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_body_arsenal } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_taste_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_cobra_fangs } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_valeren_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_patience_of_the_norns } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_clotho_unwinds } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stalking_darkness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_devil_fist } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_black_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_theft_of_vitae } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_to_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_cauldron_of_blood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_strike_true } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grasp_of_the_mountain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_pierce_steels_skin } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_strike_at_the_true_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_small_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_medium_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_huge_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_massive_flames } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dehydrate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_force_bolt } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_control_tk } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rain_of_ice } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_control_lightning } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_elemental } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_astral_chant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_duality } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_serpents_blessing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_call_the_children } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heed_the_hell_bound_heart } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_that_wounds } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kupalas_fury } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fury_of_the_night_sky } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_minions_of_the_deep } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_doom_tide } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_combust } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_heat_wave } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_volcanic_blast } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_freshly_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_army_of_souls } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kupalas_exhalation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grace_of_anubis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_haunting_sepulchre } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_torment_sepulchre } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_seal_of_abamixtra } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_awaken_homuncular_servant } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shambling_hordes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reveal_the_catene } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tread_upon_the_grave } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_benedicto_mortem } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ashes_to_ashes_necro } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ashen_ladys_embrace } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_decay } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_soul_drain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dark_humors } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tongue_of_dark_kingdoms } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_the_nether } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_tend_the_body_garden } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_raise_the_green_one } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wisp } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_haunting_torment } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_finding_the_locus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_expurgate_the_damned } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_purge_the_apostate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spark_of_ra } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ashes_to_ashes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dust_to_dust } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_serqets_sting } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voracious_scarab } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_call_the_stars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_call_of_the_north_star } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_simple_creature } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_divine_beast } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_scepter } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_deaths_hand } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spear_of_anubis } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_razor_claws } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_heart_claw_attack } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_spirit_strike } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_unstoppable_warrior } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_maidens_vengeance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infest } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_full_moons_wrath } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_durance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_merciful_blow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_control_simple_machine } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_might_of_thor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fenris_bite } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_snap_mans_chains } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_waking_the_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_toxic_claws } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_burning_scars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_wyrm_elemental } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rhinos_favor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_raging_spirit_tiger } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fireroar } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_diamond_claws } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_dragons_breath } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_halo_of_the_sun } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_breaking_the_tomorrow_wall } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lambent_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wrath_of_the_dragon } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_thousand_arrows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_great_white_hill } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_clap_of_thunder } add = 1 }
+	# Fera attacks
+	if = { limit = { has_variable = pod_combat_equipped_silver_claws_mokole } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_inhuman_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_anguish } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_corruption } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wave_of_mutilation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_flame } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hand_of_faith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_animate_construct } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_forge_weapon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_coherent_light } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_storm } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_inertia } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_cohesion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_animals_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_create_chimera } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_command_the_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_extinguish_life } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infernal_might } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kj_devil_fist } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_kj_black_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_battle_cry } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_lines } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_ghost_metal } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_punch } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_i_am_your_doom } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_duke_of_the_wild } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_killing_shriek } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_crack_the_tortoise_shell } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_beautiful_spark } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lash_of_blood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_punishing_bone } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rakshasa_blade } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hemorrhagic_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_thunderbolts_kiss } add = 1 }
+}
+
+pod_combat_ctl_count = {
+	value = 0
+	# Base Tactical
+	if = { limit = { has_variable = pod_combat_equipped_feint } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_intimidate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_the_dragon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mantle_of_heaven } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sisters_oratorio } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_pry_open } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rod_and_staff } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_phantom_strike } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_veil } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_deepening_shadows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_oraculi_warding } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dread_gaze } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_awe } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_phobia } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_compel } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_conditioning } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_play } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_silence_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fear_of_void_below } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_psychomachia } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_passion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_the_haunting } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_warcry } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_prison_of_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_repulse } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_summon_fog } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voice_of_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_humiliation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_frustrations_of_nestrecha } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_compel_soul } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mortuus_in_vultus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rigor_mortis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_the_wraith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_calvaria_emissicius } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_consilium_mortuus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wails_and_whispers } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_song_of_the_dead } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grip_of_the_water } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_transfixing_gaze } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_naming_the_warning } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_riddle_of_the_sphinx } add = 1 }
+	# Fera fera common
+	if = { limit = { has_variable = pod_combat_equipped_battle_howl } add = 1 }
+	# Fera werewolf general
+	if = { limit = { has_variable = pod_combat_equipped_shattering_howl_attack } add = 1 }
+	# Fera ragabash
+	if = { limit = { has_variable = pod_combat_equipped_fool_luck } add = 1 }
+	# Fera philodox
+	if = { limit = { has_variable = pod_combat_equipped_judges_decree } add = 1 }
+	# Fera galliard
+	if = { limit = { has_variable = pod_combat_equipped_howl_of_the_banshee } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_curse_of_aeolus } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_paralyzing_stare } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_intrusion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_visage_of_fenris } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wolf_at_the_door } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_howl_of_death } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_terrify } add = 1 }
+	# Fera bastet common
+	if = { limit = { has_variable = pod_combat_equipped_withering_stare } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shriek } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dragonroar } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_bastet_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_madness_of_crowds } add = 1 }
+	# Fera mokole common
+	if = { limit = { has_variable = pod_combat_equipped_dragonfear } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rising_bellow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dreamspeak } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dragon_kings_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dread_command } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mark_of_the_celestials } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_weave_illusion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_adhesion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_anchor_the_soul } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infernal_glory } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_scream_of_the_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eightfold_yin_mantle } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_soul_shackles } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_voice_of_the_emperor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_touch_of_the_stranger } add = 1 }
+}
+
+pod_combat_def_count = {
+	value = 0
+	# Base Tactical
+	if = { limit = { has_variable = pod_combat_equipped_guard } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rally } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_steel_skin } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_celestial_eyes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sight_without_eyes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_of_heaven } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stolen_serpent } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mountain_stance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_celestial_wind } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arrow_cutting } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_acre_defender } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sisters_hosanna } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_murnau_wreathed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_murnau_arcana } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_oculi_sight } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shield_of_faith } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_holy_bulwark } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_miracle_of_protection } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_gods_armour } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_sanctity } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_restoration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_bind_artifact } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_phantasmal_evasion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blessed_healing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_health_restoration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_perfect_healing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eternal_pact } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_omniscient_foresight } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_luck_blessing } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_destiny_fulfilled } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_death_precision } add = 1 }
+	# Vampire Innate
+	if = { limit = { has_variable = pod_combat_equipped_blood_surge } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_heal } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_cats_swiftness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blur_of_motion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_toughness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_prowess_from_pain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_armoured_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_majesty } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_clairvoyance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_prescience } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_vanish } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_subsume_the_spirit } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_earth_meld } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aegis_of_shadows } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fleshcraft_barrier } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_valeren_ward } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mend_ghastly_wounds } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_predator_form } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_power_from_darkness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_blood_rage } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fearless_heart } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_comrades_at_arms } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_razors_shield } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_flowing_wall } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_elemental_strength } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_endurance_of_stone } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_roots_of_power } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_arbor_of_protection } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hikma_allah } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_burebistas_throne } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grondrskas_impasse } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_white_tower } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_algor_mortis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_caul_of_the_neverborn } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_wood_ward } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_buckle_of_isis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_rousing_apophis } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_panoply_of_shadow } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fortify_flesh } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_name_of_the_attribute } add = 1 }
+	# Fera fera common
+	if = { limit = { has_variable = pod_combat_equipped_war_form } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_regeneration } add = 1 }
+	# Fera ragabash
+	if = { limit = { has_variable = pod_combat_equipped_blur_of_milky_eye } add = 1 }
+	# Fera theurge
+	if = { limit = { has_variable = pod_combat_equipped_eyes_of_chaos } add = 1 }
+	# Fera philodox
+	if = { limit = { has_variable = pod_combat_equipped_resist_pain } add = 1 }
+	# Fera galliard
+	if = { limit = { has_variable = pod_combat_equipped_song_of_rage } add = 1 }
+	# Fera ahroun
+	if = { limit = { has_variable = pod_combat_equipped_stoking_furys_furnace } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_inspiration } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_friend } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mothers_touch } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_hootenanny } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_faerie_kin } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_leshiis_boon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_renew_the_cycle } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipura } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_glory_scars } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_primal_howl } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_thousand_cranes } add = 1 }
+	# Fera bastet common
+	if = { limit = { has_variable = pod_combat_equipped_cats_swiftness_bastet } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_treeclimber } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_banish_cahlashs_brood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_spirit_wall } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_skin_of_jade } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_king_of_beasts } add = 1 }
+	# Fera mokole common
+	if = { limit = { has_variable = pod_combat_equipped_armor_of_tortoise } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_eye_of_the_raptor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_weak_arm_counter } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_warding_dance } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_malleable_spirit } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_pack_tactics } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_aura_of_confidence } add = 1 }
+	# Fera stream makara
+	if = { limit = { has_variable = pod_combat_equipped_shed_scales } add = 1 }
+	# Fera stream gumagan
+	if = { limit = { has_variable = pod_combat_equipped_bloody_mindedness } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_sharpen_senses } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_preternatural_reflexes } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shield_of_spite } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_unspeakable_survivor } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_earth_meld_demon } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_manipulate_weather } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_translate_force } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infernal_speed } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_infernal_fortitude } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_iron_mountain } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dance_of_the_kinnara } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_stone_lion } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shadow_self } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_flow_like_blood } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_breath_of_the_sky } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_body_of_smoke } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_smoke } add = 1 }
+}
+
+pod_combat_pwr_count = {
+	value = 0
+	if = { limit = { has_variable = pod_combat_equipped_red_march } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_reality_fracture } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_nightmare_incarnate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_split_second } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_possession } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_mask_of_thousand_faces } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ahrimans_demesne } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_breath_of_basilisk } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_dark_invocation } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_ride_the_tempest } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_grief_incarnate } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_lament_of_dhainu } add = 1 }
+	# Fera ahroun
+	if = { limit = { has_variable = pod_combat_equipped_spirit_of_fray } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_speed_beyond_thought } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_chariot_of_lions } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_speed_of_thought } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_demon_regalia } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_divine_cry } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_yang_phoenix } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_fate_of_one } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_ash_and_fire } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_bone } add = 1 }
+	if = { limit = { has_variable = pod_combat_equipped_shintai_of_illusion } add = 1 }
+}
