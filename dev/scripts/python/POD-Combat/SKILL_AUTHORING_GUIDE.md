@@ -183,6 +183,23 @@ The `damage_source` column determines which damage pipeline the move uses. Each 
 - **Aggravated** damage is soaked at half effectiveness (-50% soak chance). It also tracks separately for PoD health write-back (aggravated damage on the PoD health track is harder to heal)
 - Promoted sources (Fire, Silver, Gold, Holy) check the target's creature type. If vulnerable, the damage is treated as aggravated; otherwise it uses the baseline `damage_type` from the CSV
 
+### Spirit Immunity (Physical Sources Only)
+
+Incorporeal spirits (ghosts, non-Risen wraiths, banes, Gaian totems, etc.) — anything for which PoD's `POD_can_be_killed_physically_trigger` returns `no` — can't be harmed by mundane Physical attacks. In the minigame this is gated at the top of all four Physical damage pipelines:
+
+- `pod_combat_deal_physical_hp_damage_effect`
+- `pod_combat_deal_physical_bypass_guard_hp_damage_effect`
+- `pod_combat_deal_physical_aggravated_hp_damage_effect`
+- `pod_combat_deal_physical_aggravated_bypass_guard_hp_damage_effect`
+
+If the target is incorporeal **and** the actor lacks the `POD_can_damage_spirit_trigger`-equivalent capability (naturally granted to fera / spirits / fae / wraiths / true-faith characters, or unlocked via specific perks / artifacts), the attack auto-misses. The miss is reported through the normal combat log (`last_was_missed`), stealth and dodge stances are preserved, and no soak roll happens.
+
+Capability snapshot is taken once at combat init — mid-combat changes (e.g., picking up an artifact) don't update. The flags live at:
+- `pod_combat_c{N}_incorporeal_spirit` / `pod_combat_c{N}_can_damage_spirit` (per slot)
+- `pod_combat_player_*` / `pod_combat_opponent_*` (workspace mirrors, populated by load effects)
+
+**Supernatural, Mental, Fire, Sunlight, Silver, Gold, and Holy pipelines are unaffected** — all bypass incorporeality. Design accordingly: a splat whose NPCs exist mainly to fight spirits should lean on Supernatural / Holy / Silver attacks rather than pure Physical.
+
 ---
 
 ## Trait Reference
