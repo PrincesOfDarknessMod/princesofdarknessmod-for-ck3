@@ -223,6 +223,16 @@ Basic discipline traits (`*discipline`) are prerequisites for advanced (`*advanc
 - `mummy` - Amenti mummies
 - `kueijin` - Kuei-jin 
 
+### Wraiths, Spirits, and Spectres
+- `wraith` - any wraith (checks `has_trait = wraith`)
+- `spectre` - any spectre (checks `has_trait = spectre`; PoD has no `is_spectre_trigger`)
+- `spirit` - any spirit (checks `has_trait = spirit`; covers Gaian totems and Wyrm banes alike)
+- `gaian_spirit` - Gaian/nature/totem spirits only (mapped to `POD_is_gaian_spirit_trigger`)
+- `wyrm_spirit` - Wyrm-tainted / bane spirits only (mapped to `POD_is_wyrm_spirit_trigger`)
+
+Wraith skills can also gate on individual **arcanoi traits** the same way vampire skills gate on individual disciplines. Supported arcanoi trait keys (pass them as the `required_trait` value):
+`arcanos_argos`, `arcanos_castigate`, `arcanos_embody`, `arcanos_fatalism`, `arcanos_flux`, `arcanos_inhabit`, `arcanos_intimation`, `arcanos_keening`, `arcanos_lifeweb`, `arcanos_mnemosynis`, `arcanos_moliate`, `arcanos_outrage`, `arcanos_pandemonium`, `arcanos_phantasm`, `arcanos_puppetry`, `arcanos_usury`.
+
 ### Energy Cost by Splat
 
 The generator automatically calls the correct PoD energy-spend effect based on `required_trait`:

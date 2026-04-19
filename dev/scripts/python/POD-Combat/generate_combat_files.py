@@ -127,6 +127,10 @@ TRAIT_CHECK_OVERRIDES = {
     "khan":                       "faith = faith:khan",
     "simba":                      "faith = faith:simba",
     "swara":                      "faith = faith:swara",
+    # Spirit sub-types — CSV uses synthetic keys that dispatch to PoD's
+    # existing spirit-type triggers (defined in POD_spirit_triggers.txt).
+    "gaian_spirit":               "POD_is_gaian_spirit_trigger = yes",
+    "wyrm_spirit":                "POD_is_wyrm_spirit_trigger = yes",
 }
 
 
