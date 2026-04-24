@@ -250,7 +250,7 @@ PixelShader =
 		]]
 	}
 
-	MainCode PS_PODSDF_LOADINGSCREEN2
+	MainCode PS_CLOTH
 	{
 		Input = "VS_OUTPUT_PDX_GUI"
 		Output = "PDX_COLOR"
@@ -328,7 +328,7 @@ PixelShader =
 				return k0 + k1*u.x + k2*u.y + k3*u.x*u.y;
 			}
 
-			float fbm(float2 p, int iter) {
+			float fbm3(float2 p) {
 				float2 op = p;
 				const float aa = 0.45;
 				const float pp = 2.03;
@@ -339,7 +339,53 @@ PixelShader =
 				float d = 0.0;
 				float a = 1.0;
 				
-				for (int i = 0; i < iter; ++i) {
+				for (int i = 0; i < 3; ++i) {
+					h += a*onoise(p);
+					d += (a);
+					a *= aa;
+					p += oo;
+					p *= pp;
+					rot(p, rr);
+				}
+				
+				return lerp((h/d), -0.5*(h/d), pow(vnoise(0.9*op), 0.25));
+			}
+
+			float fbm5(float2 p) {
+				float2 op = p;
+				const float aa = 0.45;
+				const float pp = 2.03;
+				const float2 oo = -float2(1.23, 1.5);
+				const float rr = 1.2;
+				
+				float h = 0.0;
+				float d = 0.0;
+				float a = 1.0;
+				
+				for (int i = 0; i < 5; ++i) {
+					h += a*onoise(p);
+					d += (a);
+					a *= aa;
+					p += oo;
+					p *= pp;
+					rot(p, rr);
+				}
+				
+				return lerp((h/d), -0.5*(h/d), pow(vnoise(0.9*op), 0.25));
+			}
+
+			float fbm7(float2 p) {
+				float2 op = p;
+				const float aa = 0.45;
+				const float pp = 2.03;
+				const float2 oo = -float2(1.23, 1.5);
+				const float rr = 1.2;
+				
+				float h = 0.0;
+				float d = 0.0;
+				float a = 1.0;
+				
+				for (int i = 0; i < 7; ++i) {
 					h += a*onoise(p);
 					d += (a);
 					a *= aa;
@@ -366,48 +412,50 @@ PixelShader =
 			float df(float2 uv) {
 				float2 texSize = SpriteSize.xy;
 				
-				float2 sdf1_offset = SpriteBorder[1].xy;
-				float2 sdf2_offset = SpriteBorder[2].xy;
+				float2 sdf1_offset = SpriteBorder[4].xy;
+				float2 sdf2_offset = SpriteBorder[5].xy;
 				
-				float sdf1_scale = SpriteTranslateRotateUVAndAlpha[1].z;
-				float sdf2_scale = SpriteTranslateRotateUVAndAlpha[2].z;
+				float sdf1_scale = SpriteTranslateRotateUVAndAlpha[4].z;
+				float sdf2_scale = SpriteTranslateRotateUVAndAlpha[5].z;
 				
-				//float2 sdf_uv = ( uv + float2(.5,.5) ) * 0.5;
-				//sdf_uv.y = 1. - sdf_uv.y;
 				float2 sdf1_uv = ( uv - sdf1_offset ) * texSize / SDF_SIZE * sdf1_scale;
 				float2 sdf2_uv = ( uv - sdf2_offset ) * texSize / SDF_SIZE * sdf2_scale;
-				float sdf1 = get_texture_sdf(ModifyTexture0, sdf1_uv);
-				float sdf2 = get_texture_sdf(ModifyTexture1, sdf2_uv);
+				float sdf1 = get_texture_sdf(ModifyTexture3, sdf1_uv);
+				float sdf2 = get_texture_sdf(ModifyTexture4, sdf2_uv);
 
 				float sdflerp = cos(GuiTime * 0.2) * .5 + .5;
 				float lerped_sdf = lerp(sdf1, sdf2, sdflerp);
-				//float lerped_sdf = lerp(sdf1, sdf2, 0.);
 
 				return 0.5 - lerped_sdf;
 			}
 
 			float warp(float2 p, float df) {
+				#ifdef SDF
+					float2 off = (1.75 + 0.5*cos(GuiTime*TAU/60.0))*float2(-5, 5);
+					float2 op = p + lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(df));
+				#else
+					float2 op = p;
+				#endif
 				
-				float2 off = (1.75 + 0.5*cos(GuiTime*TAU/60.0))*float2(-5, 5);
-
-				float2 op = p + lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(df));
-				//float2 op = p + 0.5 + 0.5*tanh(df);
+				float2 v = float2(fbm5(op), fbm5(p+0.7*float2(1.0, 1.0)));
 				
-				float2 v = float2(fbm(op, 5), fbm(p+0.7*float2(1.0, 1.0), 5));
+				rot(v, 1.0+GuiTime*0.1*SpriteBorder[3].y);
 				
-				rot(v, 1.0+GuiTime*0.1);
+				float2 vv = float2(fbm7(op + 3.7*v), fbm7(op + -2.7*v.yx+0.7*float2(1.0, 1.0)));
 				
-				float2 vv = float2(fbm(op + 3.7*v, 7), fbm(op + -2.7*v.yx+0.7*float2(1.0, 1.0), 7));
-
-				rot(vv, -1.0+GuiTime*0.21315);
-					
-				return fbm(op + 1.4*vv, 3);
+				rot(vv, -1.0+GuiTime*0.21315*SpriteBorder[3].z);
+				
+				return fbm3(op + 1.4*vv);
 			}
 
 			float height(float2 p, float2 global_uv) {
-				float sdf = df(global_uv);
+				#ifdef SDF
+					float sdf = df(global_uv);
+				#else
+					float sdf = 1.0;
+				#endif
 				
-				float a = 0.005*GuiTime;
+				float a = 0.005*GuiTime*SpriteBorder[3].w;
 				p += 5.0*float2(cos(a), sin(a));
 				p *= 2.0;
 				p += 13.0;
@@ -434,30 +482,41 @@ PixelShader =
 				n.y = 2.0*eps.x;
 				n.z = height(p + eps.yx, global_uv) - height(p - eps.yx, global_uv);
 				
-				//return normalize(n);
 				
-				float sdf = -df(global_uv);
-				
-				float3 bordernormal = normalize( cross( n, float3(-1.0,0.0,-1.0) ) );
-				float3 innernormal = normalize( float3(-n.x,n.y,-n.z) );
-				
-				float mixValueBorder = smoothstep( 0.0, 0.5, sdf );
-				mixValueBorder = clamp(mixValueBorder, 0.0, 1.0);
-				
-				float mixValueInner = smoothstep( 0.0, 0.5, sdf );
-				
-				float3 border = normalize( lerp( n, bordernormal, mixValueBorder ) );
-				float3 inner  = normalize( lerp( n, innernormal, mixValueInner ) );
-				
-				return border;
+				#ifdef SDF
+					float sdf = -df(global_uv);
+					
+					float3 bordernormal = normalize( cross( n, float3(-1.0,0.0,-1.0) ) );
+					float3 innernormal = normalize( float3(-n.x,n.y,-n.z) );
+					
+					float mixValueBorder = smoothstep( 0.0, 0.5, sdf );
+					mixValueBorder = clamp(mixValueBorder, 0.0, 1.0);
+					
+					float mixValueInner = smoothstep( 0.0, 0.5, sdf );
+					
+					float3 border = normalize( lerp( n, bordernormal, mixValueBorder ) );
+					float3 inner  = normalize( lerp( n, innernormal, mixValueInner ) );
+					
+					return border;
+					
+				#else
+					return normalize(n);
+					
+				#endif
 			}
 
-			float3 postProcess(float3 col, float2 q)  {
-				col=pow(clamp(col,0.0,1.0),float3(0.75,0.75,0.75)); 
-				col=col*0.6+0.4*col*col*(3.0-2.0*col);  // contrast
+			float3 postProcess(float3 col, float2 q) {
+				float3 contrast = pow(clamp(col,0.0,1.0),float3(0.75,0.75,0.75));
+				contrast = contrast*0.6+0.4*contrast*contrast*(3.0-2.0*contrast);
+				col = lerp(col, contrast, SpriteModifyTexturesColors[3].r);  // contrast
+				
 				float sat = dot(col, float3(0.33,0.33,0.33));
-				col=lerp(col, float3(sat,sat,sat), -0.4);  // satuation
-				col*=0.5+0.5*pow(19.0*q.x*q.y*(1.0-q.x)*(1.0-q.y),0.7);  // vigneting
+				float3 saturated = lerp(col, float3(sat,sat,sat), -0.4);
+				col = lerp(col, saturated, SpriteModifyTexturesColors[3].g);  // saturation
+				
+				float vignette = 0.5+0.5*pow(19.0*q.x*q.y*(1.0-q.x)*(1.0-q.y),0.7);
+				col = lerp(col, col*vignette, SpriteModifyTexturesColors[3].b);  // vignetting
+				
 				return col;
 			}
 
@@ -468,16 +527,8 @@ PixelShader =
 				float2 p = -1. + 2. * q;
 				p.x*=SpriteSize.x/SpriteSize.y;
 				
-				float mouse_x = SpriteBorder[3].x*2. - 1.;
-				float mouse_y = 1. - SpriteBorder[3].y*2.;
-				
-				//float3 lp1 = float3(0.9, -0.5, 0.8);
-				////float3 lp1 = float3(0.75, -0.5, 0.35);
-				float3 lp1 = float3(mouse_x, -0.5, mouse_y);
-				
-				float3 lp2 = float3(-mouse_x, -1.5, -mouse_y);
-				////float3 lp2 = float3(-0.9, -1.5, 0.9);
-				//float3 lp2 = float3(-0.9, -2.0, -1.3);
+				float3 lp1 = SpriteBorder[1].xyz;
+				float3 lp2 = SpriteBorder[2].xyz;
 
 				float h = height(p,Input.UV0);
 				float3 pp = float3(p.x, h, p.y);
@@ -489,11 +540,8 @@ PixelShader =
 				float diff1 = max(dot(ld1, n), 0.0);
 				float diff2 = max(dot(ld2, n), 0.0);
 				
-				float3 baseCol = float3(1.0, 0.8, 0.6);
-				//float3 lightCol = baseCol.zyx;
-				float3 lightCol = float3(1.8, 0.0, 0.4);
-				//float3 baseCol = float3(0.6, 0.02, 0.1);
-				//float3 lightCol = float3(0.2, 1.3, 2.0);
+				float3 baseCol  = SpriteModifyTexturesColors[1].rgb;
+				float3 lightCol = SpriteModifyTexturesColors[2].rgb;
 
 				float oh = height(p + ll1*0.05*normalize(ld1.xz),Input.UV0);
 				const float level0 = 0.0;
@@ -502,12 +550,11 @@ PixelShader =
 				float3 scol = baseCol*(smoothstep(level0, level1, h) - smoothstep(level0, level1, oh));
 
 				float3 col = float3(0.0,0.0,0.0);
-				col += baseCol*pow(diff1, 6.0);
-				//col += baseCol*pow(diff1, 3.0);
+				col += baseCol*pow(diff1, SpriteBorder[1].w);
 				col += 0.1*baseCol*pow(diff1, 1.5);
 				col += 0.15*lightCol*pow(diff2, 8.0);
 				col += 0.015*lightCol*pow(diff2, 2.0);
-				col += scol*0.5;
+				col += scol*0.5*SpriteBorder[3].x;
 
 				col = postProcess(col, q);
 				
@@ -598,15 +645,30 @@ Effect PODSDFLoadingScreenDisabled
 	Defines = { "DISABLED" }
 }
 
+Effect PODCloth
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_CLOTH"
+}
+Effect PODClothDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_CLOTH"
+	
+	Defines = { "DISABLED" }
+}
+
 Effect PODSDFLoadingScreen2
 {
 	VertexShader = "VS_Default"
-	PixelShader = "PS_PODSDF_LOADINGSCREEN2"
+	PixelShader = "PS_CLOTH"
+	
+	Defines = { "SDF" }
 }
 Effect PODSDFLoadingScreen2Disabled
 {
 	VertexShader = "VS_Default"
-	PixelShader = "PS_PODSDF_LOADINGSCREEN2"
+	PixelShader = "PS_CLOTH"
 	
-	Defines = { "DISABLED" }
+	Defines = { "SDF" "DISABLED" }
 }

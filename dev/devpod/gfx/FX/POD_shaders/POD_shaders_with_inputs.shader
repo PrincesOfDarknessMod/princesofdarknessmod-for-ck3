@@ -53,6 +53,84 @@ PixelShader =
 			}
 		]]
 	}
+	
+	MainCode PS_PODFBM
+	{	
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// adapted from https://www.shadertoy.com/view/7tsfWS
+			
+			// float rand(float2 n) {
+			// 	return frac(cos(dot(n, float2(12.9898, 4.1414))) * 43758.5453);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float rand(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
+			}
+
+			float noise(float2 n) {
+				const float2 d = float2(0.0, 1.0);
+				float2 b = floor(n), f = smoothstep(float2(0.0,0.0), float2(1.0,1.0), frac(n));
+				return lerp(lerp(rand(b), rand(b + d.yx), f.x), lerp(rand(b + d.xy), rand(b + d.yy), f.x), f.y);
+			}
+
+			float fbm(float2 n) {
+				float total = 0.0, amplitude = 1.0;
+				for (int i = 0; i < 4; i++) {
+					total += noise(n) * amplitude;
+					n += n;
+					amplitude *= 0.5;
+				}
+				return total;
+			}
+
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y;
+
+				float2 coord = uv * SpriteSize.xy;
+				coord *= SpriteBorder[0].y; // spriteborder_top (zoom)
+				coord.x *= SpriteSize.x / SpriteSize.y;
+				coord.x *= SpriteBorder[0].z; // spriteborder_right (aspect ratio)
+
+				float time = GuiTime * SpriteBorder[0].x; // spriteborder_left (speed)
+
+				float3 c1 = SpriteModifyTexturesColors[1].rgb;
+				float3 c2 = SpriteModifyTexturesColors[2].rgb;
+				float3 c4 = SpriteModifyTexturesColors[3].rgb;
+				
+				const float3 c3 = float3(0.2, 0.2, 0.2);
+				const float3 c5 = float3(0.1, 0.1, 0.1);
+				const float3 c6 = float3(0.9, 0.9, 0.9);
+
+				float2 speed = SpriteBorder[4].xy; // vertical/horizontal speed
+				float shift = 1.6;
+				float2 p = coord.xy * 8.0 / SpriteSize.xx;
+				float q = fbm(p - time * 0.1);
+				float2 r = float2(fbm(p + q + time * speed.x - p.x - p.y), fbm(p + q - time * speed.y));
+				float3 c = lerp(c1, c2, fbm(p + r)) + lerp(c3, c4, r.x) - lerp(c5, c6, r.y);
+				float grad = 1.0-uv.y;
+
+				float3 col = c * cos(shift * uv.y);
+
+				float alphaChannels = lerp( 1., col.r, SpriteModifyTexturesColors[4].r );
+				alphaChannels *= lerp( 1., col.g, SpriteModifyTexturesColors[4].g );
+				alphaChannels *= lerp( 1., col.b, SpriteModifyTexturesColors[4].b );
+				
+				float alpha = SampleImageSprite(Texture,Input.UV0).a * SpriteTranslateRotateUVAndAlpha[4].w * alphaChannels;
+
+				alpha = lerp( alpha, alpha*grad, SpriteBorder[0].w ); // spriteborder_bottom (gradient strength)
+				return float4(col,alpha);
+			}
+		]]
+	}
 
 	MainCode PS_PODTernaryGraph
 	{
@@ -646,6 +724,19 @@ Effect PdxGuiPreMultipliedAlphaDisabled
 	PixelShader = "PS_Default"
 	BlendState = PreMultipliedAlpha
 	
+	Defines = { "DISABLED" }
+}
+
+Effect PODFBM
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODFBM"
+}
+
+Effect PODFBMDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODFBM"
 	Defines = { "DISABLED" }
 }
 
