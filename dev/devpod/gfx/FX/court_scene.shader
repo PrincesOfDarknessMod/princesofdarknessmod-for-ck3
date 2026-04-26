@@ -287,7 +287,7 @@ ConstantBuffer( 5 )
 	float4 vEyesPropertyMult;
 	float4 vHairPropertyMult;
 
-	float4  PatternColorOverrides[16];
+	float4  PatternColorOverrides[64];
 
 	int DecalCount;
 	int PreSkinColorDecalCount

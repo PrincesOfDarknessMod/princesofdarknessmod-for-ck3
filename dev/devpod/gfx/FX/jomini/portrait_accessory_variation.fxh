@@ -103,6 +103,7 @@ PixelShader =
 					{
 						// Select from 16-width color palette
 						float3 Sample;
+						// CfV (POD): using the older (pre-1.19) version of the script because the new one breaks our custom clothing colors
 						if ( PatternColorOverrides[MaskIndex + i].a > 0.0f )
 						{
 							Sample = PatternColorOverrides[MaskIndex + i].rgb;
@@ -140,12 +141,14 @@ PixelShader =
 				PatternProperties.r = 1.0f;
 
 				float RandomNumber = GetRandomNumber( Input.InstanceIndex );
+				// CfV (POD): using the older (pre-1.19) version of the script because the new one breaks our custom clothing colors
 				for( int i = 0; i < 4; ++i )
 				{
 					if( Mask[i] > 0.0f )
 					{
 						float OpacityMask = 0;
 						// CfV (POD)
+						// using the older (pre-1.19) version of the script because the new one breaks our custom clothing colors
 						SPatternOutput PatternOutput = ApplyPattern( Input.UV1, GetPatternDesc( Input.InstanceIndex, i ), RandomNumber, i, OpacityMask, PortraitEffect );
 
 						PatternDiffuse = lerp( PatternDiffuse, PatternOutput._Diffuse, Mask[i] * OpacityMask);
