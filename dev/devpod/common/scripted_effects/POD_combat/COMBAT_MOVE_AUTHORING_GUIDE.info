@@ -1,0 +1,710 @@
+# Combat-PoD Manual Move Authoring Guide
+
+This guide covers adding a new combat move
+---
+
+## The four artifacts every move needs
+
+Every combat move is glued together from four pieces:
+
+| # | Artifact | What it is | Where it lives |
+|---|---|---|---|
+| 1 | **A `POD_init_combat_move` call** | Builds the runtime story_cycle that holds the move's mechanics | `\common\scripted_effects\POD_combat\pod_combat_move_list_effects.txt` |
+| 2 | **A hidden decision** | Holds the unlock requirements (trait / faith / perk gates) | `\common\decisions\POD_Combat\pod_combat_move_decisions.txt` |
+| 3 | **Three localization keys** | Display name + tooltip + dummy stub | `\localization\english\gui\POD_combat_l_english.yml` |
+| 4 | **A texture reference** | Optional but recommended — visual icon for the loadout-editor card | One of the `@texture_*` constants at the top of `pod_combat_move_decisions.txt` |
+
+If any of #1, #2, or #3 is missing, the move either fails to load,
+fails to gate correctly, or shows broken text in the UI. #4 is
+cosmetic but hidden decisions without a `picture` show as a generic
+placeholder.
+
+---
+
+## Quick start: a minimal damage move
+
+This is the absolute smallest example — a vanilla physical attack
+called "Power Punch" that any character can use, deals 3 damage,
+costs 4 AP, and falls into the ATK category.
+
+### Step 1: hidden decision
+
+Append to `\common\decisions\POD_Combat\pod_combat_move_decisions.txt`
+
+```
+POD_combat_move_power_punch = {
+    picture = { reference = "gfx/interface/illustrations/decisions/decision_bloodsurge.dds" }
+    is_valid_showing_failures_only = {
+        always = yes
+    }
+    decision_group_type = hidden
+    ai_check_interval = 0
+    confirm_text = blank_line
+}
+```
+
+### Step 2: localization
+
+Append to `\localization\english\gui\POD_combat_l_english.yml`
+
+```yaml
+l_english:
+ POD_combat_move_power_punch:0 "Power Punch"
+ POD_combat_move_power_punch_desc:0 "[PODCombatMoveDesc('POD_combat_move_power_punch')]"
+ POD_combat_move_power_punch_tooltip:0 ""
+```
+
+The three keys are mandatory: name, `_desc` (which calls the macro that
+renders the rich tooltip card from the move's runtime variables), and
+`_tooltip` (an empty stub that suppresses an engine auto-lookup
+warning for hidden decisions).
+
+### Step 3: registration effect
+
+Create a new scripted effect file that registers your move:
+
+`\common\scripted_effects\POD_combat\pod_combat_move_list_effects.txt`
+
+```
+POD_initialize_custom_combat_moves = {
+    POD_init_combat_move = {
+        DECISION   = POD_combat_move_power_punch
+        SKILL_KEY  = power_punch
+        CATEGORY   = ATK
+        CONFIG     = base_physical
+        AP_COST    = 4
+        AI_WEIGHT  = 12
+        TARGETING  = single_enemy
+    }
+    scope:new_combat_move = {
+        POD_combat_move_set_hp_damage = { VALUE = 3 }
+    }
+}
+```
+
+Done. On the next game-start the move is created, added to the global
+`POD_combat_moves` list, and visible in the loadout editor — gated by
+the `always = yes` (anyone can equip it).
+
+---
+
+## The constructor: `POD_init_combat_move`
+
+Every move starts with one call to this. All seven parameters are
+**required**:
+
+| Parameter | Values | Purpose |
+|---|---|---|
+| `DECISION` | `POD_combat_move_<key>` | The hidden decision holding this move's unlock gate. Must match the decision you author in step 2. |
+| `SKILL_KEY` | lowercase identifier | Internal flag identifier. Matches the suffix of the decision name. Don't include `POD_combat_move_` prefix. |
+| `CATEGORY` | `ATK` / `DEF` / `CTL` / `PWR` | Loadout category. Caps at 4 equipped per category. Drives icon coloring and grouping. |
+| `CONFIG` | lowercase identifier | Section grouping in the loadout editor (e.g., `base_physical`, `celerity`, `bloodsorcery_advanced`). Free-form; pick something matching the move's flavor. |
+| `AP_COST` | integer 1-6 (typically) | Action-point cost of the move. Affordability is checked at click time. |
+| `AI_WEIGHT` | integer | Base AI selection weight. See "Choosing AI weights" below. |
+| `TARGETING` | one of the targeting flags | How the move picks its target. See targeting reference below. |
+
+After the constructor call, the body of `scope:new_combat_move = { ... }`
+is where all the optional setters go.
+
+### Targeting flags
+
+| Flag | Behavior |
+|---|---|
+| `single_enemy` | Hits the actor's currently selected enemy target. Most attack moves. |
+| `single_ally` | Hits a single ally on the actor's team. Most heal/buff moves that benefit a teammate. |
+| `single_pc` | Always targets slot 0 (the player character). Used by NPC moves that specifically protect or attack the PC. |
+| `self` | Targets the actor themselves. Self-buffs, defensive stances. |
+| `team_enemy` | AoE — hits every enemy in slots 5-9. |
+| `team_ally` | AoE — hits every ally in slots 1-4 (and slot 0 if applicable). |
+
+### Optional: target priority hint
+
+`single_enemy` and `single_ally` moves can specify which target to
+auto-pick when fired by AI. Add this setter:
+
+```
+POD_combat_move_set_target_priority = { TYPE = wounded }
+```
+
+| `TYPE` value | Picks |
+|---|---|
+| `wounded` | The target with the most wounds (lowest HP fraction) |
+| `healthy` | The target with the fewest wounds |
+| `threat` | The highest-prowess opposing combatant |
+| `round_robin` | Spreads picks across enemies for diversity |
+
+**Without** a `target_priority` setter, the move uses the actor's
+turn-start target. Note: target-aware AI scoring modifiers 
+(HP-finish bonuses, hit-chance penalties) are gated to default-targeting moves
+
+---
+
+## Setter reference
+
+All setters go inside `scope:new_combat_move = { ... }` after the
+constructor call. Order doesn't matter, but grouping by category
+(costs, damage, buffs, flags) keeps the entry readable.
+
+You can use raw integers anywhere a value is expected, OR you can
+reference one of the `@-constants` defined at the top of
+`pod_combat_move_list_effects.txt` (e.g. `@damage_minor` = 2,
+`@ap_cost_medium` = 3). The constants are just convenience macros for
+parse-time substitution; both forms work identically.
+
+### Costs
+
+| Setter | Parameter | Affects |
+|---|---|---|
+| `POD_combat_move_set_energy_cost = { VALUE = N }` | integer | Drains the actor's splat-specific energy pool — Blood for vampires, Gnosis for shifters, Pathos for wraiths, Glamour for changelings, Resolve for hunters/mortals, etc. The `required_trait` gate on the hidden decision should ensure the actor has the right pool. |
+| `POD_combat_move_set_stress_cost = { VALUE = N }` | integer | Adds Mental Strain to the PC. PC-only — AI doesn't pay this. |
+| `POD_combat_move_set_gold_cost = { VALUE = N }` | integer | Subtracts gold. PC-only. |
+| `POD_combat_move_set_prestige_cost = { VALUE = N }` | integer | Subtracts prestige. PC-only. |
+| `POD_combat_move_set_piety_cost = { VALUE = N }` | integer | Subtracts piety. PC-only. |
+
+### Damage and damage routing
+
+| Setter | Parameter | Affects |
+|---|---|---|
+| `POD_combat_move_set_attack_type = { VALUE = X }` | `physical` / `supernatural` / `mental` | Pipeline shape. **Physical** = full pipeline (stealth/dodge/hit-roll/guard/soak). **Supernatural** = stealth + dodge only (auto-hit, skips guard, skips soak roll's guard variants). **Mental** = no HP damage path; use `morale_damage` instead. **Default if omitted: physical.** Don't emit this for physical moves — leaving it absent is the canonical way to declare physical. |
+| `POD_combat_move_set_damage_source = { VALUE = X }` | `fire` / `cold` / `lightning` / `sun` / `silver` / `gold` / `holy` / `balefire` | Damage flavor flag, routes to the matching PoD death_reason. Forces aggravated wounds against vulnerable splats — silver vs werewolves, sun vs vampires, holy vs the unholy, etc. **Omit for generic damage** with no special routing. |
+| `POD_combat_move_set_hp_damage = { VALUE = N }` | integer | HP damage dealt to the target. Defaults to superficial. |
+| `POD_combat_move_set_damage_type_aggravated = yes` | (no params) | Forces the move's HP damage to land as aggravated regardless of source. Use for moves that should be unsoakable / hard to heal. |
+| `POD_combat_move_set_morale_damage = { VALUE = N }` | integer | Morale damage. Routes through its own auto-hit pipeline; ignores `attack_type`/`damage_source`. Spills over as Mental Strain on the target character (`pod_combat_morale_stress_multiplier` = 5x). |
+| `POD_combat_move_set_self_damage = { VALUE = N }` | integer | HP damage dealt to the **actor** (themselves) when the move fires. Always superficial, soakable, ignores stances. Used for reckless attacks. |
+
+### Healing
+
+| Setter | Parameters | Affects |
+|---|---|---|
+| `POD_combat_move_set_hp_heal = { VALUE = N TYPE = X }` | integer + `superficial` / `aggravated` | Heals the target. `superficial` only refills below the aggravated ceiling; `aggravated` reduces aggravated wound boxes first then spills into superficial. |
+| `POD_combat_move_set_morale_heal = { VALUE = N }` | integer | Restores morale. Caps at the morale max (20). |
+
+### Tier buffs and debuffs
+
+Three magnitudes (small/medium/large = ±10/±20/±30) × two durations
+(round / combat) × two stats (soak / hit) × two directions (buff /
+debuff) = 8 setters. Each takes a `TIER` of `1`, `2`, or `3`.
+
+```
+POD_combat_move_set_soak_buff_round   = { TIER = 2 }   # +20 soak this round only
+POD_combat_move_set_soak_buff_combat  = { TIER = 3 }   # +30 soak for the whole combat
+POD_combat_move_set_soak_debuff_round = { TIER = 1 }   # -10 soak on target this round
+POD_combat_move_set_soak_debuff_combat = { TIER = 2 }
+POD_combat_move_set_hit_buff_round    = { TIER = 1 }   # +10 hit chance this round
+POD_combat_move_set_hit_buff_combat   = { TIER = 2 }
+POD_combat_move_set_hit_debuff_round  = { TIER = 1 }   # -10 hit chance on target this round
+POD_combat_move_set_hit_debuff_combat = { TIER = 2 }
+```
+
+A higher tier overwrites a lower; reapplying the same tier or below
+is blocked by the redundancy gate (the loadout SGUI greys the button,
+the AI selector excludes the candidate). Buffs apply to the actor,
+debuffs to the target.
+
+### Parametric non-tier modifiers
+
+| Setter | Parameter | Affects |
+|---|---|---|
+| `POD_combat_move_set_ap_gain = { VALUE = N }` | integer | Grants the actor +N AP this turn. Stacks across uses. |
+| `POD_combat_move_set_ap_drain = { VALUE = N }` | integer | Drains N AP from the target's next turn (min 1 AP after drain). |
+| `POD_combat_move_set_initiative_debuff = { VALUE = N }` | integer | Subtracts N from the target's next-round initiative roll. |
+| `POD_combat_move_set_retaliate_damage = { VALUE = N }` | integer | Sets the damage value the actor deals back when their `retaliate_if_hit` or `retaliate_if_missed` flag fires. **Pair this with `POD_combat_move_set_flag = { NAME = retaliate_if_hit }` (or `_if_missed`)** — without the flag, the retaliate_damage is set but nothing reads it. |
+| `POD_combat_move_set_retaliate_agg = yes` | (no params) | Marks retaliation damage as aggravated. |
+
+### Presence flags
+
+A presence flag is just "this attribute is set." Use the generic
+setter:
+
+```
+POD_combat_move_set_flag = { NAME = bypass_dodge }
+```
+
+Available flag names:
+
+| Flag | Effect |
+|---|---|
+| `set_guard` | Activates Guard stance on the actor (next physical attack against them is blocked). |
+| `dodge` | Activates Dodge stance (next attack of any type auto-misses). |
+| `stealth` | Activates Stealth (next incoming attack auto-misses + actor's next attack gets +30 hit). |
+| `bypass_guard` | This attack ignores the target's Guard stance. |
+| `bypass_dodge` | This attack ignores the target's Dodge stance. |
+| `bypass_stealth` | This attack breaks the target's Stealth (and reverses the +30 hit bonus). |
+| `remove_guard` | Strips the target's Guard stance without dealing damage. AI gets +15 weight when target is guarding. |
+| `retaliate_if_hit` | Sets a counter-attack stance — if the actor is hit, they deal `retaliate_damage` back to the attacker. |
+| `retaliate_if_missed` | Same but fires when the attacker misses. |
+| `retaliate_agg` | Equivalent to the `set_retaliate_agg` setter. |
+| `drain` | Marks an `hp_heal` as life-stealing — the heal only triggers if the attack actually landed. Pair with `hp_damage` and `hp_heal`. |
+| `is_starter_move` | Marks the move as part of the PC's default loadout. The configure decision seeds these. Also signals to the AI selector "this is a generic baseline move" — the +10 trait-gate bonus does NOT apply. Reserve for the few baseline starters every character should have. |
+
+---
+
+## The hidden decision: unlock requirements
+
+Each move's hidden decision is the only place where unlock
+requirements live. The runtime checks `can_execute_decision` against
+this decision before allowing the move to be equipped or executed.
+
+### Minimal structure
+
+```
+POD_combat_move_<skill_key> = {
+    picture = { reference = @<texture_constant> }
+    is_valid_showing_failures_only = {
+        # Unlock conditions — typically trait / perk / faith checks.
+        # Use `always = yes` for moves with no requirements.
+    }
+    decision_group_type = hidden
+    ai_check_interval = 0
+    confirm_text = blank_line
+}
+```
+
+### Pictures (texture constants)
+
+The four texture `@-constants` defined at the top of
+`pod_combat_move_decisions.txt` map one-to-one with combat
+categories:
+
+| Constant | Image |
+|---|---|
+| `@texture_atk` | Bloodsurge — red/aggressive, for ATK moves |
+| `@texture_def` | Warding evil — blue/defensive, for DEF moves |
+| `@texture_ctl` | Personal religious — yellow/intricate, for CTL moves |
+| `@texture_pwr` | Blood moon — purple/ominous, for PWR moves |
+
+### Common gate patterns
+
+```
+# No requirements — anyone can equip
+is_valid_showing_failures_only = {
+    always = yes
+}
+
+# Trait + perk gate (typical discipline move)
+is_valid_showing_failures_only = {
+    has_trait = celeritydiscipline
+    has_perk = swift_strike_perk
+}
+
+# Splat aggregate (anyone with any fera trait)
+is_valid_showing_failures_only = {
+    POD_splat_is_fera_trigger = yes
+}
+
+# Faith gate (covenant-specific moves)
+is_valid_showing_failures_only = {
+    faith = faith:blackfury
+    has_perk = primal_howl_perk
+}
+
+# Multi-condition (advanced trait + specific perk)
+is_valid_showing_failures_only = {
+    has_trait = serpentisadvanced
+    has_perk = breath_of_the_basilisk_perk
+}
+```
+
+The `is_valid_showing_failures_only` block tells CK3 to display *why*
+the gate failed in the loadout editor's tooltip — players see exactly
+which trait or perk they're missing. Use plain `is_valid` only if you
+want the gate to be silent.
+
+---
+
+## Localization keys
+
+Three keys per move, in any `.yml` file under
+`devpod/localization/english/`. The file must start with a UTF-8 BOM
+and the `l_english:` header.
+
+```yaml
+l_english:
+ POD_combat_move_<skill_key>:0 "Display Name"
+ POD_combat_move_<skill_key>_desc:0 "[PODCombatMoveDesc('POD_combat_move_<skill_key>')]"
+ POD_combat_move_<skill_key>_tooltip:0 ""
+```
+
+| Key | What it does |
+|---|---|
+| Bare `POD_combat_move_<skill_key>` | Short display name. Shown in the loadout editor and the move bar. AP cost is appended automatically by `POD_combat_move_title`, so don't include it. |
+| `_desc` | Decision description. CK3 auto-resolves `<decision_id>_desc` when rendering the loadout editor's full card; the macro inside renders the move's costs, damage, flags, etc. live from the runtime story_cycle variables. **Always use the macro form shown above** — writing custom prose here would override the dynamic stat block. |
+| `_tooltip` | Empty stub. Hidden decisions never surface a tooltip in the UI, but the engine auto-looks-up `<decision_id>_tooltip` and logs a warning if the key doesn't exist. The empty string silences that warning. |
+
+---
+
+## Worked example: a discipline attack
+
+Let's walk through `Breath of the Basilisk`, a real Serpentis-advanced
+move that's an aggravated AoE supernatural attack. Looking at it gives
+a complete reference for a complex move.
+
+### Constructor
+
+```
+POD_init_combat_move = {
+    DECISION   = POD_combat_move_breath_of_basilisk
+    SKILL_KEY  = breath_of_basilisk
+    CATEGORY   = PWR
+    CONFIG     = serpentis
+    AP_COST    = @ap_cost_maximum  # 6
+    AI_WEIGHT  = 12
+    TARGETING  = team_enemy
+}
+```
+
+### Setters
+
+```
+scope:new_combat_move = {
+    POD_combat_move_set_energy_cost = { VALUE = @energy_cost_minor }  # 2 Blood
+    POD_combat_move_set_attack_type = { VALUE = supernatural }
+    POD_combat_move_set_hp_damage = { VALUE = @damage_minor }           # 2 damage per enemy
+    POD_combat_move_set_damage_type_aggravated = yes
+    POD_combat_move_set_flag = { NAME = bypass_dodge }
+}
+```
+
+### Hidden decision
+
+```
+POD_combat_move_breath_of_basilisk = {
+    picture = { reference = @texture_pwr }
+    is_valid_showing_failures_only = {
+        has_trait = serpentisadvanced
+        has_perk = breath_of_the_basilisk_perk
+    }
+    decision_group_type = hidden
+    ai_check_interval = 0
+    confirm_text = blank_line
+}
+```
+
+### Localization
+
+```yaml
+ POD_combat_move_breath_of_basilisk:0 "Breath of the Basilisk"
+ POD_combat_move_breath_of_basilisk_desc:0 "[PODCombatMoveDesc('POD_combat_move_breath_of_basilisk')]"
+ POD_combat_move_breath_of_basilisk_tooltip:0 ""
+```
+
+### How it plays
+
+A Setite vampire with Serpentis at advanced level, who has unlocked
+the breath_of_the_basilisk perk, sees this in their PWR loadout slot.
+Costs 6 AP (a full turn) + 2 Blood. Deals 2 aggravated damage to
+*every* enemy in slots 5-9, supernatural pipeline so it auto-hits
+through their hit chance, and ignores their Dodge stance. Excellent
+crowd-clear at the cost of being prohibitively expensive on a
+single-enemy fight.
+
+---
+
+## Worked example: a defensive buff
+
+`Toughness` (Fortitude discipline) — a self-only large soak buff,
+short-duration.
+
+```
+POD_init_combat_move = {
+    DECISION   = POD_combat_move_toughness
+    SKILL_KEY  = toughness
+    CATEGORY   = DEF
+    CONFIG     = fortitude
+    AP_COST    = @ap_cost_minor  # 2
+    AI_WEIGHT  = 8
+    TARGETING  = self
+}
+scope:new_combat_move = {
+    POD_combat_move_set_soak_buff_round = { TIER = 3 }   # +30 soak this round only
+}
+```
+
+```
+POD_combat_move_toughness = {
+    picture = { reference = @texture_def }
+    is_valid_showing_failures_only = {
+        has_trait = fortitudediscipline
+        has_perk = toughness_perk
+    }
+    decision_group_type = hidden
+    ai_check_interval = 0
+    confirm_text = blank_line
+}
+```
+
+```yaml
+ POD_combat_move_toughness:0 "Toughness"
+ POD_combat_move_toughness_desc:0 "[PODCombatMoveDesc('POD_combat_move_toughness')]"
+ POD_combat_move_toughness_tooltip:0 ""
+```
+
+A Fortitude vampire spends 2 AP for a turn of +30 soak — letting them
+weather one big hit, then the buff fades. Pairs well with a defensive
+turn (Guard, Dodge) for an even stiffer-armoured stance.
+
+---
+
+## Worked example: a vampiric drain attack
+
+A made-up "Soulrend" move — physical attack that heals you on hit,
+gated behind Vicissitude (a hypothetical setup):
+
+```
+POD_init_combat_move = {
+    DECISION   = POD_combat_move_soulrend
+    SKILL_KEY  = soulrend
+    CATEGORY   = ATK
+    CONFIG     = vicissitude_advanced
+    AP_COST    = 4
+    AI_WEIGHT  = 12
+    TARGETING  = single_enemy
+}
+scope:new_combat_move = {
+    POD_combat_move_set_energy_cost = { VALUE = 1 }
+    POD_combat_move_set_hp_damage = { VALUE = 3 }
+    POD_combat_move_set_hp_heal = { VALUE = 2 TYPE = superficial }
+    POD_combat_move_set_flag = { NAME = drain }
+}
+```
+
+The `drain` flag gates the heal on the attack actually landing — if
+the swing misses, dodges, or is stealth-evaded, no heal happens. The
+loadout editor's tooltip swaps "Heal 2" → "Drain 2" when the `drain`
+flag is set, so players see at a glance that this is a vampiric heal,
+not an unconditional one.
+
+---
+
+## Choosing values: guidelines from existing moves
+
+### AP cost
+
+| Cost | Use for | Examples in current roster |
+|---|---|---|
+| 1-2 | Light moves you might use multiple per turn | Quick Jab (3), most ap_gain utilities |
+| 3 | Standard moves — bread and butter | Strike (4 actually), Feint, Intimidate, most discipline taps |
+| 4 | Bigger swings — typically 1-2 per turn | Heavy attacks, mid-tier disciplines |
+| 5 | Heavy moves | Some combat-duration buffs, intimidating shouts |
+| 6 | Signature ultimates — one per turn | Reckless Charge, Heavy Blow, AoE disciplines like Breath of the Basilisk |
+
+The action economy is 6 AP per turn, so AP 6 means the entire turn.
+AP 3 is half-turn and lets you mix two medium moves. AP 1-2 lets
+chains of cheap actions. Don't make every move AP 6 — you flatten the
+tactical decision space.
+
+### Energy cost
+
+| Cost | Use for |
+|---|---|
+| 2 | Most discipline moves at base level |
+| 4 | Advanced disciplines or signature uses |
+
+### HP damage
+
+| Damage | Use for | Notes |
+|---|---|---|
+| 1 | Light/cheap moves | Quick Jab template |
+| 2 | Standard | Strike (the basic starter), most disciplines |
+| 3 | Bigger moves | Heavy gifts, weapon strikes with bonus damage source |
+| 4 | Heavy | Heavy Blow, signature attacks |
+| 5+ | Exceptional — should have AP/energy cost matching | Reckless Charge (5 + self_damage 1), ultimate disciplines |
+
+Wound tracks are 5-7 boxes; a 5-damage hit can KO a tough character
+in one shot if it lands. Don't ladder damage faster than you ladder
+costs or you create dominant strategies.
+
+### Morale damage
+
+Lower than HP damage typically — morale max is 20 but morale damage
+sources are more plentiful. Standard range is 1-3, with 4+ for
+signature mental attacks (Intimidate-style moves).
+
+### AI weight
+
+| Weight | Use for |
+|---|---|
+| 8 | DEF moves — defensive moves are picked situationally, not as defaults |
+| 10 | CTL moves — control/utility |
+| 12 | PWR moves — situational power plays |
+| 15 | ATK moves — primary damage dealing |
+
+These match the `AI_WEIGHT_DEFAULTS` map in the generator. Hand-authored
+moves should follow the same convention so the AI behaves predictably.
+Override only when the move is exceptionally strong or weak relative to
+its category baseline (e.g., a 6-AP signature move might warrant AI_WEIGHT
+20 to make sure the AI considers it).
+
+### Tier magnitudes
+
+Currently fixed at +10 / +20 / +30 (small/medium/large). Buffs at
+combat-duration are stronger than round-duration because they persist
+across multiple turns; round-duration buffs reward burst-turn
+coordination but don't snowball.
+
+### Self-damage
+
+Pair with high HP damage — the trade is "bigger hit, you eat some
+damage." Reckless Charge is the canonical pattern: 5 damage to target
++ 1 self damage at AP 6.
+
+---
+
+## Adding the move to a loadout
+
+A move that's been registered exists in the global catalogue, but it's
+not in any character's `pod_combat_loadout` list yet. There are three
+ways to get it onto someone's bar:
+
+### Player-side: configure decision
+
+The simplest path. The PC opens the loadout editor (`Configure Combat
+Skills` decision), unlocks the move via the standard rules (the
+trait/perk gate the hidden decision specifies), and equips it manually
+up to the 4-per-category cap.
+
+### Default starter
+
+Set the `is_starter_move` flag on the move:
+
+```
+POD_combat_move_set_flag = { NAME = is_starter_move }
+```
+
+`POD_apply_default_combat_loadout` (the default-seed effect called
+from the configure decision when a character has nothing equipped)
+adds every move with this flag to the loadout. Currently the 8 base
+moves carry this — adding a 9th would bring the player above the
+4-per-category cap and the seed would be partial.
+
+**Don't make custom moves starters** unless they're meant to be in
+every character's baseline kit. For class-specific moves, the AI
+selector also gives a +10 weight bonus to non-starters (it treats
+them as "class repertoire"); a starter-flagged custom move loses that
+bonus.
+
+### Programmatic addition
+
+If you want to grant the move via an event or a one-off effect (e.g.
+"reading this tome unlocks Stealth Strike"), add directly to the
+character's loadout list:
+
+```
+add_to_variable_list = {
+    name   = pod_combat_loadout
+    target = character:POD_wraith_01.var:POD_combat_move_<skill_key>
+}
+```
+
+The catalogue indexes each story by its decision name on Charon
+(`character:POD_wraith_01`), so any character can reach any move via
+the same lookup. Apply this in an event's `option = { ... }` effect
+block. The PC's category cap is enforced only by the configure SGUI;
+direct list-additions bypass the cap, so use that flexibility
+deliberately.
+
+---
+
+## Common patterns / recipes
+
+### "I want a basic single-enemy attack"
+
+Set `attack_type = physical` (or omit), `hp_damage`, and TARGETING =
+single_enemy. Damage source optional.
+
+### "I want a discipline attack" (vampire/fera/wraith etc.)
+
+Same as above but add `energy_cost`, set `attack_type = supernatural`
+to skip guard, and gate the decision on the relevant
+trait+perk. Often pair with a `damage_source` flavor (fire for Lure of
+Flames, etc.) to make it aggravated against vulnerable splats.
+
+### "I want an AoE attack"
+
+Switch TARGETING to `team_enemy`. The hp_damage value applies to *each*
+enemy hit. Cost should reflect that — typically 5-6 AP and 2 energy.
+Consider `bypass_dodge` on AoE moves so a single dodging enemy doesn't
+dodge the whole sweep on themselves only.
+
+### "I want a heal-on-hit (vampiric)"
+
+Pair `hp_damage` with `hp_heal` and add the `drain` flag. Without
+`drain`, the heal applies unconditionally even if the swing misses —
+turning the move into a damage-and-free-heal that's almost always
+worth using.
+
+### "I want a defensive stance"
+
+TARGETING = self, set the appropriate stance flag (`set_guard`,
+`dodge`, or `stealth`). Don't combine with damage — stances are
+"spend AP to be safer next turn" plays. Cost typically 2-3 AP.
+
+### "I want a buff that lasts the whole fight"
+
+Use `*_combat` tier setters instead of `*_round`. Combat-duration
+buffs are pricier (they don't refresh) — typically 3-4 AP for a
+medium tier or 4-5 AP for large.
+
+### "I want a debuff against the target"
+
+Use `_debuff_round` or `_debuff_combat` tier setters with TARGETING =
+single_enemy. AI scoring already understands tier debuffs and will
+pick them when stacking is favorable.
+
+### "I want a counter-attack stance"
+
+Set `set_guard` (or just leave actor unguarded for a riskier setup),
+add `retaliate_if_hit` flag, and set `retaliate_damage`. The actor
+counter-attacks anyone who hits them next turn. Optional: also set
+`retaliate_agg` for nasty bites/claws that wound aggravatedly.
+
+### "I want a 'finishing' move that's only useful at low HP"
+
+There's no built-in conditional damage scaling, but you can set high
+hp_damage + high AP cost to make it a closer move naturally. The AI's
+HP-finish bonus (+25 when target has ≤1 HP left) will already make
+it pick this when it's relevant.
+
+### "I want a cantrip that gives me extra AP"
+
+TARGETING = self, set `ap_gain` parameter. Don't make these cheaper
+than the AP_COST or you create infinite loops — `ap_gain N` at
+`ap_cost N` is a wash; make it `ap_cost N - 1` at most. Or attach
+`ap_gain` to a damage move so it's an "efficient" attack rather than
+a free-AP exploit.
+
+---
+
+## Validation checklist
+
+Before testing in-game, verify:
+
+- [ ] The hidden decision name matches the constructor's `DECISION` parameter exactly.
+- [ ] The `SKILL_KEY` matches the suffix of the decision (e.g. decision `POD_combat_move_foo`, skill_key `foo`).
+- [ ] All three loc keys exist (`<key>`, `<key>_desc`, `<key>_tooltip`).
+- [ ] The `_desc` loc uses the macro: `[PODCombatMoveDesc('POD_combat_move_<key>')]`.
+- [ ] The constructor block has all 7 parameters set.
+- [ ] If the move deals HP damage, you set `hp_damage`. If it heals, you set `hp_heal` (with `TYPE`). If it buffs, you set a tier. If it stances, you set a flag. (A move with no setters compiles but does nothing when fired.)
+- [ ] `team_enemy` / `team_ally` AoE moves use a damage value designed for *per-enemy* damage, not summed.
+- [ ] If you set `retaliate_damage`, you also set the matching `retaliate_if_hit` or `retaliate_if_missed` flag.
+- [ ] If the move is supernatural (auto-hit), you set `attack_type = supernatural` AND removed any hit-chance-related comments (a low hit chance won't matter — the move auto-hits).
+
+In-game smoke test:
+
+1. Load a fresh save with a character whose traits/perks satisfy your gate.
+2. Open the Configure Combat Skills decision. The move should appear in the right column under your `CONFIG` section header.
+3. Equip it. The card on the left side updates with your move.
+4. Start a debug combat with the character. The move appears in the action bar.
+5. Click the move. The expected effects fire — damage rolls, heal applies, buff stacks, etc.
+6. Check the combat log for the resolution line.
+
+If the move doesn't appear:
+
+- Check the error log for unresolved decisions or loc keys.
+- Verify the on_action wired your registration effect to game start.
+- Confirm the gate isn't excluding your test character (try `always = yes` to isolate).
+
+If the tooltip looks wrong:
+
+- The `_desc` loc must call `PODCombatMoveDesc` — no other text.
+- Reload the game (the macro reads the runtime story; if the move was registered late, the tooltip won't render until the catalogue is rebuilt).

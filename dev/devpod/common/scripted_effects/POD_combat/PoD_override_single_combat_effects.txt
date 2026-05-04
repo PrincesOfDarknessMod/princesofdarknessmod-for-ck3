@@ -1,0 +1,847 @@
+﻿##################################################
+# Combat-PoD — Single Combat Effect Override
+##################################################
+#
+# Redirects the PoD/vanilla duel system to the Combat-PoD minigame when
+# (a) exactly one side is the player character AND (b) the
+# `pod_combat_enabled` game rule is on AND (c) the duel is not
+# story-predetermined. Four fall-through paths route to PoD's original
+# logic (single-combat) or the group auto-resolve branch (group-combat):
+#   - NPC-vs-NPC duels — preserves base-game balance for fights the player
+#     never sees.
+#   - PC-vs-PC duels — the minigame UI is single-perspective; in MP only
+#     one PC would see it, so we deterministically resolve instead.
+#   - Any duel when `pod_combat_enabled` is off — lets the player disable
+#     the minigame globally without breaking duel events. Anyone debugging
+#     "why isn't the minigame firing?" should check this rule first.
+#   - FIXED = sc_attacker / sc_defender duels — vanilla honors the
+#     predetermined winner correctly; the minigame's in-fight outcome
+#     would otherwise contradict the story-specified result. Group-combat
+#     equivalent: the auto-resolve branch checks FIXED before its
+#     prowess coin flip, so PC-involved group fights with FIXED skip the
+#     minigame and pick the listed side.
+#
+# The override accepts the same parameters as the original:
+#   $SC_INITIATOR$, $SC_ATTACKER$, $SC_DEFENDER$
+#   $FATALITY$, $FIXED$, $LOCALE$
+#   $OUTPUT_EVENT$, $INVALIDATION_EVENT$
+#
+# For PC-involved duels the minigame handoff stashes the entire caller
+# context (sc_* refs, rule flags, follow-up event ID, parent-event aliases)
+# on a POD_combat_sc_context story_cycle anchored on Charon. The PC carries
+# a single pointer variable (pod_combat_sc_context → the story). When combat
+# ends, pod_combat_end_combat_effect fires pod_combat.9999 immediately —
+# that event reads through the pointer, restores all scopes from the story's
+# variables, applies DEATH-ONLY outcomes, fires the original PoD follow-up,
+# and cleans up by ending the story plus removing the one pointer var.
+# Wounds were already written back to PoD health tracks during combat by
+# pod_combat_apply_nonfatal_effect (called from pod_combat_end_combat_effect
+# BEFORE pod_combat.9999 fires). The event explicitly does NOT re-apply
+# wounds.
+##################################################
+
+configure_start_single_combat_effect = {
+	# ── Part 1: PoD-standard scope setup (identical to original) ──
+	$SC_INITIATOR$ = { save_scope_as = sc_initiator }
+	$SC_ATTACKER$ = { save_scope_as = sc_attacker }
+	$SC_DEFENDER$ = { save_scope_as = sc_defender }
+	if = {
+		limit = { exists = scope:sc_finished }
+		clear_saved_scope = sc_finished
+	}
+	save_scope_value_as = {
+		name = follow_up_event
+		value = event_id:$OUTPUT_EVENT$
+	}
+	save_scope_value_as = {
+		name = invalidation_event
+		value = event_id:$INVALIDATION_EVENT$
+	}
+	# Save FIXED here (in addition to the per-branch saves below)
+	# so the Part-3 gate can read scope:fixed to route
+	# story-predetermined duels through PoD's vanilla body. The
+	# minigame can't reliably rig itself to match a specified
+	# winner without undermining player agency, so we hand FIXED
+	# duels back to vanilla instead — which already implements the
+	# "force the listed side to win" semantics correctly.
+	save_scope_value_as = { name = fixed value = flag:$FIXED$ }
+
+	# ── Part 2: Self-match invalidation (same as original) ──
+	if = {
+		limit = { scope:sc_attacker = scope:sc_defender }
+		scope:sc_initiator = {
+			trigger_event = { saved_event_id = scope:invalidation_event }
+		}
+		error_log = debug_log.single_combat_setup.attacker_and_defender_same_person
+		debug_log = debug_log.single_combat_setup.attacker_and_defender_same_person.notice
+		debug_log_scopes = yes
+	}
+
+	# ── Part 3: PC-involved branch — launch the Combat-PoD minigame ──
+	# Only active when the pod_combat_system game rule is enabled (default).
+	# When disabled, falls through to Part 4 which runs PoD's original
+	# vanilla duel logic for all combats including PC-involved ones.
+	# Also falls through when FIXED specifies a predetermined winner —
+	# vanilla honors FIXED by forcing the listed side to win, while the
+	# minigame's in-fight outcome would override the story.
+	else_if = {
+		limit = {
+			has_game_rule = pod_combat_enabled
+			# Exactly one side is PC. PC-vs-PC duels can't run the
+			# minigame — its UI is single-perspective and only one
+			# PC would see it. Route them to the vanilla body instead.
+			OR = {
+				AND = {
+					scope:sc_attacker = { is_ai = no }
+					scope:sc_defender = { is_ai = yes }
+				}
+				AND = {
+					scope:sc_attacker = { is_ai = yes }
+					scope:sc_defender = { is_ai = no }
+				}
+			}
+			# Guard against re-entry if a previous combat somehow left state.
+			scope:sc_attacker = { NOT = { has_variable = pod_combat_active } }
+			scope:sc_defender = { NOT = { has_variable = pod_combat_active } }
+			# Don't intercept story-predetermined duels — PoD's vanilla
+			# body in Part 4 already honors FIXED correctly.
+			NOT = { scope:fixed = flag:sc_attacker }
+			NOT = { scope:fixed = flag:sc_defender }
+		}
+		hidden_effect = { remove_single_combat_info_effect = yes }
+		scope:sc_attacker = { set_variable = { name = engaged_in_single_combat value = yes } }
+		scope:sc_defender = { set_variable = { name = engaged_in_single_combat value = yes } }
+
+		# Preserve the rules as scope values for any downstream code that
+		# inspects them (hold-court/duel event descriptions, etc.).
+		save_scope_value_as = { name = fatality value = flag:$FATALITY$ }
+		save_scope_value_as = { name = fixed    value = flag:$FIXED$ }
+		save_scope_value_as = { name = locale   value = flag:$LOCALE$ }
+
+		# Fera shapeshifting and discipline combat buffs are handled inside
+		# pod_combat_init_slot_from_character_effect for all combatants.
+		# The PC is excluded from auto-shift (they may prefer human form
+		# or have already shifted manually).
+
+		# Dispatch to the minigame launcher. One branch per side so the
+		# stash + pod_combat_initialize_effect run in the PC's scope.
+		if = {
+			limit = { scope:sc_attacker = { is_ai = no } }
+			scope:sc_attacker = {
+				pod_combat_sc_launch_minigame_effect = {
+					OPPONENT = scope:sc_defender
+					OUTPUT_EVENT = $OUTPUT_EVENT$
+					INVALIDATION_EVENT = $INVALIDATION_EVENT$
+					FATALITY = $FATALITY$
+					FIXED = $FIXED$
+					LOCALE = $LOCALE$
+				}
+			}
+		}
+		else = {
+			# PC is the defender. (PC-vs-PC duels are excluded by the
+			# limit clause above and routed to vanilla instead.)
+			scope:sc_defender = {
+				pod_combat_sc_launch_minigame_effect = {
+					OPPONENT = scope:sc_attacker
+					OUTPUT_EVENT = $OUTPUT_EVENT$
+					INVALIDATION_EVENT = $INVALIDATION_EVENT$
+					FATALITY = $FATALITY$
+					FIXED = $FIXED$
+					LOCALE = $LOCALE$
+				}
+			}
+		}
+	}
+
+	# ── Part 4: Fall-through branch — PoD's original duel body, ADAPTED ──
+	# Mostly a port of PoD's original `if = { limit = attacker != defender }`
+	# clause (minus the scope setup ran above). Two deliberate
+	# adaptations:
+	#   1. The fera shapeshift branches at lines ~221 and ~232 carry an
+	#      `is_ai = yes` guard so PC-side fera don't auto-shapeshift in
+	#      this fallback path. 
+	#   2. Signature-weapon and shirtlessness setup were lightly
+	#      reorganized to fold cleanly with the scope-setup hoisted.
+	# This branch fires for AI-vs-AI duels (preserved verbatim semantics
+	# from PoD), for PC-vs-PC duels (the minigame can't run a UI for two
+	# PCs simultaneously), for PC duels when `pod_combat_enabled` is off
+	# (the game-rule-disabled path), AND for PC duels with FIXED set so
+	# the story-specified winner is honored. The legacy body implements
+	# all four cases consistently.
+	else = {
+		hidden_effect = { remove_single_combat_info_effect = yes }
+		scope:sc_attacker = {
+			set_variable = {
+				name = engaged_in_single_combat
+				value = yes
+			}
+		}
+		scope:sc_defender = {
+			set_variable = {
+				name = engaged_in_single_combat
+				value = yes
+			}
+		}
+		single_combat_apply_default_shirtlessness_effect = {
+			ATTACKER = scope:sc_attacker
+			DEFENDER = scope:sc_defender
+		}
+		save_scope_value_as = {
+			name = fatality
+			value = flag:$FATALITY$
+		}
+		save_scope_value_as = {
+			name = fixed
+			value = flag:$FIXED$
+		}
+		save_scope_value_as = {
+			name = locale
+			value = flag:$LOCALE$
+		}
+		if = {
+			limit = { scope:locale = flag:terrain_scope }
+			scope:sc_defender.location = { save_scope_as = background_terrain_scope }
+		}
+		scope:sc_attacker = {
+			set_variable = {
+				name = sc_attacker_injury_bonus
+				value = starting_injury_bonus
+			}
+		}
+		scope:sc_defender = {
+			set_variable = {
+				name = sc_defender_injury_bonus
+				value = starting_injury_bonus
+			}
+			set_variable = {
+				name = success_threshold
+				value = starting_success_threshold
+			}
+		}
+		scope:sc_attacker = {
+			set_variable = {
+				name = sc_attacker_injury_risk_score
+				value = 0
+			}
+			set_variable = {
+				name = sc_attacker_duel_success_score
+				value = 0
+			}
+			set_local_variable = {
+				name = current_duel_edge_buff
+				value = 0
+			}
+			set_local_variable = {
+				name = current_duel_edge_debuff
+				value = 0
+			}
+			set_signature_weapon_effect = yes
+		}
+		scope:sc_defender = {
+			set_variable = {
+				name = sc_defender_injury_risk_score
+				value = 0
+			}
+			set_variable = {
+				name = sc_defender_duel_success_score
+				value = 0
+			}
+			set_local_variable = {
+				name = current_duel_edge_buff
+				value = 0
+			}
+			set_local_variable = {
+				name = current_duel_edge_debuff
+				value = 0
+			}
+			set_variable = {
+				name = current_round
+				value = 1
+			}
+			set_signature_weapon_effect = yes
+		}
+		# PoD bolt-ons (warform + knight discipline buffs).
+		scope:sc_attacker = {
+			if = {
+				limit = {
+					has_trait = fera
+					is_ai = yes
+					POD_can_shapeshift_trigger = yes
+				}
+				POD_shapeshift_fera_warform_effect = yes
+			}
+			POD_enemy_knight_set_discipline_battle_effect = { CASTER = scope:sc_defender }
+			POD_ally_knight_set_discipline_battle_effect  = { CASTER = scope:sc_attacker }
+		}
+		scope:sc_defender = {
+			if = {
+				limit = {
+					has_trait = fera
+					is_ai = yes
+					POD_can_shapeshift_trigger = yes
+				}
+				POD_shapeshift_fera_warform_effect = yes
+			}
+			POD_enemy_knight_set_discipline_battle_effect = { CASTER = scope:sc_attacker }
+			POD_ally_knight_set_discipline_battle_effect  = { CASTER = scope:sc_defender }
+		}
+		hidden_effect = {
+			scope:sc_attacker = { force_character_skill_recalculation = yes }
+			scope:sc_defender = { force_character_skill_recalculation = yes }
+		}
+		scope:sc_defender = { trigger_event = single_combat.0001 }
+	}
+}
+
+##################################################
+# Combat-PoD minigame launcher — called from configure_start_single_combat_effect
+##################################################
+#
+# Runs in the PC's scope. Stashes the PoD duel metadata as character
+# variables so pod_combat_end_combat_effect can reconstruct scopes and fire
+# the original follow-up event when the minigame ends, then hands off to
+# pod_combat_initialize_effect.
+#
+# Parameters:
+#   $OPPONENT$           — the non-PC combatant (character scope)
+#   $OUTPUT_EVENT$       — follow-up event fired on sc_initiator at end
+#   $INVALIDATION_EVENT$ — fired instead if the duel is invalid (kept for
+#                          symmetry; self-match case is handled upstream)
+##################################################
+
+##################################################
+# Parent-event alias stash / restore
+##################################################
+#
+# The duel system's parent events routinely save custom scope aliases
+# (scope:spirit, scope:actor, scope:my_rival, scope:og_root, ...) that
+# their follow-up events then read. Under the original vanilla duel
+# chain those scopes propagate naturally through the event graph. The
+# minigame's scripted-GUI execute boundary breaks that chain, so unless
+# we capture the parent's named scopes at launch and restore them in
+# pod_combat.9999, the follow-up event fires with an empty scope table
+# and throws "Undefined event target" errors (see POD_umbra_expedition
+# and friends).
+#
+# This effect is called once at launch (inside the parent event's scope
+# chain — root scope is the parent event's actor / PC), and writes each
+# alias as a story variable on scope:sc_ctx (the POD_combat_sc_context
+# story created by the launcher). Any alias that is not present in the
+# parent scope is silently skipped. The matching restore block in
+# pod_combat.9999 rebuilds the scopes from those story vars.
+#
+# All writes go to scope:sc_ctx (the context story). The launcher must
+# save_scope_as the new context story BEFORE calling this effect so
+# scope:sc_ctx is bound. Each branch flips into the story scope to
+# write — set_variable inside scope:sc_ctx attaches the variable to the
+# story, not to the current actor character.
+#
+# Whitelist coverage (audited across all PoD callers of
+# configure_start_single_combat_effect as of v1.18.3.1 integration):
+#   Characters (PoD): spirit, alastor, wyrm_champion, vampire_attacker
+#   Characters (van): actor, parent, aggressor_vassal, distant_knight,
+#                     snitch, strong_leader, warrior_monk, attacked_rival,
+#                     my_rival, rival_burner, rival_on_sight, rivals_child,
+#                     og_root, root_for_loc, recidivist
+#   Artifacts:        shadowflame, burned_artifact
+#   Schemes:          scheme  (POD_diablerize.600 reads scope:scheme to
+#                              end_scheme after the duel resolves)
+#   Scheme actors:    owner   (scheme owner / action initiator; widely
+#                              used by vanilla `murder_success_kill_effect`
+#                              and its callees, which pass MURDERER =
+#                              scope:owner down into unknown_murder_effect /
+#                              pod_death. Missing scope:owner cascades into
+#                              scope:pod_killer errors because pod_death does
+#                              `$killer$ = { save_temporary_scope_as =
+#                              pod_killer }` and $killer$ resolves from it.)
+#
+# Still NOT stashed (add as they surface): scope:vassal_war /
+# scope:vassal_claim / scope:laamp_title (typed scope objects, same
+# variable-storage pattern should work — add when triggered in testing)
+# and raw scope values like scope:duel_legal / scope:fp2_*_gate which
+# need a different detection mechanism than `exists = scope:X`.
+##################################################
+
+pod_combat_sc_stash_parent_aliases_effect = {
+	# Character aliases — each test is independent; missing scopes are skipped.
+	# Each write switches into scope:sc_ctx (the context story) so the
+	# variable lands on the story, not on the parent-scope character.
+	if = { limit = { exists = scope:spirit           } scope:sc_ctx = { set_variable = { name = alias_spirit           value = scope:spirit } } }
+	if = { limit = { exists = scope:alastor          } scope:sc_ctx = { set_variable = { name = alias_alastor          value = scope:alastor } } }
+	if = { limit = { exists = scope:wyrm_champion    } scope:sc_ctx = { set_variable = { name = alias_wyrm_champion    value = scope:wyrm_champion } } }
+	if = { limit = { exists = scope:vampire_attacker } scope:sc_ctx = { set_variable = { name = alias_vampire_attacker value = scope:vampire_attacker } } }
+	if = { limit = { exists = scope:actor            } scope:sc_ctx = { set_variable = { name = alias_actor            value = scope:actor } } }
+	if = { limit = { exists = scope:parent           } scope:sc_ctx = { set_variable = { name = alias_parent           value = scope:parent } } }
+	if = { limit = { exists = scope:aggressor_vassal } scope:sc_ctx = { set_variable = { name = alias_aggressor_vassal value = scope:aggressor_vassal } } }
+	if = { limit = { exists = scope:distant_knight   } scope:sc_ctx = { set_variable = { name = alias_distant_knight   value = scope:distant_knight } } }
+	if = { limit = { exists = scope:snitch           } scope:sc_ctx = { set_variable = { name = alias_snitch           value = scope:snitch } } }
+	if = { limit = { exists = scope:strong_leader    } scope:sc_ctx = { set_variable = { name = alias_strong_leader    value = scope:strong_leader } } }
+	if = { limit = { exists = scope:warrior_monk     } scope:sc_ctx = { set_variable = { name = alias_warrior_monk     value = scope:warrior_monk } } }
+	if = { limit = { exists = scope:attacked_rival   } scope:sc_ctx = { set_variable = { name = alias_attacked_rival   value = scope:attacked_rival } } }
+	if = { limit = { exists = scope:my_rival         } scope:sc_ctx = { set_variable = { name = alias_my_rival         value = scope:my_rival } } }
+	if = { limit = { exists = scope:rival_burner     } scope:sc_ctx = { set_variable = { name = alias_rival_burner     value = scope:rival_burner } } }
+	if = { limit = { exists = scope:rival_on_sight   } scope:sc_ctx = { set_variable = { name = alias_rival_on_sight   value = scope:rival_on_sight } } }
+	if = { limit = { exists = scope:rivals_child     } scope:sc_ctx = { set_variable = { name = alias_rivals_child     value = scope:rivals_child } } }
+	if = { limit = { exists = scope:og_root          } scope:sc_ctx = { set_variable = { name = alias_og_root          value = scope:og_root } } }
+	if = { limit = { exists = scope:root_for_loc     } scope:sc_ctx = { set_variable = { name = alias_root_for_loc     value = scope:root_for_loc } } }
+	if = { limit = { exists = scope:recidivist       } scope:sc_ctx = { set_variable = { name = alias_recidivist       value = scope:recidivist } } }
+	if = { limit = { exists = scope:owner            } scope:sc_ctx = { set_variable = { name = alias_owner            value = scope:owner } } }
+	# Artifact aliases — stored the same way as character refs.
+	if = { limit = { exists = scope:shadowflame      } scope:sc_ctx = { set_variable = { name = alias_shadowflame      value = scope:shadowflame } } }
+	if = { limit = { exists = scope:burned_artifact  } scope:sc_ctx = { set_variable = { name = alias_burned_artifact  value = scope:burned_artifact } } }
+	# Scheme scope — typed scope objects store fine in story variables.
+	# POD_diablerize.600 runs end_scheme on scope:scheme after the duel
+	# resolves; without this stash, its option tooltips throw "Undefined
+	# event target 'scheme'" and the final end_scheme call fails.
+	if = { limit = { exists = scope:scheme           } scope:sc_ctx = { set_variable = { name = alias_scheme           value = scope:scheme } } }
+}
+
+pod_combat_sc_launch_minigame_effect = {
+	# Build a POD_combat_sc_context story to hold the entire caller
+	# context (sc_* refs, rule flags, follow-up event id, parent-event
+	# aliases). The PC keeps a single pointer var to the story; cleanup
+	# is one end_story call.
+	#
+	# Anchored on Charon (immortal, off-map) — same anchor pattern as
+	# the move catalogue, so the story survives even if the PC dies
+	# mid-combat. The presence of pod_combat_sc_context on the PC is
+	# itself the "duel-driven" flag; no separate driven marker needed.
+	#
+	# Tooltip-build / hidden_effect_new_object: tooltip-building walks
+	# every interaction's effect chain symbolically and skips
+	# state-mutating calls including create_story. With creation
+	# skipped, save_scope_as = sc_ctx never binds, and any subsequent
+	# scope:sc_ctx reads error with "Undefined event target 'sc_ctx'"
+	# during tooltip preview. The right tool here is
+	# hidden_effect_new_object (NOT plain hidden_effect — that only
+	# hides display; it still evaluates). PoD's heist system uses the
+	# exact same pattern in POD_heist_create_node. Real execution runs
+	# the body normally; only tooltip preview skips the
+	# new-object-dependent block.
+
+	save_scope_as = combat_pc
+
+	character:POD_wraith_01 = {
+		create_story = {
+			type = POD_combat_sc_context
+			save_scope_as = sc_ctx
+		}
+	}
+
+	hidden_effect_new_object = {
+		# scope:sc_ctx is event-level after create_story binds it
+		# visible from any nested scope. Tooltip preview skips this
+		# entire block because it depends on a not-yet-existing object.
+		scope:sc_ctx = {
+			set_variable = { name = initiator value = scope:sc_initiator }
+			set_variable = { name = attacker  value = scope:sc_attacker }
+			set_variable = { name = defender  value = scope:sc_defender }
+
+			# Rule flags. Stored as flag values so pod_combat.9999 can
+			# round-trip them back into save_scope_value_as for the
+			# follow-up event.
+			#
+			# NOTE on `fixed`: this code path only runs for non-FIXED
+			# duels — the gate at the top of
+			# configure_start_single_combat_effect routes
+			# FIXED = sc_attacker / sc_defender to PoD's vanilla body
+			# in Part 4 (which honors FIXED correctly). So
+			# scope:fixed reaching here is always flag:no, but we
+			# stash it on the context story anyway so the follow-up
+			# event reads a consistent rule set regardless of which
+			# path produced the outcome.
+			set_variable = { name = fatality value = flag:$FATALITY$ }
+			set_variable = { name = fixed    value = flag:$FIXED$    }
+			set_variable = { name = locale   value = flag:$LOCALE$   }
+
+			# Follow-up + invalidation event IDs. POD_save_event_as_var
+			# combines save_scope_value_as + set_variable, writing the
+			# variable to the current scope (sc_ctx).
+			POD_save_event_as_var = { VAR = follow_up    ID = $OUTPUT_EVENT$ }
+			POD_save_event_as_var = { VAR = invalidation ID = $INVALIDATION_EVENT$ }
+		}
+
+		# Snapshot any custom parent-event aliases (scope:spirit,
+		# scope:actor, etc.) onto the context story so pod_combat.9999
+		# can restore them before firing the follow-up. The aliases
+		# live at event level (saved by the parent event) and remain
+		# readable from inside this block.
+		pod_combat_sc_stash_parent_aliases_effect = yes
+
+		# Pin the story on the PC for cleanup access later. The only
+		# PC-side var that lives across the combat. End-of-combat
+		# cleanup: var:pod_combat_sc_context = { end_story = yes },
+		# remove_variable = pod_combat_sc_context.
+		scope:combat_pc = {
+			set_variable = { name = pod_combat_sc_context value = scope:sc_ctx }
+		}
+	}
+
+	# Hand off to the existing 1v1 initializer. OPPONENT is the non-PC
+	# combatant; the PC is always slot 0.
+	pod_combat_initialize_effect = {  OPPONENT = $OPPONENT$ MODE = 0 }
+}
+
+##################################################
+# Combat-PoD — Group Combat Effect
+##################################################
+#
+# Effect for launching NvN group combats with duel-system integration.
+# Parallels configure_start_single_combat_effect but adds a MODE parameter
+# for group sizes. Not an override — this is a new effect that other mods
+# or events can call to start group fights with proper outcome dispatch.
+#
+# Parameters:
+#   $SC_INITIATOR$       — who started the fight
+#   $SC_ATTACKER$        — attacking party leader
+#   $SC_DEFENDER$        — defending party leader
+#   $MODE$               — 1 (1vN), 2 (Nv1), 3 (NvN)
+#   $FATALITY$           — flag: default/possible/no/always/practice
+#   $FIXED$              — flag: no/sc_attacker/sc_defender
+#   $LOCALE$             — flag: battlefield/alley_night/etc.
+#   $OUTPUT_EVENT$       — follow-up event fired on sc_initiator at end
+#   $INVALIDATION_EVENT$ — fired if the combat is invalid
+##################################################
+
+configure_start_group_combat_effect = {
+	# ── Scope setup (same as single combat override) ──
+	$SC_INITIATOR$ = { save_scope_as = sc_initiator }
+	$SC_ATTACKER$ = { save_scope_as = sc_attacker }
+	$SC_DEFENDER$ = { save_scope_as = sc_defender }
+	if = {
+		limit = { exists = scope:sc_finished }
+		clear_saved_scope = sc_finished
+	}
+	save_scope_value_as = {
+		name = follow_up_event
+		value = event_id:$OUTPUT_EVENT$
+	}
+	save_scope_value_as = {
+		name = invalidation_event
+		value = event_id:$INVALIDATION_EVENT$
+	}
+	# Save FIXED here so the gate below + the auto-resolve fallback
+	# can route story-predetermined duels deterministically. Group
+	# combat has no vanilla body to fall back to, so FIXED is honored 
+	# inside the auto-resolve branch instead of via fall-through.
+	save_scope_value_as = { name = fixed value = flag:$FIXED$ }
+
+	# ── Self-match invalidation ──
+	if = {
+		limit = { scope:sc_attacker = scope:sc_defender }
+		scope:sc_initiator = {
+			trigger_event = { saved_event_id = scope:invalidation_event }
+		}
+	}
+
+	# ── PC-involved branch — launch the group minigame ──
+	# Falls through to the auto-resolve branch below when:
+	#   - FIXED specifies a predetermined winner (auto-resolve honors
+	#     FIXED instead of running a coin flip the player can't
+	#     influence).
+	#   - PC-vs-PC duel (the minigame UI is single-perspective; in MP
+	#     only one PC would see it, so we route both to auto-resolve).
+	else_if = {
+		limit = {
+			# Exactly one side is PC.
+			OR = {
+				AND = {
+					scope:sc_attacker = { is_ai = no }
+					scope:sc_defender = { is_ai = yes }
+				}
+				AND = {
+					scope:sc_attacker = { is_ai = yes }
+					scope:sc_defender = { is_ai = no }
+				}
+			}
+			scope:sc_attacker = { NOT = { has_variable = pod_combat_active } }
+			scope:sc_defender = { NOT = { has_variable = pod_combat_active } }
+			# Don't intercept story-predetermined duels — auto-resolve
+			# below honors FIXED instead.
+			NOT = { scope:fixed = flag:sc_attacker }
+			NOT = { scope:fixed = flag:sc_defender }
+		}
+		# Mark both as busy
+		scope:sc_attacker = { set_variable = { name = engaged_in_single_combat value = yes } }
+		scope:sc_defender = { set_variable = { name = engaged_in_single_combat value = yes } }
+
+		# Preserve duel rules as scope values
+		save_scope_value_as = { name = fatality value = flag:$FATALITY$ }
+		save_scope_value_as = { name = fixed    value = flag:$FIXED$ }
+		save_scope_value_as = { name = locale   value = flag:$LOCALE$ }
+
+		# Fera shapeshifting and discipline combat buffs are handled inside
+		# pod_combat_init_slot_from_character_effect for all combatants.
+
+		# Dispatch to the minigame launcher on the PC's side
+		if = {
+			limit = { scope:sc_attacker = { is_ai = no } }
+			scope:sc_attacker = {
+				pod_combat_sc_launch_group_minigame_effect = {
+					OPPONENT = scope:sc_defender
+					MODE = $MODE$
+					OUTPUT_EVENT = $OUTPUT_EVENT$
+					INVALIDATION_EVENT = $INVALIDATION_EVENT$
+					FATALITY = $FATALITY$
+					FIXED = $FIXED$
+					LOCALE = $LOCALE$
+				}
+			}
+		}
+		else = {
+			scope:sc_defender = {
+				pod_combat_sc_launch_group_minigame_effect = {
+					OPPONENT = scope:sc_attacker
+					MODE = $MODE$
+					OUTPUT_EVENT = $OUTPUT_EVENT$
+					INVALIDATION_EVENT = $INVALIDATION_EVENT$
+					FATALITY = $FATALITY$
+					FIXED = $FIXED$
+					LOCALE = $LOCALE$
+				}
+			}
+		}
+	}
+
+	# ── Auto-resolve branch ──
+	# Group combat has no vanilla event chain to fall back to, so this
+	# branch handles three populations of fights that bypass the
+	# minigame:
+	#   - NPC-vs-NPC duels (most common case).
+	#   - PC-vs-PC duels (the minigame UI is single-perspective; in MP
+	#     only one PC could see it, so we deterministically resolve
+	#     instead of running it for one side).
+	#   - PC-involved duels with FIXED set (the predetermined winner
+	#     overrides any in-fight outcome — see the FIXED-first branch
+	#     below).
+	#
+	# Default resolution is a prowess-based coin flip:
+	#   attacker_score = prowess + random(0..prowess), same for defender,
+	#   higher score wins.
+	# FIXED takes priority over the coin flip when set. There is no
+	# per-hit simulation, so wounds aren't modeled — auto-resolve is
+	# "who won" only. Death is still applied for fatality modes that
+	# guarantee one (`always`, `default`-tribal); see the fatality
+	# block below. flag:no / possible / practice / default-non-tribal
+	# leave both combatants alive, since there's no wound count to
+	# write back. This matches pod_combat.9999's death-only behavior
+	# in the player minigame.
+	else = {
+		scope:sc_attacker = { set_variable = { name = engaged_in_single_combat value = yes } }
+		scope:sc_defender = { set_variable = { name = engaged_in_single_combat value = yes } }
+		save_scope_value_as = { name = fatality value = flag:$FATALITY$ }
+
+		save_scope_value_as = {
+			name = attacker_score
+			value = {
+				value = scope:sc_attacker.prowess
+				add = { integer_range = { min = 0 max = scope:sc_attacker.prowess } }
+			}
+		}
+		save_scope_value_as = {
+			name = defender_score
+			value = {
+				value = scope:sc_defender.prowess
+				add = { integer_range = { min = 0 max = scope:sc_defender.prowess } }
+			}
+		}
+
+		# FIXED takes priority over the prowess coin flip. PC-involved
+		# group fights with FIXED arrive here via the gate fall-through
+		# above; NPC-only group fights pick this branch directly. Either
+		# way the listed side wins regardless of prowess.
+		if = {
+			limit = { scope:fixed = flag:sc_attacker }
+			scope:sc_attacker = { save_scope_as = sc_victor }
+			scope:sc_defender = { save_scope_as = sc_loser  }
+		}
+		else_if = {
+			limit = { scope:fixed = flag:sc_defender }
+			scope:sc_defender = { save_scope_as = sc_victor }
+			scope:sc_attacker = { save_scope_as = sc_loser  }
+		}
+		else_if = {
+			limit = { scope:attacker_score >= scope:defender_score }
+			scope:sc_attacker = { save_scope_as = sc_victor }
+			scope:sc_defender = { save_scope_as = sc_loser  }
+		}
+		else = {
+			scope:sc_defender = { save_scope_as = sc_victor }
+			scope:sc_attacker = { save_scope_as = sc_loser  }
+		}
+
+		save_scope_value_as = { name = sc_finished  value = yes }
+		save_scope_value_as = { name = victory_type value = flag:skill }
+
+		# ── Release engaged flags ──
+		scope:sc_attacker = { if = { limit = { is_alive = yes } remove_variable = engaged_in_single_combat } }
+		scope:sc_defender = { if = { limit = { is_alive = yes } remove_variable = engaged_in_single_combat } }
+
+		# ── Apply death per fatality mode (no wound model in auto-resolve) ──
+		# Auto-resolve is a coin-flip outcome with no per-hit accounting, We
+		# apply death-only outcomes mirroring pod_combat.9999's behavior so
+		# fatality modes that guarantee a kill (always, default-tribal)
+		# still produce the right narrative consequence. flag:no /
+		# flag:possible / flag:practice all fall through with no death.
+		if = {
+			limit = { exists = scope:sc_victor }
+
+			if = {
+				limit = { scope:fatality = flag:practice }
+			}
+			else = {
+				POD_fera_add_renown_effect = { TYPE = ferocity }
+			}
+
+			if = {
+				limit = { scope:fatality = flag:default }
+				# Tribal governments: tribal duels are always to the death.
+				if = {
+					limit = {
+						scope:sc_attacker = {
+							OR = {
+								AND = {
+									is_ruler = yes
+									government_has_flag = government_is_tribal
+								}
+								AND = {
+									is_ruler = no
+									exists = court_owner
+									scope:sc_attacker.court_owner = { government_has_flag = government_is_tribal }
+								}
+								AND = {
+									is_ruler = no
+									exists = host
+									scope:sc_attacker.host = { government_has_flag = government_is_tribal }
+								}
+								AND = {
+									is_ruler = no
+									NOR = { exists = court_owner exists = host }
+									scope:sc_defender = {
+										OR = {
+											AND = { is_ruler = yes government_has_flag = government_is_tribal }
+											AND = { is_ruler = no exists = court_owner scope:sc_defender.court_owner = { government_has_flag = government_is_tribal } }
+											AND = { is_ruler = no exists = host scope:sc_defender.host = { government_has_flag = government_is_tribal } }
+										}
+									}
+								}
+							}
+						}
+					}
+					scope:sc_loser = {
+						pod_death = { killer = scope:sc_victor death_reason = death_duel }
+					}
+					if = {
+						limit = { scope:sc_victor = { faith = { has_doctrine = tenet_cranial_trophies } } }
+						tgp_cranial_trophies_beheading_effect = { KILLER = scope:sc_victor DEAD = scope:sc_loser }
+					}
+				}
+				# Non-tribal default: no forced kill.
+			}
+			else_if = {
+				limit = { scope:fatality = flag:always }
+				scope:sc_victor = {
+					if = {
+						limit = {
+							this = scope:sc_attacker
+							NOT = { has_execute_reason = scope:sc_loser }
+						}
+						add_kinslayer_trait_or_nothing_effect = { VICTIM = scope:sc_loser }
+					}
+				}
+				scope:sc_loser = {
+					pod_death = { killer = scope:sc_victor death_reason = death_duel }
+				}
+				if = {
+					limit = { scope:sc_victor = { faith = { has_doctrine = tenet_cranial_trophies } } }
+					tgp_cranial_trophies_beheading_effect = { KILLER = scope:sc_victor DEAD = scope:sc_loser }
+				}
+			}
+			# flag:no       — no wounds in auto-resolve, nothing to cap.
+			# flag:possible — no wounds in auto-resolve, no wound-track death possible.
+		}
+
+		# ── Fire the follow-up event ──
+		# Vanilla's three-step fallback chain (initiator → defender →
+		# attacker, gated on is_alive). Matches the pattern used by
+		# pod_combat.9999. The chain matters less here than in the
+		# player minigame because auto-resolve only produces 
+		# deaths via the fatality block above (so most callers will
+		# land on the initiator branch), but we keep the fallback for
+		# symmetry with the rest of the codebase and to handle edge 
+		# cases like duels initiated on a character who dies from 
+		# external causes mid-resolution.
+		if = {
+			limit = { scope:sc_initiator = { is_alive = yes } }
+			scope:sc_initiator = {
+				trigger_event = { saved_event_id = scope:follow_up_event }
+			}
+		}
+		else_if = {
+			limit = { scope:sc_defender = { is_alive = yes } }
+			scope:sc_defender = {
+				trigger_event = { saved_event_id = scope:follow_up_event }
+			}
+		}
+		else = {
+			scope:sc_attacker = {
+				trigger_event = { saved_event_id = scope:follow_up_event }
+			}
+		}
+	}
+}
+
+##################################################
+# Group minigame launcher
+##################################################
+
+pod_combat_sc_launch_group_minigame_effect = {
+	# Identical context-story stash to the single-combat launcher, but
+	# calls pod_combat_initialize_effect with the specified MODE.
+	# See pod_combat_sc_launch_minigame_effect for the design rationale,
+	# including why the new-object-dependent work goes inside
+	# hidden_effect_new_object (tooltip-build skips create_story,
+	# leaving scope:sc_ctx unbound during preview).
+	save_scope_as = combat_pc
+
+	character:POD_wraith_01 = {
+		create_story = {
+			type = POD_combat_sc_context
+			save_scope_as = sc_ctx
+		}
+	}
+
+	hidden_effect_new_object = {
+		scope:sc_ctx = {
+			set_variable = { name = initiator value = scope:sc_initiator }
+			set_variable = { name = attacker  value = scope:sc_attacker }
+			set_variable = { name = defender  value = scope:sc_defender }
+
+			# `fixed` reaches here only for non-FIXED group duels —
+			# FIXED = sc_attacker / sc_defender is routed to the
+			# auto-resolve branch in configure_start_group_combat_effect,
+			# which honors FIXED directly (saves the listed side as
+			# sc_victor regardless of prowess). So scope:fixed reaching
+			# this stash is always flag:no, but we save it anyway so the
+			# follow-up event sees a consistent rule set.
+			set_variable = { name = fatality value = flag:$FATALITY$ }
+			set_variable = { name = fixed    value = flag:$FIXED$    }
+			set_variable = { name = locale   value = flag:$LOCALE$   }
+
+			POD_save_event_as_var = { VAR = follow_up    ID = $OUTPUT_EVENT$ }
+			POD_save_event_as_var = { VAR = invalidation ID = $INVALIDATION_EVENT$ }
+		}
+
+		# Snapshot any custom parent-event aliases for post-combat
+		# scope restore.
+		pod_combat_sc_stash_parent_aliases_effect = yes
+
+		# Pin the story on the PC for cleanup access later.
+		scope:combat_pc = {
+			set_variable = { name = pod_combat_sc_context value = scope:sc_ctx }
+		}
+	}
+
+	pod_combat_initialize_effect = { OPPONENT = $OPPONENT$ MODE = $MODE$ }
+}

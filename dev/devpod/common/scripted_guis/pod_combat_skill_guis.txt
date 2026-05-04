@@ -1,0 +1,702 @@
+﻿##########################################
+######   POD COMBAT SKILL GUIS
+##########################################
+# Generic scripted GUIs that drive the loadout editor and the dynamic
+# move-tooltip. A handful of parameterized SGUIs that read
+# story_cycle variables, replacing the per-move toggle pattern.
+#
+# Consumers:
+#   pod_combat_skills_window.gui   — loadout editor (datamodel over
+#                                    the global POD_combat_moves list)
+#   pod_combat_window.gui          — mid-combat move bar (datamodel
+#                                    over the player's pod_combat_loadout)
+#   pod_combat_move_desc macro     — invoked by PODCombatMoveDesc in
+#                                    loc / tooltips
+
+###### WINDOW CONTROLS ######
+
+# Open / close the loadout editor from the decision effect.
+pod_combat_close_skills = {
+	is_valid = {
+		has_variable = pod_combat_config_open
+	}
+	effect = {
+		remove_variable = pod_combat_config_open
+	}
+}
+
+
+###### LOADOUT TOGGLE ######
+# Called from the loadout-editor row button. Equips the move if absent,
+# unequips if present. is_shown returns true when the story is CURRENTLY
+# equipped — the GUI uses StoryGuiIsShown('pod_combat_loadout_toggle')
+# to render the checked state of the row checkbox. is_valid enforces
+# the unlock gate and the per-category cap (so the button greys out
+# when an unequipped move would exceed the cap).
+pod_combat_loadout_toggle = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		# "Is this move in my loadout right now?" — used by the GUI's
+		# checked-state binding, NOT for hiding the button. The
+		# available-list row always displays (the visible binding uses
+		# pod_combat_loadout_option instead).
+		is_target_in_variable_list = {
+			name   = pod_combat_loadout
+			target = scope:story
+		}
+	}
+
+	is_valid = {
+		# Unequip path: a move that's currently in the loadout can ALWAYS
+		# be removed, even if the unlock decision now fails (e.g. the
+		# trait that originally gated it has been lost). Without this
+		# branch, can_execute_decision failure would lock the move into
+		# the loadout — wasting a category slot the player can't recover.
+		# Equip path: an unequipped move requires (a) the unlock check
+		# AND (b) headroom under the per-category cap.
+		OR = {
+			is_target_in_variable_list = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+			AND = {
+				can_execute_decision = scope:story.var:decision
+				OR = {
+					trigger_if = {
+						limit = { scope:story.var:combat_category = flag:ATK }
+						pod_combat_atk_count < pod_combat_max_per_category
+					}
+					trigger_if = {
+						limit = { scope:story.var:combat_category = flag:DEF }
+						pod_combat_def_count < pod_combat_max_per_category
+					}
+					trigger_if = {
+						limit = { scope:story.var:combat_category = flag:CTL }
+						pod_combat_ctl_count < pod_combat_max_per_category
+					}
+					trigger_if = {
+						limit = { scope:story.var:combat_category = flag:PWR }
+						pod_combat_pwr_count < pod_combat_max_per_category
+					}
+				}
+			}
+		}
+	}
+
+	effect = {
+		if = {
+			limit = {
+				is_target_in_variable_list = {
+					name   = pod_combat_loadout
+					target = scope:story
+				}
+			}
+			remove_list_variable = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+		}
+		else = {
+			add_to_variable_list = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+		}
+	}
+}
+
+
+###### LOADOUT OPTION VISIBILITY ######
+# Gates the visibility + clickability of a move row in the loadout
+# editor. Dual-purpose:
+#   is_shown  — row visibility: unlocked moves always show; locked
+#               moves show only when `show_all_combat_moves` is set
+#               on the player (via the Show All checkbox).
+#   is_valid  — row interactivity: the toggle is clickable iff the
+#               move is already equipped (unequip always works) OR
+#               equipping it wouldn't exceed the per-category cap.
+pod_combat_loadout_option = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = {
+		trigger_if = {
+			limit = { has_variable = show_all_combat_moves }
+			always = yes
+		}
+		trigger_else = {
+			# Guard against stories without their decision var set
+			# avoids "var 'decision' returned an unset scope" log
+			# spam during early-frame or stale-list edge cases.
+			trigger_if = {
+				limit = { scope:story = { exists = var:decision } }
+				can_execute_decision = scope:story.var:decision
+			}
+			trigger_else = { always = no }
+		}
+	}
+	is_valid = {
+		# Same exists guard as is_shown above to suppress the var-unset
+		# log spam during GUI evaluation against partially-initialised
+		# story scopes.
+		trigger_if = {
+			limit = { scope:story = { exists = var:decision } }
+			OR = {
+				# Unequip path — already-equipped moves can always be
+				# removed, even if can_execute_decision now fails.
+				# Without this, a trait removal would lock the move
+				# into the loadout, wasting a category slot.
+				is_target_in_variable_list = {
+					name   = pod_combat_loadout
+					target = scope:story
+				}
+				# Equip path — requires both the unlock check AND
+				# headroom under the per-category cap.
+				AND = {
+					can_execute_decision = scope:story.var:decision
+					OR = {
+						trigger_if = {
+							limit = { scope:story.var:combat_category = flag:ATK }
+							pod_combat_atk_count < pod_combat_max_per_category
+						}
+						trigger_if = {
+							limit = { scope:story.var:combat_category = flag:DEF }
+							pod_combat_def_count < pod_combat_max_per_category
+						}
+						trigger_if = {
+							limit = { scope:story.var:combat_category = flag:CTL }
+							pod_combat_ctl_count < pod_combat_max_per_category
+						}
+						trigger_if = {
+							limit = { scope:story.var:combat_category = flag:PWR }
+							pod_combat_pwr_count < pod_combat_max_per_category
+						}
+					}
+				}
+			}
+		}
+		trigger_else = { always = no }
+	}
+}
+
+
+###### CATEGORY FILTERS ######
+# One SGUI per combat_category flag. Used by the equipped-moves column
+# in the skills window to split the loadout into four sub-sections
+# (ATK / DEF / CTL / PWR). Each is_shown returns true iff the scoped
+# story's combat_category variable matches the flag in the SGUI's name.
+# GUI consumer:
+#   visible = "[GetScriptedGui('pod_combat_is_atk_move').IsShown(...)]"
+
+pod_combat_is_atk_move = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = { scope:story.var:combat_category = flag:ATK }
+}
+
+pod_combat_is_def_move = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = { scope:story.var:combat_category = flag:DEF }
+}
+
+pod_combat_is_ctl_move = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = { scope:story.var:combat_category = flag:CTL }
+}
+
+pod_combat_is_pwr_move = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = { scope:story.var:combat_category = flag:PWR }
+}
+
+
+###### CATEGORY FILTER TOGGLES ######
+# One SGUI per category. Each toggles the matching pod_combat_filter_X
+# variable on the player character. When any of the four filter vars
+# is set, the available-moves list (right column) is filtered to show
+# only stories whose combat_category matches at least one active
+# filter. When all four are unset, all moves show (subject to the
+# existing unlock / show-all logic).
+#
+# Multi-select: multiple filters can be active simultaneously, so
+# clicking ATK then DEF shows both categories. Clicking an active
+# filter again clears it. pod_combat_clear_filters clears all four
+# (used by the Total counter button).
+
+pod_combat_toggle_filter_atk = {
+	scope = character
+	effect = { POD_toggle_variable = { VAR = pod_combat_filter_atk } }
+}
+
+pod_combat_toggle_filter_def = {
+	scope = character
+	effect = { POD_toggle_variable = { VAR = pod_combat_filter_def } }
+}
+
+pod_combat_toggle_filter_ctl = {
+	scope = character
+	effect = { POD_toggle_variable = { VAR = pod_combat_filter_ctl } }
+}
+
+pod_combat_toggle_filter_pwr = {
+	scope = character
+	effect = { POD_toggle_variable = { VAR = pod_combat_filter_pwr } }
+}
+
+pod_combat_clear_filters = {
+	scope = character
+	effect = {
+		remove_variable = pod_combat_filter_atk
+		remove_variable = pod_combat_filter_def
+		remove_variable = pod_combat_filter_ctl
+		remove_variable = pod_combat_filter_pwr
+	}
+}
+
+
+###### CATEGORY FILTER MATCH ######
+# Returns true for a story if:
+#   - no filter is active, OR
+#   - at least one active filter matches the story's combat_category.
+# Used by the available-moves datamodel item's `visible` binding to
+# hide rows that don't match the current filter selection. ANDed with
+# the unlock / show-all checks in the same binding.
+pod_combat_loadout_category_match = {
+	scope = character
+	saved_scopes = { story }
+	is_shown = {
+		OR = {
+			AND = {
+				NOT = { has_variable = pod_combat_filter_atk }
+				NOT = { has_variable = pod_combat_filter_def }
+				NOT = { has_variable = pod_combat_filter_ctl }
+				NOT = { has_variable = pod_combat_filter_pwr }
+			}
+			AND = {
+				has_variable = pod_combat_filter_atk
+				scope:story.var:combat_category = flag:ATK
+			}
+			AND = {
+				has_variable = pod_combat_filter_def
+				scope:story.var:combat_category = flag:DEF
+			}
+			AND = {
+				has_variable = pod_combat_filter_ctl
+				scope:story.var:combat_category = flag:CTL
+			}
+			AND = {
+				has_variable = pod_combat_filter_pwr
+				scope:story.var:combat_category = flag:PWR
+			}
+		}
+	}
+}
+
+
+###### SHOW-ALL TOGGLE ######
+# Flips the show_all_combat_moves character variable which
+# pod_combat_loadout_option consults to expand visibility beyond
+# unlocked moves (useful for previewing locked moves in the editor).
+#
+# GUI-level coupling: in pod_combat_skills_window.gui the "Show all
+# moves" checkbox is forcibly disabled and visually displayed as
+# checked whenever the "Compact view" GUI variable
+# (pod_combat_loadout_compact) is set — the right column's compact
+# grid mode implies "show all". This SGUI itself doesn't enforce that
+# coupling (it just toggles the variable when called); the GUI's
+# `enabled` and `checked` bindings are what gate the user from clicking
+# this when compact is on. If the toggle is ever wired to a different
+# control in another window, that consumer needs to reproduce the
+# enabled/checked coupling — see the comment block at the top of
+# pod_combat_skills_window.gui for the rationale.
+pod_combat_loadout_show_all_moves = {
+	scope = character
+	effect = {
+		POD_toggle_variable = { VAR = show_all_combat_moves }
+	}
+}
+
+
+###### MID-COMBAT EXECUTE ######
+# Fires when the player clicks a move button in the combat window.
+pod_combat_execute_move = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_player_turn_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
+	}
+
+	is_valid = {
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_player_turn_trigger = yes
+		# PC's own turn — actor is the same character as combat host,
+		# so ACTOR = root.
+		POD_can_execute_combat_move = { STORY = scope:story ACTOR = root }
+	}
+
+	effect = {
+		POD_execute_combat_move = { STORY = scope:story }
+		pod_combat_save_workspace_effect = yes
+	}
+}
+
+
+###### DYNAMIC MOVE TOOLTIP ######
+# Called via the PODCombatMoveDesc macro from the per-move loc tooltip
+# key. BuildTooltip renders this SGUI's `effect` block as descriptive
+# text. Each if/custom_tooltip appends a line when the matching story
+# variable is set. Damage source is dispatched per-flag (rather than
+# using GetFlagName) to avoid collisions with vanilla flag loc keys
+# like 'fire' and 'silver'.
+pod_combat_move_desc = {
+	saved_scopes = { story }
+	effect = {
+		# ── Costs ────────────────────────────────────────
+		# AP line dispatch — moves that act on enemies (ATK), control
+		# them (CTL), or unleash a powered effect (PWR) carry the
+		# attack-pipeline label (Physical / Supernatural / Mental) on
+		# the AP line. Defensive moves (DEF — guards, soak buffs,
+		# heals) fall through to the unlabeled default; their effect
+		# isn't gated by an attack pipeline so the label would be
+		# noise. attack_type is unset on physical-pipeline moves (the
+		# implicit baseline), so the "ATK/CTL/PWR + no attack_type"
+		# branch handles them as Physical.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = ap_cost
+					OR = {
+						var:combat_category = flag:ATK
+						var:combat_category = flag:CTL
+						var:combat_category = flag:PWR
+					}
+					has_variable = attack_type
+					var:attack_type = flag:supernatural
+				}
+			}
+			custom_tooltip = pod_combat_desc_ap_cost_supernatural
+		}
+		else_if = {
+			limit = {
+				scope:story = {
+					has_variable = ap_cost
+					OR = {
+						var:combat_category = flag:ATK
+						var:combat_category = flag:CTL
+						var:combat_category = flag:PWR
+					}
+					has_variable = attack_type
+					var:attack_type = flag:mental
+				}
+			}
+			custom_tooltip = pod_combat_desc_ap_cost_mental
+		}
+		else_if = {
+			limit = {
+				scope:story = {
+					has_variable = ap_cost
+					OR = {
+						var:combat_category = flag:ATK
+						var:combat_category = flag:CTL
+						var:combat_category = flag:PWR
+					}
+				}
+			}
+			custom_tooltip = pod_combat_desc_ap_cost_physical
+		}
+		else_if = {
+			limit = { scope:story = { has_variable = ap_cost } }
+			custom_tooltip = pod_combat_desc_ap_cost
+		}
+		if = {
+			limit = { scope:story = { has_variable = energy_cost } }
+			custom_tooltip = pod_combat_desc_energy_cost
+		}
+		if = {
+			limit = { scope:story = { has_variable = gold_cost } }
+			custom_tooltip = pod_combat_desc_gold_cost
+		}
+		if = {
+			limit = { scope:story = { has_variable = piety_cost } }
+			custom_tooltip = pod_combat_desc_piety_cost
+		}
+		if = {
+			limit = { scope:story = { has_variable = prestige_cost } }
+			custom_tooltip = pod_combat_desc_prestige_cost
+		}
+		if = {
+			limit = { scope:story = { has_variable = stress_cost } }
+			custom_tooltip = pod_combat_desc_stress_cost
+		}
+
+		# ── HP damage line ──
+		# Renders "Deal X [classification] [optional elemental] Damage".
+		# Classification (superficial / aggravated) comes from
+		# damage_type via GetFlagName; always set on hp_damage moves.
+		# Elemental flavor comes from damage_source if present —
+		# fire / cold / lightning / sun / silver / gold / holy /
+		# balefire. When damage_source is absent we fall back to
+		# the attack_type pipeline variant (supernatural / mental /
+		# physical), which renders the same line shape minus the
+		# elemental word. The attack-pipeline label proper now lives
+		# on the AP-cost line above; this dispatch only picks the
+		# right loc key for the icon + elemental word combo. All
+		# var: reads are guarded by has_variable so tooltip-preview
+		# walks don't spam "var returned unset scope" errors.
+		# When the move has both hp_damage AND the drain flag, use the
+		# combined `_drain` loc variant so the drain readout shows on the
+		# same line as the damage (instead of as a separate bullet
+		# below). The standalone pod_combat_desc_drain tooltip in the
+		# heal block below is then skipped — see the matching gate
+		# there. Each of the 11 source / pipeline branches has a
+		# matching `_drain` key in pod_combat_static_l_english.yml.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					has_variable = damage_source
+				}
+			}
+			if = {
+				limit = { scope:story = { var:damage_source = flag:fire } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_fire_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_fire }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:cold } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_cold_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_cold }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:lightning } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_lightning_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_lightning }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:sun } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_sun_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_sun }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:silver } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_silver_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_silver }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:gold } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_gold_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_gold }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:holy } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_holy_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_holy }
+			}
+			else_if = {
+				limit = { scope:story = { var:damage_source = flag:balefire } }
+				if = {
+					limit = { scope:story = { has_variable = drain } }
+					custom_tooltip = pod_combat_desc_hp_damage_balefire_drain
+				}
+				else = { custom_tooltip = pod_combat_desc_hp_damage_balefire }
+			}
+		}
+		else_if = {
+			# No damage_source — render the basic damage line. The
+			# pipeline shape (physical / supernatural / mental) drives
+			# the runtime resolution but isn't surfaced in the tooltip;
+			# all three paths use the same loc key. The move's name
+			# and category convey the flavor.
+			limit = { scope:story = { has_variable = hp_damage } }
+			if = {
+				limit = { scope:story = { has_variable = drain } }
+				custom_tooltip = pod_combat_desc_hp_damage_basic_drain
+			}
+			else = { custom_tooltip = pod_combat_desc_hp_damage_basic }
+		}
+
+		if = {
+			limit = { scope:story = { has_variable = morale_damage } }
+			custom_tooltip = pod_combat_desc_morale_damage
+		}
+		if = {
+			limit = { scope:story = { has_variable = self_damage } }
+			custom_tooltip = pod_combat_desc_self_damage
+		}
+		# Heal line. Three cases handled in priority order:
+		#   1. drain + hp_damage — already rendered inline in the damage
+		#      block above (combined "Deal X Damage, Drain Y on hit"
+		#      tooltip). Skip here to avoid a duplicate bullet.
+		#   2. drain WITHOUT hp_damage — defensive orphan path; no
+		#      current move uses this combination but the standalone
+		#      drain tooltip stays available so designers don't get
+		#      silent breakage if they author one.
+		#   3. plain hp_heal — standard restore line for non-drain
+		#      heals (utility self-heals, ally heals, etc.).
+		# Execution-time drain gating lives in pod_combat_move_effects.txt's
+		# hp_heal block.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_heal
+					has_variable = drain
+					NOT = { has_variable = hp_damage }
+				}
+			}
+			custom_tooltip = pod_combat_desc_drain
+		}
+		else_if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_heal
+					NOT = { has_variable = drain }
+				}
+			}
+			custom_tooltip = pod_combat_desc_hp_heal
+		}
+		if = {
+			limit = { scope:story = { has_variable = morale_heal } }
+			custom_tooltip = pod_combat_desc_morale_heal
+		}
+
+		# ── Tier buffs / debuffs ────────────────────────
+		if = {
+			limit = { scope:story = { has_variable = soak_buff_round_tier } }
+			custom_tooltip = pod_combat_desc_soak_buff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_buff_combat_tier } }
+			custom_tooltip = pod_combat_desc_soak_buff_combat
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_debuff_round_tier } }
+			custom_tooltip = pod_combat_desc_soak_debuff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_debuff_combat_tier } }
+			custom_tooltip = pod_combat_desc_soak_debuff_combat
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_buff_round_tier } }
+			custom_tooltip = pod_combat_desc_hit_buff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_buff_combat_tier } }
+			custom_tooltip = pod_combat_desc_hit_buff_combat
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_debuff_round_tier } }
+			custom_tooltip = pod_combat_desc_hit_debuff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_debuff_combat_tier } }
+			custom_tooltip = pod_combat_desc_hit_debuff_combat
+		}
+
+		# ── Non-tier presence flags ─────────────────────
+		if = {
+			limit = { scope:story = { has_variable = set_guard } }
+			custom_tooltip = pod_combat_desc_set_guard
+		}
+		if = {
+			limit = { scope:story = { has_variable = dodge } }
+			custom_tooltip = pod_combat_desc_dodge
+		}
+		if = {
+			limit = { scope:story = { has_variable = stealth } }
+			custom_tooltip = pod_combat_desc_stealth
+		}
+		if = {
+			limit = { scope:story = { has_variable = bypass_guard } }
+			custom_tooltip = pod_combat_desc_bypass_guard
+		}
+		if = {
+			limit = { scope:story = { has_variable = bypass_dodge } }
+			custom_tooltip = pod_combat_desc_bypass_dodge
+		}
+		if = {
+			limit = { scope:story = { has_variable = bypass_stealth } }
+			custom_tooltip = pod_combat_desc_bypass_stealth
+		}
+		if = {
+			limit = { scope:story = { has_variable = remove_guard } }
+			custom_tooltip = pod_combat_desc_remove_guard
+		}
+		if = {
+			limit = { scope:story = { has_variable = retaliate_if_hit } }
+			custom_tooltip = pod_combat_desc_retaliate_if_hit
+		}
+		if = {
+			limit = { scope:story = { has_variable = retaliate_if_missed } }
+			custom_tooltip = pod_combat_desc_retaliate_if_missed
+		}
+
+		# ── Parametric non-tier flags ───────────────────
+		if = {
+			limit = { scope:story = { has_variable = ap_gain } }
+			custom_tooltip = pod_combat_desc_ap_gain
+		}
+		if = {
+			limit = { scope:story = { has_variable = ap_drain } }
+			custom_tooltip = pod_combat_desc_ap_drain
+		}
+		if = {
+			limit = { scope:story = { has_variable = initiative_debuff } }
+			custom_tooltip = pod_combat_desc_initiative_debuff
+		}
+
+		# ── Targeting footer ─────────────────────────────
+		if = {
+			limit = { scope:story = { var:targeting = flag:single_enemy } }
+			custom_tooltip = pod_combat_desc_target_single_enemy
+		}
+		else_if = {
+			limit = { scope:story = { var:targeting = flag:single_ally } }
+			custom_tooltip = pod_combat_desc_target_single_ally
+		}
+		else_if = {
+			limit = { scope:story = { var:targeting = flag:single_pc } }
+			custom_tooltip = pod_combat_desc_target_single_pc
+		}
+		else_if = {
+			limit = { scope:story = { var:targeting = flag:self } }
+			custom_tooltip = pod_combat_desc_target_self
+		}
+		else_if = {
+			limit = { scope:story = { var:targeting = flag:team_enemy } }
+			custom_tooltip = pod_combat_desc_target_team_enemy
+		}
+		else_if = {
+			limit = { scope:story = { var:targeting = flag:team_ally } }
+			custom_tooltip = pod_combat_desc_target_team_ally
+		}
+	}
+}
