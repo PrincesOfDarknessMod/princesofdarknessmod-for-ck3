@@ -98,8 +98,6 @@ POD_execute_combat_move = {
 			}
 		}
 		else = {
-			# No actor variable (edge case / legacy path) — fall back to
-			# paying on the current scope.
 			POD_splat_agnostic_energy_cost = { COUNT = $STORY$.var:energy_cost }
 		}
 		# AI attrition counter stays on combat_host because the selection
@@ -217,11 +215,54 @@ POD_execute_combat_move = {
 	# doesn't care about stances.
 	if = {
 		limit = { $STORY$ = { has_variable = self_damage } }
+		# Stash the main-hit damage value AND result flags as real
+		# variables on the combat host so they survive the self-damage
+		# pipeline call. Using plain variables instead of
+		# save_scope_value_as because the latter has been observed to
+		# fail to round-trip through the deeper damage dispatch chain
+		# (PoD wound pipeline + AoE scope-switches consume saved scopes
+		# mid-flight).
+		set_variable = { name = pod_combat_pre_self_last_damage value = var:pod_combat_last_damage }
+		if = {
+			limit = { has_variable = pod_combat_last_was_damage }
+			set_variable = { name = pod_combat_pre_self_was_damage value = 1 }
+		}
+		if = {
+			limit = { has_variable = pod_combat_last_was_soaked }
+			set_variable = { name = pod_combat_pre_self_was_soaked value = 1 }
+		}
+
 		pod_combat_deal_hp_damage_bypass_guard_effect = {
 			TARGET_SIDE = player
 			AMOUNT      = $STORY$.var:self_damage
 			REASON      = duel
 		}
+
+		# Restore the main-hit value AND result flags so push_log reads
+		# the right number and renders the right rcode.
+		# (No parallel pod_combat_last_*_amount field for self-damage —
+		# the combat-log GUI doesn't render a self-damage rider today.
+		# If that changes, write the per-call last_damage to a field
+		# here BEFORE the restore below; the snapshot/restore itself
+		# is load-bearing either way.)
+		set_variable = { name = pod_combat_last_damage value = var:pod_combat_pre_self_last_damage }
+		if = {
+			limit = { has_variable = pod_combat_pre_self_was_damage }
+			set_variable = { name = pod_combat_last_was_damage value = yes }
+		}
+		else = {
+			remove_variable = pod_combat_last_was_damage
+		}
+		if = {
+			limit = { has_variable = pod_combat_pre_self_was_soaked }
+			set_variable = { name = pod_combat_last_was_soaked value = yes }
+		}
+		else = {
+			remove_variable = pod_combat_last_was_soaked
+		}
+		remove_variable = pod_combat_pre_self_last_damage
+		remove_variable = pod_combat_pre_self_was_damage
+		remove_variable = pod_combat_pre_self_was_soaked
 	}
 
 	# ── 9. HP heal ───────────────────────────────────────────────
@@ -549,14 +590,14 @@ POD_combat_apply_single_hp_damage = {
 		limit = { $STORY$ = { has_variable = damage_type var:damage_type = flag:aggravated } }
 		if = {
 			limit = { $STORY$ = { has_variable = attack_type var:attack_type = flag:supernatural } }
-			pod_combat_deal_supernatural_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
+			pod_combat_deal_supernatural_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
 		}
 		else_if = {
 			limit = { $STORY$ = { has_variable = bypass_guard } }
-			pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
+			pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
 		}
 		else = {
-			pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
+			pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = duel_aggravated }
 		}
 	}
 
@@ -608,14 +649,14 @@ POD_combat_dispatch_damage_pipeline = {
 	# switch.
 	if = {
 		limit = { $STORY$ = { has_variable = attack_type var:attack_type = flag:supernatural } }
-		pod_combat_deal_supernatural_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
+		pod_combat_deal_supernatural_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
 	}
 	else_if = {
 		limit = { $STORY$ = { has_variable = bypass_guard } }
-		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
+		pod_combat_deal_physical_bypass_guard_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
 	}
 	else = {
-		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
+		pod_combat_deal_physical_hp_damage_effect = { TARGET_SIDE = $TARGET_SIDE$ ACTOR_SIDE = player AMOUNT = $STORY$.var:hp_damage REASON = $REASON$ }
 	}
 }
 
@@ -626,56 +667,55 @@ POD_combat_dispatch_damage_pipeline = {
 # Apply the move's effects across a whole team. "Enemy" vs "ally"
 # resolves RELATIVE to the current actor — slots 0-4 are the PC team,
 # 5-9 the opponent team, so an NPC actor in slot 7 treats 0-4 as its
-# enemies and 5-9 as its allies. All wrappers load each target into
-# the workspace, apply the effect, save it back, and pod_combat_load_
-# workspace_effect restores the original actor/target state at the
-# end so subsequent effects (retaliation, stat reads) resume against
-# the pre-AoE pair.
+# enemies and 5-9 as its allies.
 #
-# NOTE on actor-side detection: "current_actor < 5" means the actor
-# is on the player team. All AoE wrappers branch on this ONCE at the
-# top and then call the same per-slot helper with literal slot
-# numbers for the opposing / own team's range.
+# All six AoE dispatchers iterate pod_combat_slots filtered by
+# slot_index against the actor's team:
+#
+#   team_enemy: actor on player team (current_actor < 5) → hit slots 5-9.
+#               actor on enemy team (current_actor >= 5) → hit slots 0-4.
+#   team_ally:  actor on player team → buff/heal slots 0-4 (includes self).
+#               actor on enemy team → buff/heal slots 5-9.
+#
+# The OR(AND, AND) pattern in the limit collapses both team branches
+# into one iteration — same-team for ally, opposite-team for enemy.
+# scope:host is saved before iterating so the iteration body (which
+# runs in slot-story scope) can read host workspace state via
+# scope:host.var:X and call into pod_combat_load_workspace_effect
+# / single-target damage and heal pipelines after wrapping them in
+# scope:host = { ... }.
+#
+# Damage / heal AoEs go through the workspace pattern: load each
+# target into the OPPONENT workspace slot, run the existing single-
+# target pipeline (which reads / writes the workspace), save the
+# result back, then restore the pre-AoE workspace at the end.
+# Buff / debuff AoEs skip the workspace and write the slot story's
+# tier / stance vars + char-bridge bridge vars directly.
 
 POD_combat_apply_team_enemy_hp_damage = {
 	# $STORY$ = move story
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		# Actor on player team (0-4) — enemies are 5-9
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-	else = {
-		# Actor on enemy team (5-9) — enemies are 0-4
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_damage_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-	pod_combat_load_workspace_effect = yes
-}
-
-POD_combat_aoe_damage_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
-	if = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			# Opposite-team filter
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index < 5 }
+			}
 		}
-		pod_combat_load_target_from_slot_effect = { SLOT = $SLOT$ }
-		POD_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = opponent }
-		pod_combat_save_target_to_slot_effect = { SLOT = $SLOT$ }
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			POD_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = opponent }
+		}
+		pod_combat_save_target_to_story_effect = yes
 		# Alive check post-hit. is_alive catches PoD death-check deaths,
-		# pod_combat_is_incapacitated_trigger catches torpor / wight /
-		# dharma0 / shadow / zombu / incapable, morale <= 0 catches
-		# composure breaks, and the wound-track-full clause flips the
-		# flag whenever PoD's wound boxes are entirely consumed (any
-		# combination of superficial + aggravated reaching track length)
+		# pod_combat_is_incapacitated_trigger catches torpor / incapable, 
+		# slot_morale <= 0 catches composure breaks, and the wound-track-full 
+		# clause flips the flag whenever PoD's wound boxes are entirely consumed 
+		# (any combination of superficial + aggravated reaching track length)
 		# even if PoD's death/torpor branch was suppressed (e.g. by the
 		# pod_combat_nonfatal_active gate during a non-fatal duel).
 		# That keeps KO firing on combat-HP exhaustion regardless of
@@ -683,67 +723,50 @@ POD_combat_aoe_damage_one_slot = {
 		if = {
 			limit = {
 				OR = {
-					var:pod_combat_c$SLOT$_char = { is_alive = no }
-					var:pod_combat_c$SLOT$_char = { pod_combat_is_incapacitated_trigger = yes }
-					var:pod_combat_c$SLOT$_morale <= 0
-					var:pod_combat_c$SLOT$_char = { POD_total_damage_boxes >= POD_health_track_length }
+					var:slot_char = { is_alive = no }
+					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+					var:slot_morale <= 0
+					var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
 				}
 			}
-			set_variable = { name = pod_combat_c$SLOT$_alive value = 0 }
+			set_variable = { name = slot_alive value = 0 }
 		}
 	}
+	scope:host = { pod_combat_load_workspace_effect = yes }
 }
 
 POD_combat_apply_team_enemy_morale_damage = {
 	# $STORY$ = move story
-	# Morale-damage AOE: same load/save pattern as hp AOE.
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-	else = {
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_morale_damage_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-	pod_combat_load_workspace_effect = yes
-}
-
-POD_combat_aoe_morale_damage_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
-	if = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index < 5 }
+			}
 		}
-		pod_combat_load_target_from_slot_effect = { SLOT = $SLOT$ }
-		pod_combat_deal_morale_damage_effect = { TARGET_SIDE = opponent AMOUNT = $STORY$.var:morale_damage }
-		pod_combat_save_target_to_slot_effect = { SLOT = $SLOT$ }
-		# Same alive-flip clauses as the HP-AoE iterator. Morale AoE
-		# almost never trips the wound-track-full branch on its own,
-		# but the predicate is harmless and keeps the four KO-flip
-		# sites (this, POD_combat_aoe_damage_one_slot,
-		# pod_combat_save_target_to_slot_effect, and the post-action
-		# workspace save) using one identical alive-check shape.
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = opponent AMOUNT = $STORY$.var:morale_damage }
+		}
+		pod_combat_save_target_to_story_effect = yes
+		# Same alive-flip clauses as the HP-AoE iterator — see comment there.
 		if = {
 			limit = {
 				OR = {
-					var:pod_combat_c$SLOT$_char = { is_alive = no }
-					var:pod_combat_c$SLOT$_char = { pod_combat_is_incapacitated_trigger = yes }
-					var:pod_combat_c$SLOT$_morale <= 0
-					var:pod_combat_c$SLOT$_char = { POD_total_damage_boxes >= POD_health_track_length }
+					var:slot_char = { is_alive = no }
+					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+					var:slot_morale <= 0
+					var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
 				}
 			}
-			set_variable = { name = pod_combat_c$SLOT$_alive value = 0 }
+			set_variable = { name = slot_alive value = 0 }
 		}
 	}
+	scope:host = { pod_combat_load_workspace_effect = yes }
 }
 
 
@@ -759,80 +782,55 @@ POD_combat_aoe_morale_damage_one_slot = {
 
 POD_combat_apply_team_ally_hp_heal = {
 	# $STORY$ = move story
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		# Actor on player team (0-4) — heal allies 0-4 (includes self)
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-	else = {
-		# Actor on enemy team (5-9) — heal allies 5-9
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_hp_heal_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-	pod_combat_load_workspace_effect = yes
-}
-
-POD_combat_aoe_hp_heal_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
 	# Skip KO'd allies — no point healing a dead slot; wound state on
 	# the char is inaccessible once is_alive = no anyway.
-	if = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			# Same-team filter
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index < 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
+			}
 		}
-		pod_combat_load_target_from_slot_effect = { SLOT = $SLOT$ }
-		if = {
-			limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
-			pod_combat_restore_hp_aggravated_effect = { SIDE = opponent AMOUNT = $STORY$.var:hp_heal }
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			if = {
+				limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
+				pod_combat_restore_hp_aggravated_effect = { SIDE = opponent AMOUNT = $STORY$.var:hp_heal }
+			}
+			else = {
+				pod_combat_restore_hp_superficial_effect = { SIDE = opponent AMOUNT = $STORY$.var:hp_heal }
+			}
 		}
-		else = {
-			pod_combat_restore_hp_superficial_effect = { SIDE = opponent AMOUNT = $STORY$.var:hp_heal }
-		}
-		pod_combat_save_target_to_slot_effect = { SLOT = $SLOT$ }
+		pod_combat_save_target_to_story_effect = yes
 	}
+	scope:host = { pod_combat_load_workspace_effect = yes }
 }
 
 POD_combat_apply_team_ally_morale_heal = {
 	# $STORY$ = move story
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-	else = {
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_morale_heal_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-	pod_combat_load_workspace_effect = yes
-}
-
-POD_combat_aoe_morale_heal_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
-	if = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index < 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
+			}
 		}
-		pod_combat_load_target_from_slot_effect = { SLOT = $SLOT$ }
-		pod_combat_restore_morale_effect = { SIDE = opponent AMOUNT = $STORY$.var:morale_heal }
-		pod_combat_save_target_to_slot_effect = { SLOT = $SLOT$ }
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			pod_combat_restore_morale_effect = { SIDE = opponent AMOUNT = $STORY$.var:morale_heal }
+		}
+		pod_combat_save_target_to_story_effect = yes
 	}
+	scope:host = { pod_combat_load_workspace_effect = yes }
 }
 
 
@@ -859,46 +857,33 @@ POD_combat_aoe_morale_heal_one_slot = {
 
 POD_combat_apply_team_ally_buffs = {
 	# $STORY$ = move story
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-	else = {
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_ally_buffs_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-}
-
-POD_combat_aoe_ally_buffs_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
-	# Applies every buff-side tier var + stance flag the story has
-	# set. Each if-block mirrors one branch of the single-target
-	# tier / stance section in POD_execute_combat_move.
-	if = {
+	# Iteration body runs in slot-story scope so `set_variable = { name = slot_X ... }`
+	# writes the slot story directly and `var:slot_char` flips into the
+	# participant character for the soak-tier bridge var write.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			# Same-team filter
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index < 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
+			}
 		}
 		# Tier soak buffs: slot var + char var (PoD soak bridge).
 		if = {
 			limit = { $STORY$ = { has_variable = soak_buff_round_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_round_tier value = $STORY$.var:soak_buff_round_tier }
-			var:pod_combat_c$SLOT$_char = {
+			set_variable = { name = slot_soak_buff_round_tier value = $STORY$.var:soak_buff_round_tier }
+			var:slot_char = {
 				set_variable = { name = pod_combat_tier_soak_buff_round value = $STORY$.var:soak_buff_round_tier }
 			}
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = soak_buff_combat_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_combat_tier value = $STORY$.var:soak_buff_combat_tier }
-			var:pod_combat_c$SLOT$_char = {
+			set_variable = { name = slot_soak_buff_combat_tier value = $STORY$.var:soak_buff_combat_tier }
+			var:slot_char = {
 				set_variable = { name = pod_combat_tier_soak_buff_combat value = $STORY$.var:soak_buff_combat_tier }
 			}
 		}
@@ -906,93 +891,78 @@ POD_combat_aoe_ally_buffs_one_slot = {
 		# will be picked up when the ally next loads).
 		if = {
 			limit = { $STORY$ = { has_variable = hit_buff_round_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_round_tier value = $STORY$.var:hit_buff_round_tier }
+			set_variable = { name = slot_hit_buff_round_tier value = $STORY$.var:hit_buff_round_tier }
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = hit_buff_combat_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_combat_tier value = $STORY$.var:hit_buff_combat_tier }
+			set_variable = { name = slot_hit_buff_combat_tier value = $STORY$.var:hit_buff_combat_tier }
 		}
-		# Stance flags: set_guard / dodge / stealth broadcast to
-		# each ally.
+		# Stance flags: set_guard / dodge / stealth broadcast to each ally.
 		if = {
 			limit = { $STORY$ = { has_variable = set_guard } }
-			set_variable = { name = pod_combat_c$SLOT$_is_guarding value = yes }
+			set_variable = { name = slot_is_guarding  value = yes }
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = dodge } }
-			set_variable = { name = pod_combat_c$SLOT$_is_dodging value = yes }
+			set_variable = { name = slot_is_dodging   value = yes }
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = stealth } }
-			set_variable = { name = pod_combat_c$SLOT$_is_stealthed value = yes }
+			set_variable = { name = slot_is_stealthed value = yes }
 		}
 	}
 }
 
 POD_combat_apply_team_enemy_debuffs = {
 	# $STORY$ = move story
-	if = {
-		limit = { var:pod_combat_current_actor < 5 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 5 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 6 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 7 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 8 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 9 }
-	}
-	else = {
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 0 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 1 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 2 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 3 }
-		POD_combat_aoe_enemy_debuffs_one_slot = { STORY = $STORY$ SLOT = 4 }
-	}
-}
-
-POD_combat_aoe_enemy_debuffs_one_slot = {
-	# $STORY$ = move story
-	# $SLOT$  = 0-9
-	# Mirrors POD_combat_aoe_ally_buffs_one_slot but for the
-	# enemy-target side: debuff tier vars + bypass/remove flag
-	# clearances.
-	if = {
+	# Mirrors POD_combat_apply_team_ally_buffs but for the enemy-target
+	# side: debuff tier vars + bypass/remove flag clearances.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_slots
 		limit = {
-			has_variable = pod_combat_c$SLOT$_char
-			var:pod_combat_c$SLOT$_alive = 1
+			has_variable = slot_char
+			var:slot_alive = 1
+			# Opposite-team filter
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor < 5 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index < 5 }
+			}
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = soak_debuff_round_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_round_tier value = $STORY$.var:soak_debuff_round_tier }
-			var:pod_combat_c$SLOT$_char = {
+			set_variable = { name = slot_soak_debuff_round_tier value = $STORY$.var:soak_debuff_round_tier }
+			var:slot_char = {
 				set_variable = { name = pod_combat_tier_soak_debuff_round value = $STORY$.var:soak_debuff_round_tier }
 			}
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = soak_debuff_combat_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_combat_tier value = $STORY$.var:soak_debuff_combat_tier }
-			var:pod_combat_c$SLOT$_char = {
+			set_variable = { name = slot_soak_debuff_combat_tier value = $STORY$.var:soak_debuff_combat_tier }
+			var:slot_char = {
 				set_variable = { name = pod_combat_tier_soak_debuff_combat value = $STORY$.var:soak_debuff_combat_tier }
 			}
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = hit_debuff_round_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_round_tier value = $STORY$.var:hit_debuff_round_tier }
+			set_variable = { name = slot_hit_debuff_round_tier value = $STORY$.var:hit_debuff_round_tier }
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = hit_debuff_combat_tier } }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_combat_tier value = $STORY$.var:hit_debuff_combat_tier }
+			set_variable = { name = slot_hit_debuff_combat_tier value = $STORY$.var:hit_debuff_combat_tier }
 		}
 		# Bypass / remove flags — strip the target's stances.
 		if = {
 			limit = { $STORY$ = { has_variable = bypass_dodge } }
-			remove_variable = pod_combat_c$SLOT$_is_dodging
+			remove_variable = slot_is_dodging
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = bypass_stealth } }
-			remove_variable = pod_combat_c$SLOT$_is_stealthed
+			remove_variable = slot_is_stealthed
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = remove_guard } }
-			remove_variable = pod_combat_c$SLOT$_is_guarding
+			remove_variable = slot_is_guarding
 		}
 	}
 }

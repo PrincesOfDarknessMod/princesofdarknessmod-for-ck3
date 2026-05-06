@@ -19,20 +19,22 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 	# pod_combat_current_actor < 5 → AI is on the player team
 	# (slots 0-4) and looks for an enemy in 5-9. >= 5 inverts. Same
 	# split pod_combat_execute_ai_turn_effect uses at turn start.
+	#
+	# The "current target is alive" check used to be a NOR over 10
+	# AND clauses (one per slot index) — collapsed to any_in_list:
+	# if SOME active slot's slot_index matches selected_target AND
+	# that slot is alive, the target is fine and we no-op. NOT(any) =
+	# "no live match found" → re-pick.
+	save_scope_as = host
 	if = {
 		limit = {
 			has_variable = pod_combat_selected_target
-			NOR = {
-				AND = { var:pod_combat_selected_target = 0 has_variable = pod_combat_c0_char var:pod_combat_c0_alive = 1 }
-				AND = { var:pod_combat_selected_target = 1 has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 }
-				AND = { var:pod_combat_selected_target = 2 has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 }
-				AND = { var:pod_combat_selected_target = 3 has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 }
-				AND = { var:pod_combat_selected_target = 4 has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 }
-				AND = { var:pod_combat_selected_target = 5 has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 }
-				AND = { var:pod_combat_selected_target = 6 has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 }
-				AND = { var:pod_combat_selected_target = 7 has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 }
-				AND = { var:pod_combat_selected_target = 8 has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 }
-				AND = { var:pod_combat_selected_target = 9 has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 }
+			NOT = {
+				any_in_list = {
+					variable = pod_combat_active_slots
+					var:slot_index = scope:host.var:pod_combat_selected_target
+					var:slot_alive = 1
+				}
 			}
 		}
 		# Re-pick from the appropriate team's live slots and reload
@@ -166,9 +168,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						# current tier against the move's tier so
 						# a Tier-2 buff can still upgrade a Tier-1
 						# stack but a Tier-1 buff can't downgrade
-						# a Tier-2. 
-						# NOTE: This doesn't seem to be working
-						#		 Needs further investigation.
+						# a Tier-2.
 						#
 						# All checks read against the workspace
 						# (pod_combat_player_* = acting AI,
@@ -235,24 +235,23 @@ pod_combat_ai_select_and_execute_move_effect = {
 							}
 							var:pod_combat_opponent_hit_debuff_combat_tier < scope:ai_candidate_move.var:hit_debuff_combat_tier
 						}
-						# Self stance flags (presence-only, no tier)
-						NOT = {
+						NAND = {
 							scope:ai_candidate_move = { has_variable = set_guard }
 							has_variable = pod_combat_player_is_guarding
 						}
-						NOT = {
+						NAND = {
 							scope:ai_candidate_move = { has_variable = dodge }
 							has_variable = pod_combat_player_is_dodging
 						}
-						NOT = {
+						NAND = {
 							scope:ai_candidate_move = { has_variable = stealth }
 							has_variable = pod_combat_player_is_stealthed
 						}
-						NOT = {
+						NAND = {
 							scope:ai_candidate_move = { has_variable = retaliate_if_hit }
 							has_variable = pod_combat_player_retaliate_hit
 						}
-						NOT = {
+						NAND = {
 							scope:ai_candidate_move = { has_variable = retaliate_if_missed }
 							has_variable = pod_combat_player_retaliate_miss
 						}
@@ -411,12 +410,12 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# moves with NO target_priority because priority-
 					# override moves swap target AFTER selection, so the
 					# workspace target at weight time isn't the eventual
-					# target for those (see COMBAT_DESIGN_HISTORY.md §14).
-					# Priority-override moves still get all the
-					# situation-agnostic modifiers (anti-rep, heal /
+					# target for those — re-evaluating the modifiers post-
+					# swap would require a second weight pass per move,
+					# and the situation-agnostic ones (anti-rep, heal /
 					# guard / dodge / stealth when hurt, energy attrition,
-					# trait gate) so they're not flying blind — just
-					# slightly less situational.
+					# trait gate) already cover the priority-override
+					# branch well enough.
 
 					# Bypass-dodge bonus when target is dodging.
 					modifier = {
@@ -538,9 +537,11 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# pays splat energy when it executes an energy-cost
 					# move (the move runs through the same
 					# POD_spend_splat_agnostic_energy path the PC uses).
-					# pod_combat_c{N}_energy_used is a per-combatant
-					# counter that persists for the whole combat, not a
-					# per-turn reset.
+					# pod_combat_player_energy_used here is the
+					# workspace mirror of the actor's slot story
+					# slot_energy_used, which is a per-combatant
+					# counter persisting for the whole combat (no
+					# per-turn reset).
 					modifier = {
 						add = -8
 						has_variable = energy_cost
@@ -843,109 +844,36 @@ pod_combat_ai_swap_to_ally_target_effect = {
 	# can put it back after the single-ally move fires.
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
 
-	# Pick the first alive non-self same-team ally and load them into the
-	# opponent workspace. Team membership is fixed by slot index: slots 0-4
-	# are team 0 (player team), 5-9 are team 1 (enemy team), so "same team
-	# as actor" is expressed via a compile-time gate on pod_combat_current_actor.
+	# Pick any alive non-self same-team ally and load them into the
+	# opponent workspace. Team membership is fixed by slot index: slots
+	# 0-4 are team 0 (player team), 5-9 are team 1 (enemy team), so
+	# "same team as actor" is the AND-of-(actor team, slot team) filter
+	# below. Replaced 10 hardcoded if/else_if branches.
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
+			}
+		}
+		weight = {
+			base = 1
+			modifier = { add = 50 }
+		}
+		save_scope_as = chosen_target
+	}
 	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_alive = 1
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 0 }
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		set_variable = { name = pod_combat_selected_target value = 0 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 0 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_alive = 1
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 1 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
-		set_variable = { name = pod_combat_selected_target value = 1 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 1 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_alive = 1
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 2 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 2 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 2 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_alive = 1
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 3 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 3 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_alive = 1
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 4 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 4 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_alive = 1
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 5 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 5 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_alive = 1
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 6 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 6 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_alive = 1
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 7 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 7 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_alive = 1
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 8 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 8 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-	}
-	else_if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_alive = 1
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 9 }
-		}
-		set_variable = { name = pod_combat_selected_target value = 9 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 9 }
 	}
 }
 
@@ -953,1097 +881,321 @@ pod_combat_ai_swap_to_ally_target_effect = {
 # Used by single-ally skills with a target_priority hint set on the
 # move story. Each variant has the same shape as
 # pod_combat_ai_swap_to_ally_target_effect (save current target, pick
-# a same-team non-self ally, load into opponent workspace) but uses
-# random_list with priority-weighted modifiers instead of the if/else_if
-# first-match chain.
+# a same-team non-self ally, load into opponent workspace) but adds
+# priority-weighted modifiers on top of the base weight.
 #
 # Variants:
 #   pod_combat_ai_swap_to_wounded_ally_target_effect — prefer lowest HP
 #   pod_combat_ai_swap_to_healthy_ally_target_effect — prefer full HP
 #
-# Selection: each slot is a random_list entry with base weight 1, +50 for
-# being a valid target (alive, same team, not self), and +100 if the slot
-# matches the priority. Slots that don't match the team gate get a 0 base
-# weight, so they never fire.
+# Replaced random_list with 10 weighted entries (one per slot) with
+# random_in_list iterating pod_combat_active_slots filtered by team.
+# Eligibility filter and weight modifiers are now expressed once in
+# the iteration body instead of being duplicated 10 times.
 
 pod_combat_ai_swap_to_wounded_ally_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 0 }
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_hp_value < pod_combat_c0_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 1 }
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_hp_value < pod_combat_c1_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				add = 100
+				var:slot_char = { POD_empty_damage_boxes < POD_health_track_length }
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 2 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_hp_value < pod_combat_c2_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 3 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_hp_value < pod_combat_c3_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 4 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_hp_value < pod_combat_c4_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 5 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_hp_value < pod_combat_c5_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 6 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_hp_value < pod_combat_c6_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 7 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_hp_value < pod_combat_c7_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 8 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_hp_value < pod_combat_c8_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 9 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_hp_value < pod_combat_c9_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
 pod_combat_ai_swap_to_healthy_ally_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 0 }
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_hp_value >= pod_combat_c0_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 1 }
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_hp_value >= pod_combat_c1_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				add = 100
+				var:slot_char = { POD_empty_damage_boxes >= POD_health_track_length }
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 2 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_hp_value >= pod_combat_c2_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 3 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_hp_value >= pod_combat_c3_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 4 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_hp_value >= pod_combat_c4_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 5 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_hp_value >= pod_combat_c5_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 6 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_hp_value >= pod_combat_c6_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 7 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_hp_value >= pod_combat_c7_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 8 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_hp_value >= pod_combat_c8_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 9 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_hp_value >= pod_combat_c9_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
 # ─── SINGLE-ENEMY SWAP VARIANTS (TARGET PREFERENCE) ───────────────
-# Used by single-enemy skills with a target_priority hint set on the
-# move story. Mirrors the single-ally swap variants but with
-# opposing-team gating.
-#
-# Variants:
-#   pod_combat_ai_swap_to_wounded_enemy_target_effect — prefer lowest HP
-#   pod_combat_ai_swap_to_healthy_enemy_target_effect — prefer full HP
-#
-# Default single-enemy skills do not call any swap — they use the AI's
-# turn-start enemy target as picked by pod_combat_ai_select_{enemy,player}_target_effect.
-# These swap variants are dispatched by POD_combat_ai_swap_for_story
-# only when a move's target_priority resolves to "wounded" or "healthy".
-#
-# Selection: each slot is a random_list entry with base weight 1, +50 for
-# being a valid target (alive, on the opposing team), and +100 if the slot
-# matches the priority. Slots that don't match the team gate get a 0 base
-# weight, so they never fire.
-#
-# Just like the ally swap, these save the current selected_target into
-# pod_combat_ai_saved_enemy_target and rely on
-# pod_combat_ai_restore_enemy_target_effect to put the AI's original
-# turn-start target back after the move fires.
+# Same shape as the ally variants but with the opposite-team filter.
+# Used by single-enemy skills with a target_priority hint.
 
 pod_combat_ai_swap_to_wounded_enemy_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor >= 5
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index <= 4 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_hp_value < pod_combat_c0_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_hp_value < pod_combat_c1_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				add = 100
+				var:slot_char = { POD_empty_damage_boxes < POD_health_track_length }
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_hp_value < pod_combat_c2_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_hp_value < pod_combat_c3_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_hp_value < pod_combat_c4_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_hp_value < pod_combat_c5_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_hp_value < pod_combat_c6_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_hp_value < pod_combat_c7_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_hp_value < pod_combat_c8_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_hp_value < pod_combat_c9_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
 pod_combat_ai_swap_to_healthy_enemy_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor >= 5
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index <= 4 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_hp_value >= pod_combat_c0_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_hp_value >= pod_combat_c1_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				add = 100
+				var:slot_char = { POD_empty_damage_boxes >= POD_health_track_length }
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_hp_value >= pod_combat_c2_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_hp_value >= pod_combat_c3_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_hp_value >= pod_combat_c4_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_hp_value >= pod_combat_c5_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_hp_value >= pod_combat_c6_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_hp_value >= pod_combat_c7_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_hp_value >= pod_combat_c8_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_hp_value >= pod_combat_c9_max_hp_value }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
-# ─── ROUND-ROBIN SWAP VARIANTS (TARGET PREFERENCE) ────────────────
-# Used by single-{ally,enemy} skills with target_priority = "round_robin".
-# Distributes picks across alive candidates by penalizing whichever slot
-# was most recently picked by a round-robin swap. Tracks state via
-# pod_combat_ai_last_swap_target — set inside each entry's body and read
-# by the next round-robin call. The penalty is multiplicative
-# (factor = 0.2) so the most-recently-picked slot still has a small
-# chance, just heavily reduced compared to alternatives.
-#
-# Memory scope: round-robin variants only read/write their own memory.
-# Other priority swaps (wounded/healthy/threat) don't update
-# pod_combat_ai_last_swap_target — keeps the implementation localized
-# and avoids cross-priority surprise interactions.
+# ─── ROUND-ROBIN SWAP VARIANTS ────────────────────────────────────
+# Uses pod_combat_ai_last_swap_target as anti-repetition memory: the
+# slot picked last time gets a 0.2 weight multiplier, so the AI
+# rotates through teammates / opponents instead of fixating. Updates
+# last_swap_target after each pick.
 
 pod_combat_ai_swap_to_round_robin_ally_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 0 }
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
 			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 0 }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 1 }
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 1 }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				factor = 0.2
+				scope:host = { has_variable = pod_combat_ai_last_swap_target }
+				var:slot_index = scope:host.var:pod_combat_ai_last_swap_target
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 2 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 2 }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
+			set_variable = { name = pod_combat_ai_last_swap_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 3 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 3 }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 4 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 4 }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 5 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 5 }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 6 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 6 }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 7 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 7 }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 8 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 8 }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 9 }
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 9 }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
 pod_combat_ai_swap_to_round_robin_enemy_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor >= 5
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index <= 4 }
 			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 0 }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 1 }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = {
+				factor = 0.2
+				scope:host = { has_variable = pod_combat_ai_last_swap_target }
+				var:slot_index = scope:host.var:pod_combat_ai_last_swap_target
+			}
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 2 }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
+			set_variable = { name = pod_combat_ai_last_swap_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 3 }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 4 }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 5 }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 6 }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 7 }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 8 }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { factor = 0.2 has_variable = pod_combat_ai_last_swap_target var:pod_combat_ai_last_swap_target = 9 }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			set_variable = { name = pod_combat_ai_last_swap_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
-# ─── THREAT SWAP VARIANTS (TARGET PREFERENCE) ─────────────────────
-# Used by single-{ally,enemy} skills with target_priority = "threat".
-# Two-tier additive bonus on prowess: +100 if prowess >= 5, +200 more
-# if prowess >= 8. Slots stack the bonuses additively, so a prowess-9
-# slot gets the full +300 boost while a prowess-3 slot gets none.
-# For ally targets: "buff the strongest fighter".
-# For enemy targets: "shut down their main DPS".
+# ─── THREAT SWAP VARIANTS ─────────────────────────────────────────
+# Prefer high-prowess targets — heavy bonus past a threshold, even
+# heavier past extreme threshold. Used by AIs whose moves want to
+# focus on the most dangerous combatant rather than the weakest.
 
- @prowress_threat = 50
- @prowress_extreme_threat = 100
+@prowress_threat = 50
+@prowress_extreme_threat = 100
+
 
 pod_combat_ai_swap_to_threat_ally_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 0 }
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c0_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 1 }
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c1_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = { add = 100 var:slot_prowess >= @prowress_threat }
+			modifier = { add = 200 var:slot_prowess >= @prowress_extreme_threat }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 2 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c2_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 3 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c3_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor <= 4
-				NOT = { var:pod_combat_current_actor = 4 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c4_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 5 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c5_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 6 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c6_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 7 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c7_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 8 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c8_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor >= 5
-				NOT = { var:pod_combat_current_actor = 9 }
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c9_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
 
 pod_combat_ai_swap_to_threat_enemy_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
-	random_list = {
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c0_char
-				var:pod_combat_c0_alive = 1
-				var:pod_combat_current_actor >= 5
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			OR = {
+				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index >= 5 }
+				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index <= 4 }
 			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c0_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c0_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 0 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 0 }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c1_char
-				var:pod_combat_c1_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c1_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c1_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
+			modifier = { add = 100 var:slot_prowess >= @prowress_threat }
+			modifier = { add = 200 var:slot_prowess >= @prowress_extreme_threat }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c2_char
-				var:pod_combat_c2_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c2_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c2_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c3_char
-				var:pod_combat_c3_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c3_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c3_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c4_char
-				var:pod_combat_c4_alive = 1
-				var:pod_combat_current_actor >= 5
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c4_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c4_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c5_char
-				var:pod_combat_c5_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c5_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c5_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c6_char
-				var:pod_combat_c6_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c6_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c6_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c7_char
-				var:pod_combat_c7_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c7_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c7_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c8_char
-				var:pod_combat_c8_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c8_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c8_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		1 = {
-			trigger = {
-				has_variable = pod_combat_c9_char
-				var:pod_combat_c9_alive = 1
-				var:pod_combat_current_actor <= 4
-			}
-			modifier = { add = 50 }
-			modifier = { add = 100 pod_combat_c9_prowess_value >= @prowress_threat }
-			modifier = { add = 200 pod_combat_c9_prowess_value >= @prowress_extreme_threat }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
+		scope:chosen_target = {
+			pod_combat_load_target_from_story_effect = yes
 		}
 	}
 }
-
-# ─── SINGLE-PC TARGET SWAP ────────────────────────────────────────
-# Fired by the AI select effect right before a single-pc move body runs.
-# Saves the AI's current enemy target and loads slot 0 (the PC) into the
-# opponent workspace so the move effect applies to the PC. After the
-# move fires, pod_combat_ai_restore_enemy_target_effect puts the enemy
-# target back (the same restore effect used by single-ally).
-#
-# Unlike the ally swap, there's no slot iteration — slot 0 is always
-# the PC, always populated during combat, and always valid as a target
-# for single-pc skills. The defensive `has_variable = pod_combat_c0_char`
-# guard is redundant but harmless if combat is improperly initialized.
 
 pod_combat_ai_swap_to_pc_target_effect = {
 	# Save the current selected_target so restore_enemy_target can put it back
 	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
 
-	# Swap to slot 0 (the PC) and load into the opponent workspace
+	# Swap to slot 0 (the PC) and load into the opponent workspace.
+	# Inlined what used to be `pod_combat_load_target_from_slot_effect = { SLOT = 0 }`
+	# — that wrapper just snapshotted host scope and flipped into the
+	# slot story before delegating to pod_combat_load_target_from_story_effect,
+	# so the inline form is the same dance.
 	if = {
-		limit = { has_variable = pod_combat_c0_char }
+		limit = { has_variable = pod_combat_slot_0 var:pod_combat_slot_0 = { has_variable = slot_char } }
 		set_variable = { name = pod_combat_selected_target value = 0 }
-		pod_combat_load_target_from_slot_effect = { SLOT = 0 }
+		save_scope_as = host
+		var:pod_combat_slot_0 = {
+			pod_combat_load_target_from_story_effect = yes
+		}
 	}
 }
 
@@ -2057,34 +1209,26 @@ pod_combat_ai_restore_enemy_target_effect = {
 	# buffs into the opponent workspace, and the workspace currently holds
 	# the buffed ally. If we reload the enemy slot without saving first, the
 	# buff would be overwritten by the stale slot data and effectively erased.
-	# pod_combat_save_target_to_slot_effect uses pod_combat_selected_target
-	# to pick the destination slot, which still points at the ally at this point.
+	#
+	# Replaced two parallel 10-block else_if dispatchers (save current target's
+	# slot, then load saved enemy target's slot) with two every_in_list passes.
 	if = {
 		limit = { has_variable = pod_combat_ai_saved_enemy_target }
+		save_scope_as = host
 		# Save the ally workspace back to its slot before we reload the enemy
-		if = { limit = { var:pod_combat_selected_target = 0 } pod_combat_save_target_to_slot_effect = { SLOT = 0 } }
-		else_if = { limit = { var:pod_combat_selected_target = 1 } pod_combat_save_target_to_slot_effect = { SLOT = 1 } }
-		else_if = { limit = { var:pod_combat_selected_target = 2 } pod_combat_save_target_to_slot_effect = { SLOT = 2 } }
-		else_if = { limit = { var:pod_combat_selected_target = 3 } pod_combat_save_target_to_slot_effect = { SLOT = 3 } }
-		else_if = { limit = { var:pod_combat_selected_target = 4 } pod_combat_save_target_to_slot_effect = { SLOT = 4 } }
-		else_if = { limit = { var:pod_combat_selected_target = 5 } pod_combat_save_target_to_slot_effect = { SLOT = 5 } }
-		else_if = { limit = { var:pod_combat_selected_target = 6 } pod_combat_save_target_to_slot_effect = { SLOT = 6 } }
-		else_if = { limit = { var:pod_combat_selected_target = 7 } pod_combat_save_target_to_slot_effect = { SLOT = 7 } }
-		else_if = { limit = { var:pod_combat_selected_target = 8 } pod_combat_save_target_to_slot_effect = { SLOT = 8 } }
-		else_if = { limit = { var:pod_combat_selected_target = 9 } pod_combat_save_target_to_slot_effect = { SLOT = 9 } }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_index = scope:host.var:pod_combat_selected_target }
+			pod_combat_save_target_to_story_effect = yes
+		}
 
 		# Now swap selected_target back to the enemy and reload that slot's data
 		set_variable = { name = pod_combat_selected_target value = var:pod_combat_ai_saved_enemy_target }
-		if = { limit = { var:pod_combat_selected_target = 0 } pod_combat_load_target_from_slot_effect = { SLOT = 0 } }
-		else_if = { limit = { var:pod_combat_selected_target = 1 } pod_combat_load_target_from_slot_effect = { SLOT = 1 } }
-		else_if = { limit = { var:pod_combat_selected_target = 2 } pod_combat_load_target_from_slot_effect = { SLOT = 2 } }
-		else_if = { limit = { var:pod_combat_selected_target = 3 } pod_combat_load_target_from_slot_effect = { SLOT = 3 } }
-		else_if = { limit = { var:pod_combat_selected_target = 4 } pod_combat_load_target_from_slot_effect = { SLOT = 4 } }
-		else_if = { limit = { var:pod_combat_selected_target = 5 } pod_combat_load_target_from_slot_effect = { SLOT = 5 } }
-		else_if = { limit = { var:pod_combat_selected_target = 6 } pod_combat_load_target_from_slot_effect = { SLOT = 6 } }
-		else_if = { limit = { var:pod_combat_selected_target = 7 } pod_combat_load_target_from_slot_effect = { SLOT = 7 } }
-		else_if = { limit = { var:pod_combat_selected_target = 8 } pod_combat_load_target_from_slot_effect = { SLOT = 8 } }
-		else_if = { limit = { var:pod_combat_selected_target = 9 } pod_combat_load_target_from_slot_effect = { SLOT = 9 } }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_index = scope:host.var:pod_combat_selected_target }
+			pod_combat_load_target_from_story_effect = yes
+		}
 		remove_variable = pod_combat_ai_saved_enemy_target
 	}
 }

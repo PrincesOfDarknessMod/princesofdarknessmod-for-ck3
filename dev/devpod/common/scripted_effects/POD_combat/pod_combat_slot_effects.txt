@@ -1,0 +1,289 @@
+﻿# Per-slot story_cycle scaffolding for the combat minigame. The
+# POD_combat_slot story type (see POD_story_cycle_combat.txt) is the
+# sole data container for per-combatant state. The flat
+# pod_combat_c{N}_* character-variable namespace this used to use was
+# retired during the slot-story migration and is no longer written or
+# read. This file holds the lifecycle helpers — create, populate, clear
+# — and a parametric accessor effect for fields that need direct write
+# access by slot index.
+#
+# Lifecycle:
+#   - pod_combat_create_slot_stories_effect runs once at combat start
+#     from pod_combat_initialize_effect, BEFORE any per-slot init runs
+#     (so pod_combat_init_slot_from_character_effect can read/write the
+#     slot story for the slot it's populating).
+#   - pod_combat_clear_slot_stories_effect runs once at combat end from
+#     pod_combat_group_cleanup_effect. end_story takes every slot var
+#     with it, so no per-field cleanup pass is needed.
+#
+# Caller scope: the combat host (the PC). All saves / list adds happen
+# on the host; the actual stories live on Charon (POD_wraith_01) like
+# the move catalogue and log entries.
+
+###################
+###### CREATION
+###################
+
+# Build one POD_combat_slot story for the given slot index, list it on
+# the host's pod_combat_slots variable list, and stash a pointer to
+# it in pod_combat_slot_{N} (where N = $SLOT$) so parametric helpers
+# can reach it without iterating the list.
+#
+# Each slot story is initialized with:
+#   var:slot_index       — the slot's integer position (0-9)
+#   var:slot_alive       — 1 (the slot is "occupied" until KO'd; init
+#                          effect for individual fields will overwrite
+#                          this if the slot is unfilled)
+#   var:slot_morale      — 0 default
+#   var:slot_prowess     — 0 default
+#   var:slot_soak        — 0 default
+#   var:slot_energy_used — 0 default
+#   var:slot_has_acted   — 0 default
+#
+# These fields are pure values (no absence-as-signal semantics) so a
+# default of 0 is safe — readers gate on `has_variable =
+# pod_combat_slot_$SLOT$` (the slot exists) and just read the value.
+# Filled slots overwrite the defaults from
+# pod_combat_init_slot_from_character_effect; unfilled slots stay at 0.
+#
+# Fields NOT pre-initialized (deliberately absence-as-signal):
+#   slot_char                — meaningful only as a scope reference;
+#                              absence = "slot is empty"
+#   slot_base_soak           — gate for the round-end soak revert in
+#                              pod_combat_reset_one_slot_soak_effect
+#   slot_hit_chance          — gate for the synthesis fallback in
+#                              pod_combat_slot_hit_chance_value (the
+#                              fallback fires when hit_chance hasn't
+#                              been written yet by
+#                              calculate_all_hit_chances)
+#   slot_base_hit_chance     — gate in pod_combat_recalc_slot_stats_effect
+#   slot_initiative          — set during initiative calc (alive slots
+#                              only); presence distinguishes
+#                              "filled-and-rolled this round" from
+#                              "unfilled or pre-calc"
+#   slot_turn_order          — turn rank within the round, stamped by
+#                              pod_combat_calc_turn_orders_effect after
+#                              initiative is rolled
+#   slot_init_bonus          — presence = active initiative bonus to
+#                              fold into the next initiative roll
+#   slot_ap_drain            — presence = pending AP drain to apply on
+#                              the actor's next turn
+#   slot_incorporeal_spirit  — presence = combatant is incorporeal;
+#                              physical attacks no-op unless the
+#                              attacker has slot_can_damage_spirit
+#   slot_can_damage_spirit   — presence = combatant can damage
+#                              incorporeal targets
+#   slot_is_guarding /       — stance flags
+#   slot_is_dodging /
+#   slot_is_stealthed
+#   slot_retaliate_*         — retaliate state
+#   slot_*_tier              — tier vars; has_variable detects "no
+#                              buff active"
+# Readers of these fields use per-field has_variable checks.
+#
+# Caller must be in host scope.
+
+pod_combat_create_one_slot_story_effect = {
+	# $SLOT$ = 0..9
+	save_scope_as = pod_combat_slot_owner
+	character:POD_wraith_01 = {
+		create_story = {
+			type = POD_combat_slot
+			save_scope_as = new_slot
+		}
+	}
+	hidden_effect_new_object = {
+		scope:new_slot = {
+			set_variable = { name = slot_index       value = $SLOT$ }
+			set_variable = { name = slot_alive       value = 1 }
+			# Stat fields zero-defaulted so SV gates can be a single
+			# pointer-var check instead of nested per-field has_variable.
+			# Only the "pure value" stats are pre-init'd — gate-style
+			# fields (slot_base_soak, slot_hit_chance, slot_base_hit_chance,
+			# slot_initiative, slot_init_bonus, slot_ap_drain,
+			# slot_incorporeal_spirit, slot_can_damage_spirit, stances,
+			# tiers) stay absent-until-written.
+			set_variable = { name = slot_morale      value = 0 }
+			set_variable = { name = slot_prowess     value = 0 }
+			set_variable = { name = slot_soak        value = 0 }
+			set_variable = { name = slot_energy_used value = 0 }
+			set_variable = { name = slot_has_acted   value = 0 }
+		}
+		scope:pod_combat_slot_owner = {
+			set_variable = { name = pod_combat_slot_$SLOT$ value = scope:new_slot }
+			add_to_variable_list = { name = pod_combat_slots target = scope:new_slot }
+		}
+	}
+}
+
+# Top-level entry: build all 10 slot stories and the host-side anchor.
+# Idempotent only across separate combats — within a single combat,
+# calling this twice would double-list the stories. Init code calls it
+# exactly once per combat from pod_combat_initialize_effect.
+pod_combat_create_slot_stories_effect = {
+	pod_combat_create_one_slot_story_effect = { SLOT = 0 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 1 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 2 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 3 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 4 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 5 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 6 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 7 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 8 }
+	pod_combat_create_one_slot_story_effect = { SLOT = 9 }
+}
+
+
+###################
+###### CLEANUP
+###################
+
+# end_story every slot story, then drop the host's pointer vars and
+# clear the list. The end_story call frees the story_cycle objects
+# from Charon's owned-stories list (matching how log entries and
+# sc_context get torn down at combat end). The pointer vars and list
+# clear ensure the host has no dangling references.
+#
+# Caller must be in host scope.
+pod_combat_clear_slot_stories_effect = {
+	every_in_list = {
+		variable = pod_combat_slots
+		end_story = yes
+	}
+	clear_variable_list = pod_combat_slots
+	# Also clear the GUI-facing filtered list (only filled slots).
+	# Repopulated on each combat init via pod_combat_set_slot_char_effect.
+	clear_variable_list = pod_combat_active_slots
+	remove_variable = pod_combat_slot_0
+	remove_variable = pod_combat_slot_1
+	remove_variable = pod_combat_slot_2
+	remove_variable = pod_combat_slot_3
+	remove_variable = pod_combat_slot_4
+	remove_variable = pod_combat_slot_5
+	remove_variable = pod_combat_slot_6
+	remove_variable = pod_combat_slot_7
+	remove_variable = pod_combat_slot_8
+	remove_variable = pod_combat_slot_9
+}
+
+
+###################
+###### ACCESSOR HELPERS
+###################
+# Parametric write helpers, keyed by integer slot index. Each writes
+# to the matching slot story via the host's pod_combat_slot_$N$
+# pointer var. Used by host-scope callers (combat init, AI logic,
+# AoE dispatchers' int-keyed wrappers) where the slot index is a
+# parse-time literal. Iteration-style callers running in slot-story
+# scope do direct `set_variable = { name = slot_X ... }` instead of
+# routing through these helpers, since current scope is already the
+# slot story.
+pod_combat_set_slot_alive_effect = {
+	# $SLOT$  = 0..9
+	# $VALUE$ = 0 or 1
+	hidden_effect_new_object = {
+		var:pod_combat_slot_$SLOT$ = {
+			set_variable = { name = slot_alive value = $VALUE$ }
+		}
+	}
+}
+
+# Universal slot-var setter — writes a value to a named slot-story
+# field. Var name on the slot story: slot_$NAME$ (e.g. slot_morale,
+# slot_soak).
+#
+# Used for the bulk of per-slot stat writes — morale, prowess, soak,
+# base_soak, hit_chance, base_hit_chance, etc. Phase-specific helpers
+# (set_slot_alive_effect, set_slot_char_effect) are equivalent but
+# kept around because they predate this universal helper. New call
+# sites should prefer this helper unless a more specific one exists.
+#
+# Parameters:
+#   $SLOT$  = 0..9
+#   $NAME$  = stat short name (morale, prowess, soak, base_soak,
+#             hit_chance, base_hit_chance, ...)
+#   $VALUE$ = value to assign — literal, scope:, or var: reference
+#             (var: references resolve against the caller's scope, NOT
+#             the slot story).
+#             DO NOT pass a `{ value=X add=Y }` block — CK3's parametric
+#             arg parser reads `value=` and `add=` inside the block as
+#             additional helper arguments and errors with "unknown
+#             arguments: value, add". For computed values (e.g. random-
+#             list rolls), save_scope_value_as the result first and pass
+#             scope:foo as VALUE. See pod_combat_calc_one_initiative_effect
+#             for the pattern.
+#
+# Caller must be in host scope.
+pod_combat_set_slot_var_effect = {
+	# Resolve $VALUE$ in the host scope first.
+	save_scope_value_as = { name = pod_combat_slot_var_temp value = $VALUE$ }
+	hidden_effect_new_object = {
+		var:pod_combat_slot_$SLOT$ = {
+			set_variable = { name = slot_$NAME$ value = scope:pod_combat_slot_var_temp }
+		}
+	}
+}
+
+# Universal slot-var remover — counterpart to
+# pod_combat_set_slot_var_effect. Removes the named field from the
+# slot story. Used for absence-as-signal fields where the var's
+# presence carries semantic meaning (stance flags, retaliate vars,
+# init_bonus, ap_drain, anything that uses `has_variable = X` as a
+# binary gate).
+#
+# No $VALUE$ parameter, no save_scope_value_as dance — remove_variable
+# doesn't take a value expression so there's nothing to scope-resolve.
+# The hidden_effect_new_object wrap is still needed because
+# var:pod_combat_slot_$SLOT$ doesn't bind during tooltip-build (the
+# slot stories don't exist in tooltip preview).
+#
+# Parameters:
+#   $SLOT$ = 0..9
+#   $NAME$ = field short name (is_guarding, is_dodging, is_stealthed,
+#            retaliate_hit, retaliate_miss, retaliate_hit_agg,
+#            retaliate_miss_agg, init_bonus, ap_drain, ...)
+#
+# Caller must be in host scope.
+pod_combat_remove_slot_var_effect = {
+	hidden_effect_new_object = {
+		var:pod_combat_slot_$SLOT$ = {
+			remove_variable = slot_$NAME$
+		}
+	}
+}
+
+# Set slot_char on the slot story. Story_cycle vars hold scope
+# references the same way character vars do, so $CHARACTER$ stores as
+# a character reference. Used by pod_combat_assign_ally_slot_effect /
+# _enemy_slot_effect and the slot 0 / slot 5 init blocks in
+# pod_combat_initialize_effect. Slot occupancy elsewhere is tested
+# via `var:pod_combat_slot_$N$ = { has_variable = slot_char }`.
+#
+# Same hidden_effect_new_object reasoning as the other setters: the
+# slot story doesn't exist during tooltip-build, so the parametric
+# var:pod_combat_slot_$SLOT$ read is wrapped.
+#
+# Caller must be in host scope.
+pod_combat_set_slot_char_effect = {
+	# $SLOT$      = 0..9
+	# $CHARACTER$ = character scope to assign to the slot
+	hidden_effect_new_object = {
+		var:pod_combat_slot_$SLOT$ = {
+			set_variable = { name = slot_char value = $CHARACTER$ }
+		}
+		# Also register this slot in pod_combat_active_slots — the
+		# GUI datamodel iterates that list (not pod_combat_slots) so
+		# unfilled slots are excluded at the script level instead of
+		# at GUI render time. Filtering at the source means the GUI's
+		# datamodel item can safely set
+		# `datacontext = "[Scope.Var('slot_char').GetCharacter]"`
+		# without risking evaluation on an unfilled slot's null
+		# slot_char (which CK3 reports as
+		# "Scoped object of type 'character' is not valid").
+		# Cleared in pod_combat_clear_slot_stories_effect.
+		add_to_variable_list = {
+			name = pod_combat_active_slots
+			target = var:pod_combat_slot_$SLOT$
+		}
+	}
+}

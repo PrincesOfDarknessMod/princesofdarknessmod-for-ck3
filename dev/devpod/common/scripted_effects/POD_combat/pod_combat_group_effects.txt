@@ -20,559 +20,611 @@
 # Called via dispatch effects that switch on pod_combat_current_actor / pod_combat_selected_target.
 ##############################################################################################
 
-pod_combat_load_actor_from_slot_effect = {
-	# Copies slot $SLOT$ data -> pod_combat_player_* workspace
-	# The whole body is guarded by has_variable so tooltip-preview walks
-	# don't spam warnings when the slot is unpopulated.
-	#
-	# HP / max_hp / agg_damage / initial_hp / agg_total are NOT loaded
-	# into workspace anymore — wound state is read live from the
-	# character's PoD variables via var:pod_combat_player_char.POD_*.
+# Caller scope = the slot story; caller must have saved the workspace
+# owner as scope:host before delegating. Reads the slot's vars
+# directly (current scope = slot story) and writes pod_combat_player_*
+# on scope:host.
+#
+# Mirrors pod_combat_load_target_from_story_effect but writes the
+# actor side (pod_combat_player_*). Used by
+# pod_combat_load_workspace_effect's iteration over pod_combat_active_slots
+# (finds the slot whose slot_index matches pod_combat_current_actor),
+# and by any future single-slot caller that needs to save scope:host
+# and flip into a slot story before delegating.
+pod_combat_load_actor_from_story_effect = {
 	if = {
-		limit = { has_variable = pod_combat_c$SLOT$_char }
-		set_variable = { name = pod_combat_player_soak value = var:pod_combat_c$SLOT$_soak }
-		set_variable = { name = pod_combat_player_base_soak value = var:pod_combat_c$SLOT$_base_soak }
-		if = { limit = { has_variable = pod_combat_c$SLOT$_base_hit_chance } set_variable = { name = pod_combat_player_base_hit_chance value = var:pod_combat_c$SLOT$_base_hit_chance } }
-		set_variable = { name = pod_combat_player_morale value = var:pod_combat_c$SLOT$_morale }
-		set_variable = { name = pod_combat_player_prowess value = var:pod_combat_c$SLOT$_prowess }
-		set_variable = { name = pod_combat_player_hit_chance value = var:pod_combat_c$SLOT$_hit_chance }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_energy_used }
-			set_variable = { name = pod_combat_player_energy_used value = var:pod_combat_c$SLOT$_energy_used }
+		limit = { has_variable = slot_char }
+		save_scope_as = slot_story
+		scope:host = {
+			set_variable = { name = pod_combat_player_soak value = scope:slot_story.var:slot_soak }
+			set_variable = { name = pod_combat_player_base_soak value = scope:slot_story.var:slot_base_soak }
+			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_player_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
+			set_variable = { name = pod_combat_player_morale value = scope:slot_story.var:slot_morale }
+			set_variable = { name = pod_combat_player_prowess value = scope:slot_story.var:slot_prowess }
+			set_variable = { name = pod_combat_player_hit_chance value = scope:slot_story.var:slot_hit_chance }
+			# slot_energy_used is default-init'd to 0 at story creation, so
+			# always present — no has_variable gate needed.
+			set_variable = { name = pod_combat_player_energy_used value = scope:slot_story.var:slot_energy_used }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
+				set_variable = { name = pod_combat_player_is_guarding value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_player_is_guarding
+			}
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_dodging } }
+				set_variable = { name = pod_combat_player_is_dodging value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_player_is_dodging
+			}
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_stealthed } }
+				set_variable = { name = pod_combat_player_is_stealthed value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_player_is_stealthed
+			}
+			# Spirit-damage capability (static per combat). The actor needs
+			# this flag to land Physical attacks on incorporeal spirit
+			# targets — read by the spirit gate at the top of each
+			# pod_combat_deal_physical*_hp_damage_effect via
+			# pod_combat_$ACTOR_SIDE$_can_damage_spirit.
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_can_damage_spirit } }
+				set_variable = { name = pod_combat_player_can_damage_spirit value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_player_can_damage_spirit
+			}
+			# Incorporeality on the actor side is read by the retaliation
+			# spirit gate in pod_combat_apply_retaliation_helper: when the
+			# original attacker (= retaliation target) is incorporeal, the
+			# counter-strike only lands if the retaliator has the matching
+			# can_damage_spirit flag.
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_incorporeal_spirit } }
+				set_variable = { name = pod_combat_player_incorporeal_spirit value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_player_incorporeal_spirit
+			}
+			# Initiative bonus/penalty (persists into next round's roll)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_init_bonus } }
+				set_variable = { name = pod_combat_player_init_bonus value = scope:slot_story.var:slot_init_bonus }
+			}
+			else = { remove_variable = pod_combat_player_init_bonus }
+			# AP drain (applied at turn start, then cleared)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_ap_drain } }
+				set_variable = { name = pod_combat_player_ap_drain value = scope:slot_story.var:slot_ap_drain }
+			}
+			else = { remove_variable = pod_combat_player_ap_drain }
+			# Retaliation stances
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit } }
+				set_variable = { name = pod_combat_player_retaliate_hit value = scope:slot_story.var:slot_retaliate_hit }
+			}
+			else = { remove_variable = pod_combat_player_retaliate_hit }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit_agg } }
+				set_variable = { name = pod_combat_player_retaliate_hit_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_player_retaliate_hit_agg }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss } }
+				set_variable = { name = pod_combat_player_retaliate_miss value = scope:slot_story.var:slot_retaliate_miss }
+			}
+			else = { remove_variable = pod_combat_player_retaliate_miss }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss_agg } }
+				set_variable = { name = pod_combat_player_retaliate_miss_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_player_retaliate_miss_agg }
+			# Tier tracking vars (slot -> player workspace)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
+				set_variable = { name = pod_combat_player_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_player_soak_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
+				set_variable = { name = pod_combat_player_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_player_soak_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
+				set_variable = { name = pod_combat_player_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_player_soak_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
+				set_variable = { name = pod_combat_player_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_player_soak_debuff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
+				set_variable = { name = pod_combat_player_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_player_hit_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_combat_tier } }
+				set_variable = { name = pod_combat_player_hit_buff_combat_tier value = scope:slot_story.var:slot_hit_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_player_hit_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_round_tier } }
+				set_variable = { name = pod_combat_player_hit_debuff_round_tier value = scope:slot_story.var:slot_hit_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_player_hit_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_combat_tier } }
+				set_variable = { name = pod_combat_player_hit_debuff_combat_tier value = scope:slot_story.var:slot_hit_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_player_hit_debuff_combat_tier }
+			# Actor character reference — mirrors pod_combat_opponent set in the
+			# target load effect. Used by the AI selection effect to run trait
+			# gates against the current actor (e.g. has_trait = fera) so enemy
+			# AIs only pick moves they actually qualify for.
+			set_variable = { name = pod_combat_actor_char value = scope:slot_story.var:slot_char }
+			# Alias matching $TARGET_SIDE$ = "player" — lets the damage
+			# pipeline look up the target character uniformly as
+			# var:pod_combat_$TARGET_SIDE$_char regardless of which side is
+			# being damaged (used by retaliation when the actor is the victim).
+			set_variable = { name = pod_combat_player_char value = scope:slot_story.var:slot_char }
 		}
-		else = { set_variable = { name = pod_combat_player_energy_used value = 0 } }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_guarding }
-			set_variable = { name = pod_combat_player_is_guarding value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_player_is_guarding
-		}
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_dodging }
-			set_variable = { name = pod_combat_player_is_dodging value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_player_is_dodging
-		}
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_stealthed }
-			set_variable = { name = pod_combat_player_is_stealthed value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_player_is_stealthed
-		}
-		# Spirit-damage capability (static per combat). The actor needs
-		# this flag to land Physical attacks on incorporeal spirit targets.
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_can_damage_spirit }
-			set_variable = { name = pod_combat_player_can_damage_spirit value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_player_can_damage_spirit
-		}
-		# Incorporeality on the actor side is also tracked so retaliation /
-		# mirrored flows can inspect it, though the main spirit-damage gate
-		# lives on the opponent (target) side.
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_incorporeal_spirit }
-			set_variable = { name = pod_combat_player_incorporeal_spirit value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_player_incorporeal_spirit
-		}
-		# Initiative bonus/penalty (persists into next round's roll)
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_init_bonus }
-			set_variable = { name = pod_combat_player_init_bonus value = var:pod_combat_c$SLOT$_init_bonus }
-		}
-		else = { remove_variable = pod_combat_player_init_bonus }
-		# AP drain (applied at turn start, then cleared)
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_ap_drain }
-			set_variable = { name = pod_combat_player_ap_drain value = var:pod_combat_c$SLOT$_ap_drain }
-		}
-		else = { remove_variable = pod_combat_player_ap_drain }
-		# Retaliation stances
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_hit }
-			set_variable = { name = pod_combat_player_retaliate_hit value = var:pod_combat_c$SLOT$_retaliate_hit }
-		}
-		else = { remove_variable = pod_combat_player_retaliate_hit }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_hit_agg }
-			set_variable = { name = pod_combat_player_retaliate_hit_agg value = yes }
-		}
-		else = { remove_variable = pod_combat_player_retaliate_hit_agg }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_miss }
-			set_variable = { name = pod_combat_player_retaliate_miss value = var:pod_combat_c$SLOT$_retaliate_miss }
-		}
-		else = { remove_variable = pod_combat_player_retaliate_miss }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_miss_agg }
-			set_variable = { name = pod_combat_player_retaliate_miss_agg value = yes }
-		}
-		else = { remove_variable = pod_combat_player_retaliate_miss_agg }
-		# Tier tracking vars (slot -> player workspace)
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_buff_round_tier }
-			set_variable = { name = pod_combat_player_soak_buff_round_tier value = var:pod_combat_c$SLOT$_soak_buff_round_tier }
-		}
-		else = { remove_variable = pod_combat_player_soak_buff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_buff_combat_tier }
-			set_variable = { name = pod_combat_player_soak_buff_combat_tier value = var:pod_combat_c$SLOT$_soak_buff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_player_soak_buff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_debuff_round_tier }
-			set_variable = { name = pod_combat_player_soak_debuff_round_tier value = var:pod_combat_c$SLOT$_soak_debuff_round_tier }
-		}
-		else = { remove_variable = pod_combat_player_soak_debuff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_debuff_combat_tier }
-			set_variable = { name = pod_combat_player_soak_debuff_combat_tier value = var:pod_combat_c$SLOT$_soak_debuff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_player_soak_debuff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_buff_round_tier }
-			set_variable = { name = pod_combat_player_hit_buff_round_tier value = var:pod_combat_c$SLOT$_hit_buff_round_tier }
-		}
-		else = { remove_variable = pod_combat_player_hit_buff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_buff_combat_tier }
-			set_variable = { name = pod_combat_player_hit_buff_combat_tier value = var:pod_combat_c$SLOT$_hit_buff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_player_hit_buff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_debuff_round_tier }
-			set_variable = { name = pod_combat_player_hit_debuff_round_tier value = var:pod_combat_c$SLOT$_hit_debuff_round_tier }
-		}
-		else = { remove_variable = pod_combat_player_hit_debuff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_debuff_combat_tier }
-			set_variable = { name = pod_combat_player_hit_debuff_combat_tier value = var:pod_combat_c$SLOT$_hit_debuff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_player_hit_debuff_combat_tier }
-		# Actor character reference — mirrors pod_combat_opponent set in the
-		# target load effect. Used by the AI selection effect to run trait
-		# gates against the current actor (e.g. has_trait = fera) so enemy
-		# AIs only pick moves they actually qualify for.
-		set_variable = { name = pod_combat_actor_char value = var:pod_combat_c$SLOT$_char }
-		# Alias matching $TARGET_SIDE$ = "player" — lets the damage
-		# pipeline look up the target character uniformly as
-		# var:pod_combat_$TARGET_SIDE$_char regardless of which side is
-		# being damaged (used by retaliation when the actor is the victim).
-		set_variable = { name = pod_combat_player_char value = var:pod_combat_c$SLOT$_char }
 	}
 }
 
-pod_combat_load_target_from_slot_effect = {
-	# Copies slot $SLOT$ data -> pod_combat_opponent_* workspace
-	# The whole body is guarded by has_variable so tooltip-preview walks
-	# don't spam warnings when the slot is unpopulated.
-	#
-	# Same as actor-load: HP / max_hp / agg_damage come from the
-	# character's PoD wound vars at read time, not the workspace.
+# Caller scope = the slot story; caller must have saved the workspace
+# owner as scope:host before delegating. Reads the slot's vars
+# directly (current scope = slot story) and writes pod_combat_opponent_*
+# on scope:host.
+#
+# The save-then-re-enter dance lets us read slot fields via
+# scope:slot_story.var:slot_X from inside scope:host — without it,
+# every read inside scope:host = { ... } would resolve against host
+# scope and the slot fields wouldn't be visible.
+#
+# Called from every_in_list iterations on pod_combat_active_slots in
+# the AoE dispatchers and the workspace dispatch (where the iteration
+# body's current scope IS the slot story), and from
+# pod_combat_select_target / pod_combat_ai_swap_to_pc_target_effect for
+# their single-slot host→story flips.
+pod_combat_load_target_from_story_effect = {
 	if = {
-		limit = { has_variable = pod_combat_c$SLOT$_char }
-		set_variable = { name = pod_combat_opponent_soak value = var:pod_combat_c$SLOT$_soak }
-		set_variable = { name = pod_combat_opponent_base_soak value = var:pod_combat_c$SLOT$_base_soak }
-		if = { limit = { has_variable = pod_combat_c$SLOT$_base_hit_chance } set_variable = { name = pod_combat_opponent_base_hit_chance value = var:pod_combat_c$SLOT$_base_hit_chance } }
-		set_variable = { name = pod_combat_opponent_morale value = var:pod_combat_c$SLOT$_morale }
-		set_variable = { name = pod_combat_opponent_prowess value = var:pod_combat_c$SLOT$_prowess }
-		set_variable = { name = pod_combat_opponent_hit_chance value = var:pod_combat_c$SLOT$_hit_chance }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_energy_used }
-			set_variable = { name = pod_combat_opponent_energy_used value = var:pod_combat_c$SLOT$_energy_used }
-		}
-		else = { set_variable = { name = pod_combat_opponent_energy_used value = 0 } }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_guarding }
-			set_variable = { name = pod_combat_opponent_is_guarding value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_opponent_is_guarding
-		}
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_dodging }
-			set_variable = { name = pod_combat_opponent_is_dodging value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_opponent_is_dodging
-		}
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_is_stealthed }
-			set_variable = { name = pod_combat_opponent_is_stealthed value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_opponent_is_stealthed
-		}
-		# Incorporeality on the target side — gates Physical damage in the
-		# four pod_combat_deal_physical*_hp_damage_effect pipelines. The
-		# attack auto-misses when this flag is set and the actor lacks
-		# pod_combat_player_can_damage_spirit (mirroring PoD's
-		# POD_damage_spirit_custom_trigger).
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_incorporeal_spirit }
-			set_variable = { name = pod_combat_opponent_incorporeal_spirit value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_opponent_incorporeal_spirit
-		}
-		# Also track target's spirit-damage capability (useful for symmetric
-		# retaliation checks / future mirrored logic).
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_can_damage_spirit }
-			set_variable = { name = pod_combat_opponent_can_damage_spirit value = yes }
-		}
-		else = {
-			remove_variable = pod_combat_opponent_can_damage_spirit
-		}
-		# Initiative bonus/penalty and AP drain on the target side
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_init_bonus }
-			set_variable = { name = pod_combat_opponent_init_bonus value = var:pod_combat_c$SLOT$_init_bonus }
-		}
-		else = { remove_variable = pod_combat_opponent_init_bonus }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_ap_drain }
-			set_variable = { name = pod_combat_opponent_ap_drain value = var:pod_combat_c$SLOT$_ap_drain }
-		}
-		else = { remove_variable = pod_combat_opponent_ap_drain }
-		# Retaliation stances on the target side
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_hit }
-			set_variable = { name = pod_combat_opponent_retaliate_hit value = var:pod_combat_c$SLOT$_retaliate_hit }
-		}
-		else = { remove_variable = pod_combat_opponent_retaliate_hit }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_hit_agg }
-			set_variable = { name = pod_combat_opponent_retaliate_hit_agg value = yes }
-		}
-		else = { remove_variable = pod_combat_opponent_retaliate_hit_agg }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_miss }
-			set_variable = { name = pod_combat_opponent_retaliate_miss value = var:pod_combat_c$SLOT$_retaliate_miss }
-		}
-		else = { remove_variable = pod_combat_opponent_retaliate_miss }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_retaliate_miss_agg }
-			set_variable = { name = pod_combat_opponent_retaliate_miss_agg value = yes }
-		}
-		else = { remove_variable = pod_combat_opponent_retaliate_miss_agg }
-		# Tier tracking vars (slot -> opponent workspace)
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_buff_round_tier }
-			set_variable = { name = pod_combat_opponent_soak_buff_round_tier value = var:pod_combat_c$SLOT$_soak_buff_round_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_soak_buff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_buff_combat_tier }
-			set_variable = { name = pod_combat_opponent_soak_buff_combat_tier value = var:pod_combat_c$SLOT$_soak_buff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_soak_buff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_debuff_round_tier }
-			set_variable = { name = pod_combat_opponent_soak_debuff_round_tier value = var:pod_combat_c$SLOT$_soak_debuff_round_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_soak_debuff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_soak_debuff_combat_tier }
-			set_variable = { name = pod_combat_opponent_soak_debuff_combat_tier value = var:pod_combat_c$SLOT$_soak_debuff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_soak_debuff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_buff_round_tier }
-			set_variable = { name = pod_combat_opponent_hit_buff_round_tier value = var:pod_combat_c$SLOT$_hit_buff_round_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_hit_buff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_buff_combat_tier }
-			set_variable = { name = pod_combat_opponent_hit_buff_combat_tier value = var:pod_combat_c$SLOT$_hit_buff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_hit_buff_combat_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_debuff_round_tier }
-			set_variable = { name = pod_combat_opponent_hit_debuff_round_tier value = var:pod_combat_c$SLOT$_hit_debuff_round_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_hit_debuff_round_tier }
-		if = {
-			limit = { has_variable = pod_combat_c$SLOT$_hit_debuff_combat_tier }
-			set_variable = { name = pod_combat_opponent_hit_debuff_combat_tier value = var:pod_combat_c$SLOT$_hit_debuff_combat_tier }
-		}
-		else = { remove_variable = pod_combat_opponent_hit_debuff_combat_tier }
-		# Also set the opponent character reference for counter checks
-		set_variable = { name = pod_combat_opponent value = var:pod_combat_c$SLOT$_char }
-		# Alias matching $TARGET_SIDE$ = "opponent" — parallels
-		# pod_combat_player_char (see actor-load above). Lets the damage
-		# pipeline reference var:pod_combat_$TARGET_SIDE$_char uniformly
-		# instead of branching to pod_combat_opponent vs pod_combat_actor_char.
-		set_variable = { name = pod_combat_opponent_char value = var:pod_combat_c$SLOT$_char }
+		limit = { has_variable = slot_char }
+		save_scope_as = slot_story
+		scope:host = {
+			set_variable = { name = pod_combat_opponent_soak value = scope:slot_story.var:slot_soak }
+			set_variable = { name = pod_combat_opponent_base_soak value = scope:slot_story.var:slot_base_soak }
+			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_opponent_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
+			set_variable = { name = pod_combat_opponent_morale value = scope:slot_story.var:slot_morale }
+			set_variable = { name = pod_combat_opponent_prowess value = scope:slot_story.var:slot_prowess }
+			set_variable = { name = pod_combat_opponent_hit_chance value = scope:slot_story.var:slot_hit_chance }
+			# slot_energy_used is default-init'd to 0 at story creation, so
+			# always present — no has_variable gate needed.
+			set_variable = { name = pod_combat_opponent_energy_used value = scope:slot_story.var:slot_energy_used }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
+				set_variable = { name = pod_combat_opponent_is_guarding value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_opponent_is_guarding
+			}
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_dodging } }
+				set_variable = { name = pod_combat_opponent_is_dodging value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_opponent_is_dodging
+			}
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_stealthed } }
+				set_variable = { name = pod_combat_opponent_is_stealthed value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_opponent_is_stealthed
+			}
+			# Incorporeality on the target side — gates Physical damage in the
+			# four pod_combat_deal_physical*_hp_damage_effect pipelines. The
+			# attack auto-misses when this flag is set and the actor lacks
+			# pod_combat_$ACTOR_SIDE$_can_damage_spirit (mirroring PoD's
+			# POD_damage_spirit_custom_trigger).
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_incorporeal_spirit } }
+				set_variable = { name = pod_combat_opponent_incorporeal_spirit value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_opponent_incorporeal_spirit
+			}
+			# Target's spirit-damage capability — read by the retaliation
+			# spirit gate in pod_combat_apply_retaliation_helper, where the
+			# target side becomes the retaliator and must have this flag to
+			# land a counter-strike on an incorporeal original-attacker.
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_can_damage_spirit } }
+				set_variable = { name = pod_combat_opponent_can_damage_spirit value = yes }
+			}
+			else = {
+				remove_variable = pod_combat_opponent_can_damage_spirit
+			}
+			# Initiative bonus/penalty and AP drain on the target side
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_init_bonus } }
+				set_variable = { name = pod_combat_opponent_init_bonus value = scope:slot_story.var:slot_init_bonus }
+			}
+			else = { remove_variable = pod_combat_opponent_init_bonus }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_ap_drain } }
+				set_variable = { name = pod_combat_opponent_ap_drain value = scope:slot_story.var:slot_ap_drain }
+			}
+			else = { remove_variable = pod_combat_opponent_ap_drain }
+			# Retaliation stances on the target side
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit } }
+				set_variable = { name = pod_combat_opponent_retaliate_hit value = scope:slot_story.var:slot_retaliate_hit }
+			}
+			else = { remove_variable = pod_combat_opponent_retaliate_hit }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit_agg } }
+				set_variable = { name = pod_combat_opponent_retaliate_hit_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_opponent_retaliate_hit_agg }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss } }
+				set_variable = { name = pod_combat_opponent_retaliate_miss value = scope:slot_story.var:slot_retaliate_miss }
+			}
+			else = { remove_variable = pod_combat_opponent_retaliate_miss }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss_agg } }
+				set_variable = { name = pod_combat_opponent_retaliate_miss_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_opponent_retaliate_miss_agg }
+			# Tier tracking vars (slot -> opponent workspace)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
+				set_variable = { name = pod_combat_opponent_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_soak_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
+				set_variable = { name = pod_combat_opponent_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_soak_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
+				set_variable = { name = pod_combat_opponent_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_soak_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
+				set_variable = { name = pod_combat_opponent_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_soak_debuff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
+				set_variable = { name = pod_combat_opponent_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_hit_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_combat_tier } }
+				set_variable = { name = pod_combat_opponent_hit_buff_combat_tier value = scope:slot_story.var:slot_hit_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_hit_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_round_tier } }
+				set_variable = { name = pod_combat_opponent_hit_debuff_round_tier value = scope:slot_story.var:slot_hit_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_hit_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_combat_tier } }
+				set_variable = { name = pod_combat_opponent_hit_debuff_combat_tier value = scope:slot_story.var:slot_hit_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_opponent_hit_debuff_combat_tier }
+			# Also set the opponent character reference for counter checks
+			set_variable = { name = pod_combat_opponent value = scope:slot_story.var:slot_char }
+			# Alias matching $TARGET_SIDE$ = "opponent" — parallels
+			# pod_combat_player_char (see actor-load above). Lets the damage
+			# pipeline reference var:pod_combat_$TARGET_SIDE$_char uniformly
+			# instead of branching to pod_combat_opponent vs pod_combat_actor_char.
+			set_variable = { name = pod_combat_opponent_char value = scope:slot_story.var:slot_char }
 
-		# Refresh workspace hit chances for the new actor/target pair.
-		# Slot-stored hit chance is leader-baseline (computed once at
-		# combat init in pod_combat_calculate_all_hit_chances_effect),
-		# so without this every AI swap, AoE per-target iteration, and
-		# workspace-load would push the wrong number into the damage
-		# roll. The pair recalc reads the workspace's player_prowess
-		# (set by the actor load that runs before this) and the
-		# opponent_prowess we just wrote above, then layers the active
-		# hit-tier modifiers via the per-side recalc effects. No slot
-		# writeback — that's intentional, see the comment on the recalc
-		# effect itself in pod_combat_tier_effects.txt.
-		pod_combat_recalc_pair_hit_chance_effect = yes
+			# Refresh workspace hit chances for the new actor/target pair.
+			# Slot-stored hit chance is leader-baseline (computed once at
+			# combat init in pod_combat_calculate_all_hit_chances_effect),
+			# so without this every AI swap, AoE per-target iteration, and
+			# workspace-load would push the wrong number into the damage
+			# roll. The pair recalc reads the workspace's player_prowess
+			# (set by the actor load that runs before this) and the
+			# opponent_prowess we just wrote above, then layers the active
+			# hit-tier modifiers via the per-side recalc effects. No slot
+			# writeback — that's intentional, see the comment on the recalc
+			# effect itself in pod_combat_tier_effects.txt.
+			pod_combat_recalc_pair_hit_chance_effect = yes
+		}
 	}
 }
 
 ##############################################################################################
 # SECTION 2: WORKSPACE SAVE EFFECTS
-# Two parametric effects that copy the player or opponent workspace back into a given slot.
+# Two effects that copy the player or opponent workspace back into a slot story.
 ##############################################################################################
 
-pod_combat_save_actor_to_slot_effect = {
-	# Copies pod_combat_player_* workspace -> slot $SLOT$.
-	# HP, max HP, and aggravated damage are NOT synced here — they are
-	# live script values derived from the slot character's PoD wound
-	# vars. The _alive flag IS synced because AI / victory-check paths read it directly.
+# Caller scope = slot story; caller must have saved the workspace
+# owner as scope:host. Reads workspace vars on scope:host and writes
+# the slot story's vars directly.
+#
+# Mirrors pod_combat_save_target_to_story_effect but reads the actor
+# side (pod_combat_player_*). Called from
+# pod_combat_save_workspace_effect's iteration over pod_combat_active_slots.
+pod_combat_save_actor_to_story_effect = {
 	if = {
-		limit = { has_variable = pod_combat_player_char }
+		limit = { scope:host = { has_variable = pod_combat_player_char } }
+		# Alive-flip on death / incapacitation. Reads slot_char from
+		# current scope (slot story); writes slot_alive on current scope.
 		if = {
-			limit = { OR = { var:pod_combat_c$SLOT$_char = { is_alive = no } var:pod_combat_c$SLOT$_char = { pod_combat_is_incapacitated_trigger = yes } } }
-			set_variable = { name = pod_combat_c$SLOT$_alive value = 0 }
+			limit = {
+				OR = {
+					var:slot_char = { is_alive = no }
+					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+				}
+			}
+			set_variable = { name = slot_alive value = 0 }
 		}
-		set_variable = { name = pod_combat_c$SLOT$_soak value = var:pod_combat_player_soak }
-		set_variable = { name = pod_combat_c$SLOT$_base_soak value = var:pod_combat_player_base_soak }
-		if = { limit = { has_variable = pod_combat_player_base_hit_chance } set_variable = { name = pod_combat_c$SLOT$_base_hit_chance value = var:pod_combat_player_base_hit_chance } }
-		set_variable = { name = pod_combat_c$SLOT$_morale value = var:pod_combat_player_morale }
-		set_variable = { name = pod_combat_c$SLOT$_prowess value = var:pod_combat_player_prowess }
-		set_variable = { name = pod_combat_c$SLOT$_hit_chance value = var:pod_combat_player_hit_chance }
+		# Workspace -> slot writes. The slot story is current scope so
+		# writes are direct `set_variable = { name = slot_X ... }`;
+		# reads come from scope:host.var:pod_combat_player_X.
+		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_player_soak }
+		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_player_base_soak }
+		if = { limit = { scope:host = { has_variable = pod_combat_player_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_player_base_hit_chance } }
+		set_variable = { name = slot_morale         value = scope:host.var:pod_combat_player_morale }
+		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_player_prowess }
+		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_player_hit_chance }
 		if = {
-			limit = { has_variable = pod_combat_player_energy_used }
-			set_variable = { name = pod_combat_c$SLOT$_energy_used value = var:pod_combat_player_energy_used }
+			limit = { scope:host = { has_variable = pod_combat_player_energy_used } }
+			set_variable = { name = slot_energy_used value = scope:host.var:pod_combat_player_energy_used }
 		}
 		if = {
-			limit = { has_variable = pod_combat_player_is_guarding }
-			set_variable = { name = pod_combat_c$SLOT$_is_guarding value = yes }
+			limit = { scope:host = { has_variable = pod_combat_player_is_guarding } }
+			set_variable    = { name = slot_is_guarding value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_guarding
+			remove_variable = slot_is_guarding
 		}
 		if = {
-			limit = { has_variable = pod_combat_player_is_dodging }
-			set_variable = { name = pod_combat_c$SLOT$_is_dodging value = yes }
+			limit = { scope:host = { has_variable = pod_combat_player_is_dodging } }
+			set_variable    = { name = slot_is_dodging value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_dodging
+			remove_variable = slot_is_dodging
 		}
 		if = {
-			limit = { has_variable = pod_combat_player_is_stealthed }
-			set_variable = { name = pod_combat_c$SLOT$_is_stealthed value = yes }
+			limit = { scope:host = { has_variable = pod_combat_player_is_stealthed } }
+			set_variable    = { name = slot_is_stealthed value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_stealthed
+			remove_variable = slot_is_stealthed
 		}
 		# Initiative bonus and AP drain persist across workspace cycles
 		if = {
-			limit = { has_variable = pod_combat_player_init_bonus }
-			set_variable = { name = pod_combat_c$SLOT$_init_bonus value = var:pod_combat_player_init_bonus }
+			limit = { scope:host = { has_variable = pod_combat_player_init_bonus } }
+			set_variable    = { name = slot_init_bonus value = scope:host.var:pod_combat_player_init_bonus }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_init_bonus }
+		else = { remove_variable = slot_init_bonus }
 		if = {
-			limit = { has_variable = pod_combat_player_ap_drain }
-			set_variable = { name = pod_combat_c$SLOT$_ap_drain value = var:pod_combat_player_ap_drain }
+			limit = { scope:host = { has_variable = pod_combat_player_ap_drain } }
+			set_variable    = { name = slot_ap_drain   value = scope:host.var:pod_combat_player_ap_drain }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_ap_drain }
+		else = { remove_variable = slot_ap_drain }
 		# Retaliation stances
 		if = {
-			limit = { has_variable = pod_combat_player_retaliate_hit }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_hit value = var:pod_combat_player_retaliate_hit }
+			limit = { scope:host = { has_variable = pod_combat_player_retaliate_hit } }
+			set_variable    = { name = slot_retaliate_hit value = scope:host.var:pod_combat_player_retaliate_hit }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_hit }
+		else = { remove_variable = slot_retaliate_hit }
 		if = {
-			limit = { has_variable = pod_combat_player_retaliate_hit_agg }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_hit_agg value = yes }
+			limit = { scope:host = { has_variable = pod_combat_player_retaliate_hit_agg } }
+			set_variable    = { name = slot_retaliate_hit_agg value = yes }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_hit_agg }
+		else = { remove_variable = slot_retaliate_hit_agg }
 		if = {
-			limit = { has_variable = pod_combat_player_retaliate_miss }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_miss value = var:pod_combat_player_retaliate_miss }
+			limit = { scope:host = { has_variable = pod_combat_player_retaliate_miss } }
+			set_variable    = { name = slot_retaliate_miss value = scope:host.var:pod_combat_player_retaliate_miss }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_miss }
+		else = { remove_variable = slot_retaliate_miss }
 		if = {
-			limit = { has_variable = pod_combat_player_retaliate_miss_agg }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_miss_agg value = yes }
+			limit = { scope:host = { has_variable = pod_combat_player_retaliate_miss_agg } }
+			set_variable    = { name = slot_retaliate_miss_agg value = yes }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_miss_agg }
-		# Tier tracking vars (player workspace -> slot)
+		else = { remove_variable = slot_retaliate_miss_agg }
+		# Tier tracking vars (player workspace -> slot). All eight tier
+		# vars use the same set-or-remove pattern: presence on the
+		# workspace = active tier on the slot. Tier vars are absence-
+		# as-signal — the helpers preserve that.
 		if = {
-			limit = { has_variable = pod_combat_player_soak_buff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_round_tier value = var:pod_combat_player_soak_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_soak_buff_round_tier } }
+			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_player_soak_buff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_buff_round_tier }
+		else = { remove_variable = slot_soak_buff_round_tier    }
 		if = {
-			limit = { has_variable = pod_combat_player_soak_buff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_combat_tier value = var:pod_combat_player_soak_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_soak_buff_combat_tier } }
+			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_player_soak_buff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_buff_combat_tier }
+		else = { remove_variable = slot_soak_buff_combat_tier   }
 		if = {
-			limit = { has_variable = pod_combat_player_soak_debuff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_round_tier value = var:pod_combat_player_soak_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_soak_debuff_round_tier } }
+			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_player_soak_debuff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_debuff_round_tier }
+		else = { remove_variable = slot_soak_debuff_round_tier  }
 		if = {
-			limit = { has_variable = pod_combat_player_soak_debuff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_combat_tier value = var:pod_combat_player_soak_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_soak_debuff_combat_tier } }
+			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_player_soak_debuff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_debuff_combat_tier }
+		else = { remove_variable = slot_soak_debuff_combat_tier }
 		if = {
-			limit = { has_variable = pod_combat_player_hit_buff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_round_tier value = var:pod_combat_player_hit_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_hit_buff_round_tier } }
+			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_player_hit_buff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_buff_round_tier }
+		else = { remove_variable = slot_hit_buff_round_tier     }
 		if = {
-			limit = { has_variable = pod_combat_player_hit_buff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_combat_tier value = var:pod_combat_player_hit_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_hit_buff_combat_tier } }
+			set_variable    = { name = slot_hit_buff_combat_tier    value = scope:host.var:pod_combat_player_hit_buff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_buff_combat_tier }
+		else = { remove_variable = slot_hit_buff_combat_tier    }
 		if = {
-			limit = { has_variable = pod_combat_player_hit_debuff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_round_tier value = var:pod_combat_player_hit_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_hit_debuff_round_tier } }
+			set_variable    = { name = slot_hit_debuff_round_tier   value = scope:host.var:pod_combat_player_hit_debuff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_debuff_round_tier }
+		else = { remove_variable = slot_hit_debuff_round_tier   }
 		if = {
-			limit = { has_variable = pod_combat_player_hit_debuff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_combat_tier value = var:pod_combat_player_hit_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_player_hit_debuff_combat_tier } }
+			set_variable    = { name = slot_hit_debuff_combat_tier  value = scope:host.var:pod_combat_player_hit_debuff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_debuff_combat_tier }
+		else = { remove_variable = slot_hit_debuff_combat_tier  }
 	}
 }
 
-pod_combat_save_target_to_slot_effect = {
-	# Copies pod_combat_opponent_* workspace -> slot $SLOT$
-	# HP / max_hp / agg_damage are derived live from the char's PoD
-	# wound vars via the slot SVs — no slot cache to keep in sync here.
-	# See pod_combat_save_actor_to_slot_effect for the full rationale.
+# Caller scope = slot story; caller must have saved the workspace
+# owner as scope:host. Reads workspace vars on scope:host and writes
+# the slot story's vars directly.
+#
+# Called from every_in_list iterations on pod_combat_active_slots in
+# the AoE dispatchers and the workspace dispatch
+# (pod_combat_save_workspace_effect), and from the AI swap-target
+# effects' restore path (pod_combat_ai_restore_enemy_target_effect).
+pod_combat_save_target_to_story_effect = {
 	if = {
-		limit = { has_variable = pod_combat_opponent_char }
+		limit = { scope:host = { has_variable = pod_combat_opponent_char } }
 		# Alive-flip on death / incapacitation / wound-track-full.
 		# The wound-track-full clause is what catches combat-HP
 		# exhaustion in non-fatal duels (where PoD's death check is
-		# gated, so is_alive stays yes and the trait checks won't fire)
-		# — without it those targets would stay marked alive even with
-		# a full wound track. In fatal duels it's redundant with
-		# is_alive=no for mortal characters but still useful for the
-		# brief window between wound-track-fill and PoD's death check
-		# resolving.
+		# gated, so is_alive stays yes and the trait checks won't
+		# fire) — without it those targets would stay marked alive
+		# even with a full wound track. In fatal duels it's redundant
+		# with is_alive=no for mortal characters but still useful for
+		# the brief window between wound-track-fill and PoD's death
+		# check resolving. Reads slot_char from current scope (slot
+		# story); writes slot_alive on current scope.
 		if = {
-			limit = { OR = { var:pod_combat_c$SLOT$_char = { is_alive = no } var:pod_combat_c$SLOT$_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c$SLOT$_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c$SLOT$_alive value = 0 }
+			limit = {
+				OR = {
+					var:slot_char = { is_alive = no }
+					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+					var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
+				}
+			}
+			set_variable = { name = slot_alive value = 0 }
 		}
-		set_variable = { name = pod_combat_c$SLOT$_soak value = var:pod_combat_opponent_soak }
-		set_variable = { name = pod_combat_c$SLOT$_base_soak value = var:pod_combat_opponent_base_soak }
-		if = { limit = { has_variable = pod_combat_opponent_base_hit_chance } set_variable = { name = pod_combat_c$SLOT$_base_hit_chance value = var:pod_combat_opponent_base_hit_chance } }
-		set_variable = { name = pod_combat_c$SLOT$_morale value = var:pod_combat_opponent_morale }
-		set_variable = { name = pod_combat_c$SLOT$_prowess value = var:pod_combat_opponent_prowess }
-		set_variable = { name = pod_combat_c$SLOT$_hit_chance value = var:pod_combat_opponent_hit_chance }
+		# Workspace -> slot writes. The slot story is current scope so
+		# writes are direct `set_variable = { name = slot_X ... }`;
+		# reads come from scope:host.var:pod_combat_opponent_X.
+		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_opponent_soak }
+		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_opponent_base_soak }
+		if = { limit = { scope:host = { has_variable = pod_combat_opponent_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_opponent_base_hit_chance } }
+		set_variable = { name = slot_morale         value = scope:host.var:pod_combat_opponent_morale }
+		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_opponent_prowess }
+		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_opponent_hit_chance }
 		if = {
-			limit = { has_variable = pod_combat_opponent_energy_used }
-			set_variable = { name = pod_combat_c$SLOT$_energy_used value = var:pod_combat_opponent_energy_used }
+			limit = { scope:host = { has_variable = pod_combat_opponent_energy_used } }
+			set_variable = { name = slot_energy_used value = scope:host.var:pod_combat_opponent_energy_used }
 		}
 		if = {
-			limit = { has_variable = pod_combat_opponent_is_guarding }
-			set_variable = { name = pod_combat_c$SLOT$_is_guarding value = yes }
+			limit = { scope:host = { has_variable = pod_combat_opponent_is_guarding } }
+			set_variable    = { name = slot_is_guarding value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_guarding
+			remove_variable = slot_is_guarding
 		}
 		if = {
-			limit = { has_variable = pod_combat_opponent_is_dodging }
-			set_variable = { name = pod_combat_c$SLOT$_is_dodging value = yes }
+			limit = { scope:host = { has_variable = pod_combat_opponent_is_dodging } }
+			set_variable    = { name = slot_is_dodging value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_dodging
+			remove_variable = slot_is_dodging
 		}
 		if = {
-			limit = { has_variable = pod_combat_opponent_is_stealthed }
-			set_variable = { name = pod_combat_c$SLOT$_is_stealthed value = yes }
+			limit = { scope:host = { has_variable = pod_combat_opponent_is_stealthed } }
+			set_variable    = { name = slot_is_stealthed value = yes }
 		}
 		else = {
-			remove_variable = pod_combat_c$SLOT$_is_stealthed
+			remove_variable = slot_is_stealthed
 		}
 		# Initiative bonus and AP drain on target side
 		if = {
-			limit = { has_variable = pod_combat_opponent_init_bonus }
-			set_variable = { name = pod_combat_c$SLOT$_init_bonus value = var:pod_combat_opponent_init_bonus }
+			limit = { scope:host = { has_variable = pod_combat_opponent_init_bonus } }
+			set_variable    = { name = slot_init_bonus value = scope:host.var:pod_combat_opponent_init_bonus }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_init_bonus }
+		else = { remove_variable = slot_init_bonus }
 		if = {
-			limit = { has_variable = pod_combat_opponent_ap_drain }
-			set_variable = { name = pod_combat_c$SLOT$_ap_drain value = var:pod_combat_opponent_ap_drain }
+			limit = { scope:host = { has_variable = pod_combat_opponent_ap_drain } }
+			set_variable    = { name = slot_ap_drain   value = scope:host.var:pod_combat_opponent_ap_drain }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_ap_drain }
+		else = { remove_variable = slot_ap_drain   }
 		# Retaliation stances
 		if = {
-			limit = { has_variable = pod_combat_opponent_retaliate_hit }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_hit value = var:pod_combat_opponent_retaliate_hit }
+			limit = { scope:host = { has_variable = pod_combat_opponent_retaliate_hit } }
+			set_variable    = { name = slot_retaliate_hit value = scope:host.var:pod_combat_opponent_retaliate_hit }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_hit }
+		else = { remove_variable = slot_retaliate_hit }
 		if = {
-			limit = { has_variable = pod_combat_opponent_retaliate_hit_agg }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_hit_agg value = yes }
+			limit = { scope:host = { has_variable = pod_combat_opponent_retaliate_hit_agg } }
+			set_variable    = { name = slot_retaliate_hit_agg value = yes }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_hit_agg }
+		else = { remove_variable = slot_retaliate_hit_agg }
 		if = {
-			limit = { has_variable = pod_combat_opponent_retaliate_miss }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_miss value = var:pod_combat_opponent_retaliate_miss }
+			limit = { scope:host = { has_variable = pod_combat_opponent_retaliate_miss } }
+			set_variable    = { name = slot_retaliate_miss value = scope:host.var:pod_combat_opponent_retaliate_miss }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_miss }
+		else = { remove_variable = slot_retaliate_miss }
 		if = {
-			limit = { has_variable = pod_combat_opponent_retaliate_miss_agg }
-			set_variable = { name = pod_combat_c$SLOT$_retaliate_miss_agg value = yes }
+			limit = { scope:host = { has_variable = pod_combat_opponent_retaliate_miss_agg } }
+			set_variable    = { name = slot_retaliate_miss_agg value = yes }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_retaliate_miss_agg }
+		else = { remove_variable = slot_retaliate_miss_agg }
 		# Tier tracking vars (opponent workspace -> slot)
 		if = {
-			limit = { has_variable = pod_combat_opponent_soak_buff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_round_tier value = var:pod_combat_opponent_soak_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_soak_buff_round_tier } }
+			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_opponent_soak_buff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_buff_round_tier }
+		else = { remove_variable = slot_soak_buff_round_tier    }
 		if = {
-			limit = { has_variable = pod_combat_opponent_soak_buff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_buff_combat_tier value = var:pod_combat_opponent_soak_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_soak_buff_combat_tier } }
+			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_opponent_soak_buff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_buff_combat_tier }
+		else = { remove_variable = slot_soak_buff_combat_tier   }
 		if = {
-			limit = { has_variable = pod_combat_opponent_soak_debuff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_round_tier value = var:pod_combat_opponent_soak_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_soak_debuff_round_tier } }
+			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_opponent_soak_debuff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_debuff_round_tier }
+		else = { remove_variable = slot_soak_debuff_round_tier  }
 		if = {
-			limit = { has_variable = pod_combat_opponent_soak_debuff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_soak_debuff_combat_tier value = var:pod_combat_opponent_soak_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_soak_debuff_combat_tier } }
+			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_opponent_soak_debuff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_soak_debuff_combat_tier }
+		else = { remove_variable = slot_soak_debuff_combat_tier }
 		if = {
-			limit = { has_variable = pod_combat_opponent_hit_buff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_round_tier value = var:pod_combat_opponent_hit_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_hit_buff_round_tier } }
+			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_opponent_hit_buff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_buff_round_tier }
+		else = { remove_variable = slot_hit_buff_round_tier     }
 		if = {
-			limit = { has_variable = pod_combat_opponent_hit_buff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_buff_combat_tier value = var:pod_combat_opponent_hit_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_hit_buff_combat_tier } }
+			set_variable    = { name = slot_hit_buff_combat_tier    value = scope:host.var:pod_combat_opponent_hit_buff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_buff_combat_tier }
+		else = { remove_variable = slot_hit_buff_combat_tier    }
 		if = {
-			limit = { has_variable = pod_combat_opponent_hit_debuff_round_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_round_tier value = var:pod_combat_opponent_hit_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_hit_debuff_round_tier } }
+			set_variable    = { name = slot_hit_debuff_round_tier   value = scope:host.var:pod_combat_opponent_hit_debuff_round_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_debuff_round_tier }
+		else = { remove_variable = slot_hit_debuff_round_tier   }
 		if = {
-			limit = { has_variable = pod_combat_opponent_hit_debuff_combat_tier }
-			set_variable = { name = pod_combat_c$SLOT$_hit_debuff_combat_tier value = var:pod_combat_opponent_hit_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_opponent_hit_debuff_combat_tier } }
+			set_variable    = { name = slot_hit_debuff_combat_tier  value = scope:host.var:pod_combat_opponent_hit_debuff_combat_tier }
 		}
-		else = { remove_variable = pod_combat_c$SLOT$_hit_debuff_combat_tier }
+		else = { remove_variable = slot_hit_debuff_combat_tier  }
 	}
 }
 
@@ -583,29 +635,34 @@ pod_combat_save_target_to_slot_effect = {
 ##############################################################################################
 
 pod_combat_load_workspace_effect = {
-	# Load current actor -> player workspace
-	if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 has_variable = pod_combat_c0_char } pod_combat_load_actor_from_slot_effect = { SLOT = 0 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 1 has_variable = pod_combat_c1_char } pod_combat_load_actor_from_slot_effect = { SLOT = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 2 has_variable = pod_combat_c2_char } pod_combat_load_actor_from_slot_effect = { SLOT = 2 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 3 has_variable = pod_combat_c3_char } pod_combat_load_actor_from_slot_effect = { SLOT = 3 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 4 has_variable = pod_combat_c4_char } pod_combat_load_actor_from_slot_effect = { SLOT = 4 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 5 has_variable = pod_combat_c5_char } pod_combat_load_actor_from_slot_effect = { SLOT = 5 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 6 has_variable = pod_combat_c6_char } pod_combat_load_actor_from_slot_effect = { SLOT = 6 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 7 has_variable = pod_combat_c7_char } pod_combat_load_actor_from_slot_effect = { SLOT = 7 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 8 has_variable = pod_combat_c8_char } pod_combat_load_actor_from_slot_effect = { SLOT = 8 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 9 has_variable = pod_combat_c9_char } pod_combat_load_actor_from_slot_effect = { SLOT = 9 } }
-
-	# Load selected target -> opponent workspace
-	if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 0 has_variable = pod_combat_c0_char } pod_combat_load_target_from_slot_effect = { SLOT = 0 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 1 has_variable = pod_combat_c1_char } pod_combat_load_target_from_slot_effect = { SLOT = 1 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 2 has_variable = pod_combat_c2_char } pod_combat_load_target_from_slot_effect = { SLOT = 2 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 3 has_variable = pod_combat_c3_char } pod_combat_load_target_from_slot_effect = { SLOT = 3 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 4 has_variable = pod_combat_c4_char } pod_combat_load_target_from_slot_effect = { SLOT = 4 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 5 has_variable = pod_combat_c5_char } pod_combat_load_target_from_slot_effect = { SLOT = 5 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 6 has_variable = pod_combat_c6_char } pod_combat_load_target_from_slot_effect = { SLOT = 6 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 7 has_variable = pod_combat_c7_char } pod_combat_load_target_from_slot_effect = { SLOT = 7 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 8 has_variable = pod_combat_c8_char } pod_combat_load_target_from_slot_effect = { SLOT = 8 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 9 has_variable = pod_combat_c9_char } pod_combat_load_target_from_slot_effect = { SLOT = 9 } }
+	# Load current actor → player workspace, then selected target →
+	# opponent workspace, by iterating pod_combat_active_slots and
+	# matching slot_index against pod_combat_current_actor /
+	# pod_combat_selected_target. The iteration limit fires for at
+	# most one slot per pass — the load helper inside the body is the
+	# story-scoped variant, which writes to scope:host (this scope).
+	#
+	# Replaced two parallel 10-block if/else_if chains keyed on
+	# integer slot index; the story-scoped variants of the load
+	# helpers (added alongside their int-keyed wrappers) make the
+	# iteration body slot-index-agnostic.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_current_actor }
+			var:slot_index = scope:host.var:pod_combat_current_actor
+		}
+		pod_combat_load_actor_from_story_effect = yes
+	}
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_selected_target }
+			var:slot_index = scope:host.var:pod_combat_selected_target
+		}
+		pod_combat_load_target_from_story_effect = yes
+	}
 
 	# Set the current_hit_chance for the damage pipeline
 	if = {
@@ -614,194 +671,90 @@ pod_combat_load_workspace_effect = {
 	}
 }
 
-pod_combat_apply_nonfatal_flag_for_slot_effect = {
-	# $SLOT$ = 0-9. Stamp pod_combat_nonfatal_active on the slot's char
-	# so POD_can_die_from_wounds returns no while combat is active.
-	if = {
-		limit = { has_variable = pod_combat_c$SLOT$_char }
-		var:pod_combat_c$SLOT$_char = {
+# Stamp pod_combat_nonfatal_active on every active combatant's char
+# so POD_can_die_from_wounds returns no while combat is active. Paired
+# with pod_combat_clear_nonfatal_flag_effect (combat-end strip).
+pod_combat_apply_nonfatal_flag_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		var:slot_char = {
 			add_character_flag = pod_combat_nonfatal_active
 		}
 	}
 }
 
-pod_combat_apply_nonfatal_flag_effect = {
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 0 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 1 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 2 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 3 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 4 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 5 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 6 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 7 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 8 }
-	pod_combat_apply_nonfatal_flag_for_slot_effect = { SLOT = 9 }
-}
-
-pod_combat_clear_nonfatal_flag_for_slot_effect = {
-	# $SLOT$ = 0-9. Strip pod_combat_nonfatal_active after the
-	# post-combat wound cap has guaranteed the char has at least one
-	# empty damage box.
-	if = {
-		limit = { has_variable = pod_combat_c$SLOT$_char }
-		var:pod_combat_c$SLOT$_char = {
+# Strip pod_combat_nonfatal_active after the post-combat wound cap
+# has guaranteed the char has at least one empty damage box.
+pod_combat_clear_nonfatal_flag_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		var:slot_char = {
 			remove_character_flag = pod_combat_nonfatal_active
 		}
 	}
 }
 
-pod_combat_clear_nonfatal_flag_effect = {
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 0 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 1 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 2 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 3 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 4 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 5 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 6 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 7 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 8 }
-	pod_combat_clear_nonfatal_flag_for_slot_effect = { SLOT = 9 }
-}
-
 pod_combat_save_workspace_effect = {
-	# Save player workspace -> current actor slot
-	if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 has_variable = pod_combat_c0_char } pod_combat_save_actor_to_slot_effect = { SLOT = 0 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 1 has_variable = pod_combat_c1_char } pod_combat_save_actor_to_slot_effect = { SLOT = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 2 has_variable = pod_combat_c2_char } pod_combat_save_actor_to_slot_effect = { SLOT = 2 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 3 has_variable = pod_combat_c3_char } pod_combat_save_actor_to_slot_effect = { SLOT = 3 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 4 has_variable = pod_combat_c4_char } pod_combat_save_actor_to_slot_effect = { SLOT = 4 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 5 has_variable = pod_combat_c5_char } pod_combat_save_actor_to_slot_effect = { SLOT = 5 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 6 has_variable = pod_combat_c6_char } pod_combat_save_actor_to_slot_effect = { SLOT = 6 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 7 has_variable = pod_combat_c7_char } pod_combat_save_actor_to_slot_effect = { SLOT = 7 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 8 has_variable = pod_combat_c8_char } pod_combat_save_actor_to_slot_effect = { SLOT = 8 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 9 has_variable = pod_combat_c9_char } pod_combat_save_actor_to_slot_effect = { SLOT = 9 } }
-
-	# Save opponent workspace -> selected target slot
-	if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 0 has_variable = pod_combat_c0_char } pod_combat_save_target_to_slot_effect = { SLOT = 0 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 1 has_variable = pod_combat_c1_char } pod_combat_save_target_to_slot_effect = { SLOT = 1 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 2 has_variable = pod_combat_c2_char } pod_combat_save_target_to_slot_effect = { SLOT = 2 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 3 has_variable = pod_combat_c3_char } pod_combat_save_target_to_slot_effect = { SLOT = 3 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 4 has_variable = pod_combat_c4_char } pod_combat_save_target_to_slot_effect = { SLOT = 4 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 5 has_variable = pod_combat_c5_char } pod_combat_save_target_to_slot_effect = { SLOT = 5 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 6 has_variable = pod_combat_c6_char } pod_combat_save_target_to_slot_effect = { SLOT = 6 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 7 has_variable = pod_combat_c7_char } pod_combat_save_target_to_slot_effect = { SLOT = 7 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 8 has_variable = pod_combat_c8_char } pod_combat_save_target_to_slot_effect = { SLOT = 8 } }
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 9 has_variable = pod_combat_c9_char } pod_combat_save_target_to_slot_effect = { SLOT = 9 } }
-
-	# Check if target was knocked out by this action. KO conditions
-	# OR'd per slot:
-	#   - is_alive = no              (PoD wound track filled / fatal dispatch)
-	#   - pod_combat_is_incapacitated_trigger (torpor/wight/etc.)
-	#   - var:pod_combat_cN_morale <= 0  (morale-only KO — broken by mental
-	#       damage even with HP intact; the minigame treats this as
-	#       defeat the same as wound-out)
-	#   - POD_total_damage_boxes >= POD_health_track_length (track filled
-	#       but PoD hasn't applied is_alive yet — guards against the
-	#       one-tick-late death state)
-	if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 0 }
-		if = { limit = { OR = { var:pod_combat_c0_char = { is_alive = no } var:pod_combat_c0_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c0_morale <= 0 var:pod_combat_c0_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c0_alive value = 0 }
+	# Mirror image of pod_combat_load_workspace_effect: iterate
+	# pod_combat_active_slots and write the actor / target workspace
+	# back to whichever slot's slot_index matches pod_combat_current_actor
+	# / pod_combat_selected_target. Replaced two parallel 10-block
+	# if/else_if chains keyed on integer slot index.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_current_actor }
+			var:slot_index = scope:host.var:pod_combat_current_actor
 		}
+		pod_combat_save_actor_to_story_effect = yes
 	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 1 }
-		if = { limit = { OR = { var:pod_combat_c1_char = { is_alive = no } var:pod_combat_c1_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c1_morale <= 0 var:pod_combat_c1_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c1_alive value = 0 }
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_selected_target }
+			var:slot_index = scope:host.var:pod_combat_selected_target
 		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 2 }
-		if = { limit = { OR = { var:pod_combat_c2_char = { is_alive = no } var:pod_combat_c2_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c2_morale <= 0 var:pod_combat_c2_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c2_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 3 }
-		if = { limit = { OR = { var:pod_combat_c3_char = { is_alive = no } var:pod_combat_c3_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c3_morale <= 0 var:pod_combat_c3_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c3_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 4 }
-		if = { limit = { OR = { var:pod_combat_c4_char = { is_alive = no } var:pod_combat_c4_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c4_morale <= 0 var:pod_combat_c4_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c4_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 5 }
-		if = { limit = { OR = { var:pod_combat_c5_char = { is_alive = no } var:pod_combat_c5_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c5_morale <= 0 var:pod_combat_c5_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c5_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 6 }
-		if = { limit = { OR = { var:pod_combat_c6_char = { is_alive = no } var:pod_combat_c6_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c6_morale <= 0 var:pod_combat_c6_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c6_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 7 }
-		if = { limit = { OR = { var:pod_combat_c7_char = { is_alive = no } var:pod_combat_c7_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c7_morale <= 0 var:pod_combat_c7_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c7_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 8 }
-		if = { limit = { OR = { var:pod_combat_c8_char = { is_alive = no } var:pod_combat_c8_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c8_morale <= 0 var:pod_combat_c8_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c8_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_selected_target var:pod_combat_selected_target = 9 }
-		if = { limit = { OR = { var:pod_combat_c9_char = { is_alive = no } var:pod_combat_c9_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c9_morale <= 0 var:pod_combat_c9_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c9_alive value = 0 }
-		}
+		pod_combat_save_target_to_story_effect = yes
 	}
 
-	# Check if actor was knocked out by counter-damage during their own
-	# action — same OR'd KO conditions as the target check above (HP
-	# track filled, is_incapacitated, morale <= 0, or wound-track full).
-	# Morale damage from a retaliating target counts here too.
-	if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 }
-		if = { limit = { OR = { var:pod_combat_c0_char = { is_alive = no } var:pod_combat_c0_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c0_morale <= 0 var:pod_combat_c0_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c0_alive value = 0 }
+	# KO check on the action's target. Same OR'd KO conditions across
+	# four sources (PoD is_alive, pod_combat_is_incapacitated_trigger,
+	# slot_morale ≤ 0, wound-track-full) — see comment block above for
+	# rationale. Iterates pod_combat_active_slots and flips slot_alive=0
+	# only on the slot whose slot_index matches selected_target. Replaces
+	# a 10-block else_if dispatcher.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_selected_target }
+			var:slot_index = scope:host.var:pod_combat_selected_target
+			OR = {
+				var:slot_char = { is_alive = no }
+				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+				var:slot_morale <= 0
+				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
+			}
 		}
+		set_variable = { name = slot_alive value = 0 }
 	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 1 }
-		if = { limit = { OR = { var:pod_combat_c1_char = { is_alive = no } var:pod_combat_c1_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c1_morale <= 0 var:pod_combat_c1_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c1_alive value = 0 }
+
+	# KO check on the actor (counter-damage during their own action —
+	# a retaliating target's morale damage / chip damage can finish them
+	# off). Same KO predicates as above; iterates the same list.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			scope:host = { has_variable = pod_combat_current_actor }
+			var:slot_index = scope:host.var:pod_combat_current_actor
+			OR = {
+				var:slot_char = { is_alive = no }
+				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+				var:slot_morale <= 0
+				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
+			}
 		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 2 }
-		if = { limit = { OR = { var:pod_combat_c2_char = { is_alive = no } var:pod_combat_c2_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c2_morale <= 0 var:pod_combat_c2_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c2_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 3 }
-		if = { limit = { OR = { var:pod_combat_c3_char = { is_alive = no } var:pod_combat_c3_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c3_morale <= 0 var:pod_combat_c3_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c3_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 4 }
-		if = { limit = { OR = { var:pod_combat_c4_char = { is_alive = no } var:pod_combat_c4_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c4_morale <= 0 var:pod_combat_c4_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c4_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 5 }
-		if = { limit = { OR = { var:pod_combat_c5_char = { is_alive = no } var:pod_combat_c5_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c5_morale <= 0 var:pod_combat_c5_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c5_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 6 }
-		if = { limit = { OR = { var:pod_combat_c6_char = { is_alive = no } var:pod_combat_c6_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c6_morale <= 0 var:pod_combat_c6_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c6_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 7 }
-		if = { limit = { OR = { var:pod_combat_c7_char = { is_alive = no } var:pod_combat_c7_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c7_morale <= 0 var:pod_combat_c7_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c7_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 8 }
-		if = { limit = { OR = { var:pod_combat_c8_char = { is_alive = no } var:pod_combat_c8_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c8_morale <= 0 var:pod_combat_c8_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c8_alive value = 0 }
-		}
-	}
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 9 }
-		if = { limit = { OR = { var:pod_combat_c9_char = { is_alive = no } var:pod_combat_c9_char = { pod_combat_is_incapacitated_trigger = yes } var:pod_combat_c9_morale <= 0 var:pod_combat_c9_char = { POD_total_damage_boxes >= POD_health_track_length } } }
-			set_variable = { name = pod_combat_c9_alive value = 0 }
-		}
+		set_variable = { name = slot_alive value = 0 }
 	}
 
 	# Victory check at the post-flush boundary. Slot _alive flags and
@@ -809,9 +762,11 @@ pod_combat_save_workspace_effect = {
 	# vars), so team-wipe detection works. This is one of two call
 	# sites — the other is at the end of pod_combat_execute_ai_turn_effect
 	# (covering AI action boundaries). Per-damage victory checks are
-	# NOT used; see COMBAT_DESIGN_HISTORY.md §3 for why. The check is
-	# guarded on NOT = pod_combat_is_over so cascading calls (AoE
-	# save_workspace) are idempotent.
+	# NOT used: an AoE move would fire the check after each victim's
+	# damage call, and a multi-victim wipe would emit one cleanup per
+	# kill. Checking only at action boundaries keeps cleanup atomic.
+	# The check is guarded on NOT = pod_combat_is_over so cascading
+	# calls (AoE save_workspace) are idempotent.
 	pod_combat_check_group_victory_effect = yes
 }
 
@@ -851,16 +806,14 @@ pod_combat_init_slot_from_character_effect = {
 		POD_ally_knight_set_discipline_battle_effect = { CASTER = $CHARACTER$ }
 		force_character_skill_recalculation = yes
 	}
-	# Reads health track, soak, prowess from the character and stores in slot variables
+	# Read soak and prowess from the character and snapshot them as
+	# saved scopes so the parametric pod_combat_set_slot_var_effect
+	# calls below can pass them as VALUE without re-resolving against
+	# the slot story scope. HP / wound state isn't snapshotted —
+	# pod_combat_slot_max_hp_value / _total_damage_sv / _agg_damage_sv
+	# read live from the participant's PoD wound vars at GUI render
+	# time.
 	$CHARACTER$ = {
-		save_scope_value_as = {
-			name = slot_track_length
-			value = POD_health_track_length
-		}
-		save_scope_value_as = {
-			name = slot_empty_boxes
-			value = POD_empty_damage_boxes
-		}
 		save_scope_value_as = {
 			name = slot_soak
 			value = POD_soak_chance
@@ -871,11 +824,11 @@ pod_combat_init_slot_from_character_effect = {
 		}
 	}
 
-	set_variable = { name = pod_combat_c$SLOT$_soak value = scope:slot_soak }
-	set_variable = { name = pod_combat_c$SLOT$_base_soak value = scope:slot_soak }
-	set_variable = { name = pod_combat_c$SLOT$_morale value = pod_combat_max_morale }
-	set_variable = { name = pod_combat_c$SLOT$_prowess value = scope:slot_prowess }
-	set_variable = { name = pod_combat_c$SLOT$_alive value = 1 }
+	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = soak      VALUE = scope:slot_soak }
+	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = base_soak VALUE = scope:slot_soak }
+	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = morale    VALUE = pod_combat_max_morale }
+	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = prowess   VALUE = scope:slot_prowess }
+	pod_combat_set_slot_alive_effect = { SLOT = $SLOT$ VALUE = 1 }
 	# AI energy-use counter — increments on every energy-cost skill this
 	# combatant fires. The AI move picker layers stacking ADDITIVE weight
 	# penalties on top of this counter (-8 / -10 / -12 / -14 at thresholds
@@ -884,7 +837,7 @@ pod_combat_init_slot_from_character_effect = {
 	# additive selection-bias. The AI may actualy pays the splat energy 
 	# on top of this. Energy-cost moves route through the same
 	# POD_spend_splat_agnostic_energy path the PC uses.
-	set_variable = { name = pod_combat_c$SLOT$_energy_used value = 0 }
+	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = energy_used VALUE = 0 }
 	# ── Spirit / incorporeality capability flags ─────────────────
 	# Mirrors PoD's POD_damage_spirit_custom_trigger semantics for the
 	# minigame. Two per-slot flags are captured once at init and never
@@ -902,18 +855,18 @@ pod_combat_init_slot_from_character_effect = {
 	# attack auto-misses. Supernatural / Mental / Fire / Sunlight /
 	# Silver / Gold / Holy pipelines are unaffected — they connect
 	# through incorporeality normally.
-	remove_variable = pod_combat_c$SLOT$_incorporeal_spirit
+	pod_combat_remove_slot_var_effect = { SLOT = $SLOT$ NAME = incorporeal_spirit }
 	if = {
 		limit = { $CHARACTER$ = { POD_can_be_killed_physically_trigger = no } }
-		set_variable = { name = pod_combat_c$SLOT$_incorporeal_spirit value = yes }
+		pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = incorporeal_spirit VALUE = yes }
 	}
-	remove_variable = pod_combat_c$SLOT$_can_damage_spirit
+	pod_combat_remove_slot_var_effect = { SLOT = $SLOT$ NAME = can_damage_spirit }
 	if = {
 		limit = { $CHARACTER$ = { POD_can_damage_spirit_trigger = yes } }
-		set_variable = { name = pod_combat_c$SLOT$_can_damage_spirit value = yes }
+		pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = can_damage_spirit VALUE = yes }
 	}
-	remove_variable = pod_combat_c$SLOT$_is_guarding
-	remove_variable = pod_combat_c$SLOT$_is_dodging
+	pod_combat_remove_slot_var_effect = { SLOT = $SLOT$ NAME = is_guarding }
+	pod_combat_remove_slot_var_effect = { SLOT = $SLOT$ NAME = is_dodging }
 	# ── AI per-fight transient state ─────────────────────────────
 	# AI loadouts and anti-repetition history (last / prev / prev2
 	# move) are per-fight scratch state. Clear them on slot init so
@@ -956,28 +909,29 @@ pod_combat_init_slot_from_character_effect = {
 
 pod_combat_assign_ally_slot_effect = {
 	# $CHARACTER$ = character to add to next available ally slot (1-4)
-	# Per-slot _team and player_team_size were dropped during the
-	# dead-code review — team affiliation is computed from the slot
-	# index everywhere (slots 0-4 = player team, 5-9 = enemy team)
-	# and player_team_size was never read.
+	# Team affiliation is derived from slot index — slots 0-4 = player
+	# team, 5-9 = enemy team — not stored as a per-slot variable. No
+	# pod_combat_player_team_size counter is kept either; iterations
+	# over pod_combat_active_slots filtered by slot_index handle every
+	# reader that would have needed the count.
 	if = {
-		limit = { NOT = { has_variable = pod_combat_c1_char } }
-		set_variable = { name = pod_combat_c1_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_1 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 1 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 1 CHARACTER = $CHARACTER$ }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c2_char } }
-		set_variable = { name = pod_combat_c2_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_2 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 2 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 2 CHARACTER = $CHARACTER$ }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c3_char } }
-		set_variable = { name = pod_combat_c3_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_3 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 3 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 3 CHARACTER = $CHARACTER$ }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c4_char } }
-		set_variable = { name = pod_combat_c4_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_4 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 4 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 4 CHARACTER = $CHARACTER$ }
 	}
 }
@@ -989,26 +943,26 @@ pod_combat_assign_enemy_slot_effect = {
 	# how many enemies still fit. Per-slot _team is dead (computed
 	# from slot index everywhere).
 	if = {
-		limit = { NOT = { has_variable = pod_combat_c6_char } }
-		set_variable = { name = pod_combat_c6_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_6 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 6 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 6 CHARACTER = $CHARACTER$ }
 		change_variable = { name = pod_combat_enemy_team_size add = 1 }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c7_char } }
-		set_variable = { name = pod_combat_c7_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_7 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 7 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 7 CHARACTER = $CHARACTER$ }
 		change_variable = { name = pod_combat_enemy_team_size add = 1 }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c8_char } }
-		set_variable = { name = pod_combat_c8_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_8 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 8 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 8 CHARACTER = $CHARACTER$ }
 		change_variable = { name = pod_combat_enemy_team_size add = 1 }
 	}
 	else_if = {
-		limit = { NOT = { has_variable = pod_combat_c9_char } }
-		set_variable = { name = pod_combat_c9_char value = $CHARACTER$ }
+		limit = { NOT = { var:pod_combat_slot_9 = { has_variable = slot_char } } }
+		pod_combat_set_slot_char_effect = { SLOT = 9 CHARACTER = $CHARACTER$ }
 		pod_combat_init_slot_from_character_effect = { SLOT = 9 CHARACTER = $CHARACTER$ }
 		change_variable = { name = pod_combat_enemy_team_size add = 1 }
 	}
@@ -1047,8 +1001,22 @@ pod_combat_initialize_effect = {
 	set_variable = { name = pod_combat_active value = yes }
 	set_variable = { name = pod_combat_round value = 1 }
 
-	# Save the PC scope early so the shapeshift pre-pass can exclude them
-	# explicitly. The PC also gets saved as pod_combat_c0_char below.
+	# Build the per-slot story_cycle infrastructure. Ten POD_combat_slot
+	# stories are created on Charon and listed/pointer-anchored on the
+	# host (this character). pod_combat_init_slot_from_character_effect
+	# (called below per combatant) writes each slot's char / stat /
+	# stance fields onto the matching slot story; pod_combat_set_slot_char_effect
+	# additionally registers each populated slot in the host's
+	# pod_combat_active_slots variable list, which the GUI's datamodel
+	# iteration and the host-wide combat dispatchers (initiative,
+	# find_next_actor, AoE damage/heal, etc.) iterate at runtime. The
+	# stories are end_story-d in pod_combat_group_cleanup_effect at
+	# combat end — see pod_combat_slot_effects.txt for the lifecycle
+	# helpers.
+	pod_combat_create_slot_stories_effect = yes
+
+	# The PC also gets registered as slot 0's slot_char
+	# (via pod_combat_set_slot_char_effect) below.
 	save_scope_as = combat_pc
 
 	# -- Pre-pass: shapeshift all AI fera combatants BEFORE any slot init --
@@ -1063,9 +1031,7 @@ pod_combat_initialize_effect = {
 	# Shapeshifting upfront ensures every CASTER has its warform modifier
 	# before any delirium / discipline query runs.
 	#
-	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift. They may prefer
-	# to fight in human form (e.g., to preserve social options post-combat)
-	# or may have already shifted manually via an interaction.
+	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift.
 	scope:pod_combat_target = {
 		if = {
 			limit = {
@@ -1127,7 +1093,7 @@ pod_combat_initialize_effect = {
 	}
 
 	# -- Slot 0: PC (always) --
-	set_variable = { name = pod_combat_c0_char value = scope:combat_pc }
+	pod_combat_set_slot_char_effect = { SLOT = 0 CHARACTER = scope:combat_pc }
 	pod_combat_init_slot_from_character_effect = { SLOT = 0 CHARACTER = scope:combat_pc }
 
 	# -- Slots 1-4: Coterie allies (modes 2 and 3) --
@@ -1155,7 +1121,7 @@ pod_combat_initialize_effect = {
 	}
 
 	# -- Slot 5: Primary opponent (always) --
-	set_variable = { name = pod_combat_c5_char value = scope:pod_combat_target }
+	pod_combat_set_slot_char_effect = { SLOT = 5 CHARACTER = scope:pod_combat_target }
 	pod_combat_init_slot_from_character_effect = { SLOT = 5 CHARACTER = scope:pod_combat_target }
 	set_variable = { name = pod_combat_enemy_team_size value = 1 }
 
@@ -1200,14 +1166,14 @@ pod_combat_initialize_effect = {
 
 	# -- Set up initial target / workspace defaults --
 	if = {
-		limit = { has_variable = pod_combat_c5_char }
-		set_variable = { name = pod_combat_opponent value = var:pod_combat_c5_char }
+		limit = { has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char } }
+		set_variable = { name = pod_combat_opponent value = var:pod_combat_slot_5.var:slot_char }
 		# Keep the TARGET_SIDE-addressable alias (pod_combat_opponent_char)
 		# in sync with pod_combat_opponent so the damage helper's
 		# var:pod_combat_$TARGET_SIDE$_char lookup resolves correctly
 		# from the moment combat initializes, even before the first
 		# target_load effect runs.
-		set_variable = { name = pod_combat_opponent_char value = var:pod_combat_c5_char }
+		set_variable = { name = pod_combat_opponent_char value = var:pod_combat_slot_5.var:slot_char }
 	}
 	set_variable = { name = pod_combat_selected_target value = 5 }
 	# Initialize the unified PC target — defaults to the primary opponent
@@ -1236,7 +1202,7 @@ pod_combat_initialize_effect = {
 	# reads the flag and returns no, so POD_health_death_check_effect
 	# never enters its pod_death branch during the combat. The flag is
 	# stripped post-combat by pod_combat_end_combat_effect AFTER
-	# pod_combat_cap_nonfatal_slot_effect has capped everyone to at
+	# pod_combat_apply_nonfatal_effect has capped everyone to at
 	# least one empty box. Fatal duels deliberately don't gate the
 	# death check — combatants can die mid-fight; KO via wound-track-
 	# full happens regardless via the slot alive-flip check below.
@@ -1273,6 +1239,44 @@ pod_combat_initialize_effect = {
 	}
 }
 
+# Per-slot helper: compute one slot's base hit chance from prowess and
+# apply it. Body identical for every slot — only the comparison-target
+# slot differs (player team measures against slot 5's prowess, enemy
+# team measures against slot 0's). Lifted out of
+# pod_combat_calculate_all_hit_chances_effect so the dispatcher is just
+# 10 parametric calls instead of a 60-line copy/paste block.
+pod_combat_calc_one_hit_chance_effect = {
+	# $SLOT$       = the slot to compute (0..9)
+	# $ENEMY_SLOT$ = the comparison-target slot (5 for player team,
+	#                0 for enemy team)
+	#
+	# Outer gate uses the slot pointer + slot_char chain so tooltip-
+	# build (no slot stories) and unfilled slots both short-circuit
+	# before any chained `var:pod_combat_slot_$SLOT$.var:slot_prowess`
+	# read fires. The enemy-slot prowess read assumes that slot is
+	# also filled (the dispatcher only computes hit_chance for filled
+	# slots, and the comparison target is always slot 5 or slot 0
+	# which are populated for any combat the minigame intercepts).
+	if = {
+		limit = { has_variable = pod_combat_slot_$SLOT$ var:pod_combat_slot_$SLOT$ = { has_variable = slot_char } }
+		save_scope_value_as = {
+			name = base_hit
+			value = {
+				value = pod_combat_hit_chance_base
+				add = {
+					value = var:pod_combat_slot_$SLOT$.var:slot_prowess
+					subtract = var:pod_combat_slot_$ENEMY_SLOT$.var:slot_prowess
+					divide = 2
+				}
+				min = 20
+				max = 95
+			}
+		}
+		pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = base_hit_chance VALUE = scope:base_hit }
+		pod_combat_recalc_slot_stats_effect = { SLOT = $SLOT$ }
+	}
+}
+
 pod_combat_calculate_all_hit_chances_effect = {
 	# For each slot, compute the base hit chance from prowess:
 	#   base = pod_combat_hit_chance_base + (own prowess - primary enemy prowess) / 2,
@@ -1283,68 +1287,32 @@ pod_combat_calculate_all_hit_chances_effect = {
 	# (Soak is recalculated the same way so tier debuffs carry cleanly across
 	# the round-end reset.)
 
-	if = { limit = { has_variable = pod_combat_c0_char }
-		save_scope_value_as = { name = c0_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c0_prowess subtract = var:pod_combat_c5_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c0_base_hit_chance value = scope:c0_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 0 }
-	}
-	if = { limit = { has_variable = pod_combat_c1_char }
-		save_scope_value_as = { name = c1_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c1_prowess subtract = var:pod_combat_c5_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c1_base_hit_chance value = scope:c1_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 1 }
-	}
-	if = { limit = { has_variable = pod_combat_c2_char }
-		save_scope_value_as = { name = c2_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c2_prowess subtract = var:pod_combat_c5_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c2_base_hit_chance value = scope:c2_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 2 }
-	}
-	if = { limit = { has_variable = pod_combat_c3_char }
-		save_scope_value_as = { name = c3_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c3_prowess subtract = var:pod_combat_c5_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c3_base_hit_chance value = scope:c3_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 3 }
-	}
-	if = { limit = { has_variable = pod_combat_c4_char }
-		save_scope_value_as = { name = c4_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c4_prowess subtract = var:pod_combat_c5_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c4_base_hit_chance value = scope:c4_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 4 }
-	}
+	# Player team — measures against primary opponent (slot 5) prowess.
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 0 ENEMY_SLOT = 5 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 1 ENEMY_SLOT = 5 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 2 ENEMY_SLOT = 5 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 3 ENEMY_SLOT = 5 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 4 ENEMY_SLOT = 5 }
 
-	if = { limit = { has_variable = pod_combat_c5_char }
-		save_scope_value_as = { name = c5_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c5_prowess subtract = var:pod_combat_c0_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c5_base_hit_chance value = scope:c5_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 5 }
-	}
-	if = { limit = { has_variable = pod_combat_c6_char }
-		save_scope_value_as = { name = c6_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c6_prowess subtract = var:pod_combat_c0_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c6_base_hit_chance value = scope:c6_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 6 }
-	}
-	if = { limit = { has_variable = pod_combat_c7_char }
-		save_scope_value_as = { name = c7_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c7_prowess subtract = var:pod_combat_c0_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c7_base_hit_chance value = scope:c7_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 7 }
-	}
-	if = { limit = { has_variable = pod_combat_c8_char }
-		save_scope_value_as = { name = c8_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c8_prowess subtract = var:pod_combat_c0_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c8_base_hit_chance value = scope:c8_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 8 }
-	}
-	if = { limit = { has_variable = pod_combat_c9_char }
-		save_scope_value_as = { name = c9_base_hit value = { value = pod_combat_hit_chance_base add = { value = var:pod_combat_c9_prowess subtract = var:pod_combat_c0_prowess divide = 2 } min = 20 max = 95 } }
-		set_variable = { name = pod_combat_c9_base_hit_chance value = scope:c9_base_hit }
-		pod_combat_recalc_slot_stats_effect = { SLOT = 9 }
-	}
+	# Enemy team — measures against PC (slot 0) prowess.
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 5 ENEMY_SLOT = 0 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 6 ENEMY_SLOT = 0 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 7 ENEMY_SLOT = 0 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 8 ENEMY_SLOT = 0 }
+	pod_combat_calc_one_hit_chance_effect = { SLOT = 9 ENEMY_SLOT = 0 }
 }
 
 ##############################################################################################
 # SECTION 6b: PLAYER HIT CHANCE RECALC ON TARGET SWAP
-# Called by pod_combat_select_target_N (slots 5-9) after loading the new
-# target into pod_combat_opponent_*. Rebuilds the PC's base_hit_chance
-# from the freshly loaded opponent's prowess and propagates to
-# pod_combat_c0_base_hit_chance, then runs the workspace and per-slot
-# tier recalc so any active hit buff/debuff tiers reapply cleanly against
-# the new base. Stealth's +30 hit bonus is outside the tier system and
-# stays tied to the stealth flag (consumed via the damage pipeline).
+# Called by pod_combat_select_target (the unified target-select SGUI)
+# after loading a new enemy into pod_combat_opponent_*. Rebuilds the
+# PC's base_hit_chance from the freshly loaded opponent's prowess and
+# propagates to slot 0's slot_base_hit_chance via
+# pod_combat_set_slot_var_effect, then runs the workspace and per-slot
+# tier recalc so any active hit buff/debuff tiers reapply cleanly
+# against the new base. Stealth's +30 hit bonus is outside the tier
+# system and stays tied to the stealth flag (consumed via the damage
+# pipeline).
 ##############################################################################################
 
 pod_combat_recalc_player_hit_chance_effect = {
@@ -1373,7 +1341,7 @@ pod_combat_recalc_player_hit_chance_effect = {
 			}
 		}
 		set_variable = { name = pod_combat_player_base_hit_chance value = scope:pc_recalc_base_hit }
-		set_variable = { name = pod_combat_c0_base_hit_chance value = scope:pc_recalc_base_hit }
+		pod_combat_set_slot_var_effect = { SLOT = 0 NAME = base_hit_chance VALUE = scope:pc_recalc_base_hit }
 		pod_combat_recalc_hit_player_effect = yes
 		pod_combat_recalc_slot_stats_effect = { SLOT = 0 }
 	}
@@ -1386,9 +1354,6 @@ pod_combat_recalc_player_hit_chance_effect = {
 ##############################################################################################
 
 pod_combat_group_cleanup_effect = {
-	# Remove all per-slot variables (slots 0-9)
-	# This is in addition to the existing workspace cleanup
-
 	# ── AI per-fight transient state cleanup ─────────────────────
 	# Two kinds of state on AI characters that should be per-fight:
 	#   - pod_combat_loadout: the 442-entry scratch loadout list.
@@ -1401,210 +1366,48 @@ pod_combat_group_cleanup_effect = {
 	# equipment, and the AI history vars are never written on the PC
 	# (the selector switches into var:pod_combat_actor_char before
 	# touching them, which is always an AI on AI turns).
-	# Iterate slots 1-9 and clear on the underlying character via
-	# var:pod_combat_cN_char (must run BEFORE the slot var removal
-	# below — once pod_combat_cN_char is gone we have no handle on
-	# the AI character).
+	#
+	# Runs FIRST so the slot stories still exist (and slot_char is
+	# still readable) when we reach into each slot's character to
+	# clear its per-fight scratch state. The slot-story teardown
+	# below tears down everything the chained read needs.
 	#
 	# Pairs with the slot-init clear in
 	# pod_combat_init_slot_from_character_effect (handles legacy
 	# NPCs on the way INTO combat; this handles save bloat / cross-
 	# fight bias on the way OUT).
-	if = {
-		limit = { exists = var:pod_combat_c1_char  var:pod_combat_c1_char = { is_ai = yes } }
-		var:pod_combat_c1_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c2_char  var:pod_combat_c2_char = { is_ai = yes } }
-		var:pod_combat_c2_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c3_char  var:pod_combat_c3_char = { is_ai = yes } }
-		var:pod_combat_c3_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c4_char  var:pod_combat_c4_char = { is_ai = yes } }
-		var:pod_combat_c4_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c5_char  var:pod_combat_c5_char = { is_ai = yes } }
-		var:pod_combat_c5_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c6_char  var:pod_combat_c6_char = { is_ai = yes } }
-		var:pod_combat_c6_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c7_char  var:pod_combat_c7_char = { is_ai = yes } }
-		var:pod_combat_c7_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c8_char  var:pod_combat_c8_char = { is_ai = yes } }
-		var:pod_combat_c8_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
-	}
-	if = {
-		limit = { exists = var:pod_combat_c9_char  var:pod_combat_c9_char = { is_ai = yes } }
-		var:pod_combat_c9_char = { clear_variable_list = pod_combat_loadout  remove_variable = pod_combat_ai_last_move  remove_variable = pod_combat_ai_prev_move  remove_variable = pod_combat_ai_prev2_move }
+	# Iterate active slots, skipping the PC (slot 0) and any non-AI
+	# combatants. var:slot_alive isn't checked — even KO'd AIs have
+	# accumulated cross-fight bias that should be cleared. Replaced
+	# nine hardcoded `if = { limit = { ...slot_N... } var:slot_N.var:slot_char = { ... } }`
+	# blocks with a single iteration.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_index > 0
+			var:slot_char = { is_ai = yes }
+		}
+		var:slot_char = {
+			clear_variable_list = pod_combat_loadout
+			remove_variable = pod_combat_ai_last_move
+			remove_variable = pod_combat_ai_prev_move
+			remove_variable = pod_combat_ai_prev2_move
+		}
 	}
 
-	# No HP-cache cleanup needed — those vars aren't written anywhere
-	# (see COMBAT_DESIGN_HISTORY.md §2). Same applies to all 10 slots
-	# below.
+	# ── Slot story_cycle teardown ────────────────────────────────
+	# end_story every POD_combat_slot story, drop the host's pointer
+	# vars (pod_combat_slot_0..9), and clear the pod_combat_slots
+	# variable list. Runs AFTER the AI cleanup above so the chained
+	# var:pod_combat_slot_$N$.var:slot_char reads still resolve. See
+	# pod_combat_slot_effects.txt for the lifecycle helper definitions.
+	pod_combat_clear_slot_stories_effect = yes
 
-	# Slot 0
-	remove_variable = pod_combat_c0_char
-	remove_variable = pod_combat_c0_soak
-	remove_variable = pod_combat_c0_base_soak
-	remove_variable = pod_combat_c0_base_hit_chance
-	remove_variable = pod_combat_c0_morale
-	remove_variable = pod_combat_c0_prowess
-	remove_variable = pod_combat_c0_hit_chance
-	remove_variable = pod_combat_c0_energy_used
-	remove_variable = pod_combat_c0_is_guarding
-	remove_variable = pod_combat_c0_is_dodging
-	remove_variable = pod_combat_c0_alive
-
-	# Slot 1
-	remove_variable = pod_combat_c1_char
-	remove_variable = pod_combat_c1_soak
-	remove_variable = pod_combat_c1_base_soak
-	remove_variable = pod_combat_c1_base_hit_chance
-	remove_variable = pod_combat_c1_morale
-	remove_variable = pod_combat_c1_prowess
-	remove_variable = pod_combat_c1_hit_chance
-	remove_variable = pod_combat_c1_energy_used
-	remove_variable = pod_combat_c1_is_guarding
-	remove_variable = pod_combat_c1_is_dodging
-	remove_variable = pod_combat_c1_alive
-
-	# Slot 2
-	remove_variable = pod_combat_c2_char
-	remove_variable = pod_combat_c2_soak
-	remove_variable = pod_combat_c2_base_soak
-	remove_variable = pod_combat_c2_base_hit_chance
-	remove_variable = pod_combat_c2_morale
-	remove_variable = pod_combat_c2_prowess
-	remove_variable = pod_combat_c2_hit_chance
-	remove_variable = pod_combat_c2_energy_used
-	remove_variable = pod_combat_c2_is_guarding
-	remove_variable = pod_combat_c2_is_dodging
-	remove_variable = pod_combat_c2_alive
-
-	# Slot 3
-	remove_variable = pod_combat_c3_char
-	remove_variable = pod_combat_c3_soak
-	remove_variable = pod_combat_c3_base_soak
-	remove_variable = pod_combat_c3_base_hit_chance
-	remove_variable = pod_combat_c3_morale
-	remove_variable = pod_combat_c3_prowess
-	remove_variable = pod_combat_c3_hit_chance
-	remove_variable = pod_combat_c3_energy_used
-	remove_variable = pod_combat_c3_is_guarding
-	remove_variable = pod_combat_c3_is_dodging
-	remove_variable = pod_combat_c3_alive
-
-	# Slot 4
-	remove_variable = pod_combat_c4_char
-	remove_variable = pod_combat_c4_soak
-	remove_variable = pod_combat_c4_base_soak
-	remove_variable = pod_combat_c4_base_hit_chance
-	remove_variable = pod_combat_c4_morale
-	remove_variable = pod_combat_c4_prowess
-	remove_variable = pod_combat_c4_hit_chance
-	remove_variable = pod_combat_c4_energy_used
-	remove_variable = pod_combat_c4_is_guarding
-	remove_variable = pod_combat_c4_is_dodging
-	remove_variable = pod_combat_c4_alive
-
-	# Slot 5
-	remove_variable = pod_combat_c5_char
-	remove_variable = pod_combat_c5_soak
-	remove_variable = pod_combat_c5_base_soak
-	remove_variable = pod_combat_c5_base_hit_chance
-	remove_variable = pod_combat_c5_morale
-	remove_variable = pod_combat_c5_prowess
-	remove_variable = pod_combat_c5_hit_chance
-	remove_variable = pod_combat_c5_energy_used
-	remove_variable = pod_combat_c5_is_guarding
-	remove_variable = pod_combat_c5_is_dodging
-	remove_variable = pod_combat_c5_alive
-
-	# Slot 6
-	remove_variable = pod_combat_c6_char
-	remove_variable = pod_combat_c6_soak
-	remove_variable = pod_combat_c6_base_soak
-	remove_variable = pod_combat_c6_base_hit_chance
-	remove_variable = pod_combat_c6_morale
-	remove_variable = pod_combat_c6_prowess
-	remove_variable = pod_combat_c6_hit_chance
-	remove_variable = pod_combat_c6_energy_used
-	remove_variable = pod_combat_c6_is_guarding
-	remove_variable = pod_combat_c6_is_dodging
-	remove_variable = pod_combat_c6_alive
-
-	# Slot 7
-	remove_variable = pod_combat_c7_char
-	remove_variable = pod_combat_c7_soak
-	remove_variable = pod_combat_c7_base_soak
-	remove_variable = pod_combat_c7_base_hit_chance
-	remove_variable = pod_combat_c7_morale
-	remove_variable = pod_combat_c7_prowess
-	remove_variable = pod_combat_c7_hit_chance
-	remove_variable = pod_combat_c7_energy_used
-	remove_variable = pod_combat_c7_is_guarding
-	remove_variable = pod_combat_c7_is_dodging
-	remove_variable = pod_combat_c7_alive
-
-	# Slot 8
-	remove_variable = pod_combat_c8_char
-	remove_variable = pod_combat_c8_soak
-	remove_variable = pod_combat_c8_base_soak
-	remove_variable = pod_combat_c8_base_hit_chance
-	remove_variable = pod_combat_c8_morale
-	remove_variable = pod_combat_c8_prowess
-	remove_variable = pod_combat_c8_hit_chance
-	remove_variable = pod_combat_c8_energy_used
-	remove_variable = pod_combat_c8_is_guarding
-	remove_variable = pod_combat_c8_is_dodging
-	remove_variable = pod_combat_c8_alive
-
-	# Slot 9
-	remove_variable = pod_combat_c9_char
-	remove_variable = pod_combat_c9_soak
-	remove_variable = pod_combat_c9_base_soak
-	remove_variable = pod_combat_c9_base_hit_chance
-	remove_variable = pod_combat_c9_morale
-	remove_variable = pod_combat_c9_prowess
-	remove_variable = pod_combat_c9_hit_chance
-	remove_variable = pod_combat_c9_energy_used
-	remove_variable = pod_combat_c9_is_guarding
-	remove_variable = pod_combat_c9_is_dodging
-	remove_variable = pod_combat_c9_alive
-
-	# Spirit-damage capability / incorporeality flags (static per combat,
-	# set at init from POD_can_be_killed_physically_trigger /
-	# POD_can_damage_spirit_trigger). Cleared here for all 10 slots.
-	remove_variable = pod_combat_c0_incorporeal_spirit
-	remove_variable = pod_combat_c1_incorporeal_spirit
-	remove_variable = pod_combat_c2_incorporeal_spirit
-	remove_variable = pod_combat_c3_incorporeal_spirit
-	remove_variable = pod_combat_c4_incorporeal_spirit
-	remove_variable = pod_combat_c5_incorporeal_spirit
-	remove_variable = pod_combat_c6_incorporeal_spirit
-	remove_variable = pod_combat_c7_incorporeal_spirit
-	remove_variable = pod_combat_c8_incorporeal_spirit
-	remove_variable = pod_combat_c9_incorporeal_spirit
-	remove_variable = pod_combat_c0_can_damage_spirit
-	remove_variable = pod_combat_c1_can_damage_spirit
-	remove_variable = pod_combat_c2_can_damage_spirit
-	remove_variable = pod_combat_c3_can_damage_spirit
-	remove_variable = pod_combat_c4_can_damage_spirit
-	remove_variable = pod_combat_c5_can_damage_spirit
-	remove_variable = pod_combat_c6_can_damage_spirit
-	remove_variable = pod_combat_c7_can_damage_spirit
-	remove_variable = pod_combat_c8_can_damage_spirit
-	remove_variable = pod_combat_c9_can_damage_spirit
-	# Workspace mirrors
+	# ── Workspace mirrors for the spirit capability flags ────────
+	# Per-slot slot_incorporeal_spirit / slot_can_damage_spirit are
+	# torn down with the rest of the slot story above; these are the
+	# host-scope workspace mirrors that load_actor_from_slot_effect /
+	# load_target_from_slot_effect populate.
 	remove_variable = pod_combat_player_incorporeal_spirit
 	remove_variable = pod_combat_player_can_damage_spirit
 	remove_variable = pod_combat_opponent_incorporeal_spirit
@@ -1616,29 +1419,6 @@ pod_combat_group_cleanup_effect = {
 	remove_variable = pod_combat_current_actor
 	remove_variable = pod_combat_selected_target
 	remove_variable = pod_combat_pc_target
-
-	# Initiative and turn tracking (sections 8-11)
-	remove_variable = pod_combat_c0_initiative
-	remove_variable = pod_combat_c1_initiative
-	remove_variable = pod_combat_c2_initiative
-	remove_variable = pod_combat_c3_initiative
-	remove_variable = pod_combat_c4_initiative
-	remove_variable = pod_combat_c5_initiative
-	remove_variable = pod_combat_c6_initiative
-	remove_variable = pod_combat_c7_initiative
-	remove_variable = pod_combat_c8_initiative
-	remove_variable = pod_combat_c9_initiative
-	remove_variable = pod_combat_c0_has_acted
-	remove_variable = pod_combat_c1_has_acted
-	remove_variable = pod_combat_c2_has_acted
-	remove_variable = pod_combat_c3_has_acted
-	remove_variable = pod_combat_c4_has_acted
-	remove_variable = pod_combat_c5_has_acted
-	remove_variable = pod_combat_c6_has_acted
-	remove_variable = pod_combat_c7_has_acted
-	remove_variable = pod_combat_c8_has_acted
-	remove_variable = pod_combat_c9_has_acted
-	remove_variable = pod_combat_actors_remaining
 	remove_variable = pod_combat_best_init
 	remove_variable = pod_combat_best_slot
 }
@@ -1647,236 +1427,121 @@ pod_combat_group_cleanup_effect = {
 # SECTION 8: INITIATIVE SYSTEM
 # For each alive combatant slot (0-9), calculate initiative as
 # prowess + (one of seven discrete buckets {1, 5, 10, 15, 20, 25, 30})
-# + init_bonus. NOT a uniform random(1-30) — the seven buckets are
-# uniformly weighted (1 each in random_list) but the values are
-# discrete, which produces a coarser distribution than continuous 1-30
-# would. Store in pod_combat_c{i}_initiative. Clear
-# pod_combat_c{i}_has_acted flags.
+# + init_bonus. Store in pod_combat_c{i}_initiative. 
+# Clear pod_combat_c{i}_has_acted flags.
 ##############################################################################################
 
+# Per-slot helper: roll one slot's initiative for the round, fold in
+# any pending init_bonus, and clear has_acted. Same shape as the other
+# per-slot helpers (calc_one_hit_chance, reset_one_slot_soak) — body
+# factored out so the dispatcher below is 10 parametric calls instead
+# of a 200-line copy/paste block.
+#
+#
+# Outer gate uses the slot pointer + slot_char chain so tooltip-build
+# (no slot stories) and unfilled slots both short-circuit before any
+# chained `var:pod_combat_slot_$SLOT$.var:slot_X` read fires.
 pod_combat_calculate_initiative_effect = {
-	# Calculate initiative for all alive combatants
-	# Initiative = prowess + bucket_pick + init_bonus, where bucket_pick is one
-	# of seven discrete values {1, 5, 10, 15, 20, 25, 30} chosen uniformly via
-	# random_list with weight 1 each. Tuning the variance means changing the
-	# bucket VALUES (not switching to a uniform range) — adding more buckets
-	# extends the curve, narrower spreads (e.g. {5, 10, 15}) make it more
-	# prowess-deterministic.
-	# init_bonus comes from buff/debuff moves applied previous round.
-	# Positive = faster (buff), negative = slower (debuff). Cleared after application.
-
-	# Slot 0
-	if = {
-		limit = { has_variable = pod_combat_c0_char var:pod_combat_c0_alive = 1 }
+	# Roll initiative for every alive combatant and stamp turn-order
+	# rank. Initiative = prowess + bucket_pick + init_bonus, where
+	# bucket_pick is one of seven discrete values {1, 5, 10, 15, 20,
+	# 25, 30} chosen uniformly via random_list with weight 1 each.
+	#
+	# init_bonus comes from buff/debuff moves applied previous round;
+	# positive = faster (buff), negative = slower (debuff). Cleared
+	# after application.
+	#
+	# Iterates pod_combat_active_slots. the iteration body runs in
+	# slot-story scope so var:slot_X reads/writes target the slot
+	# story directly. Replaced an unrolled 10-call dispatcher
+	# (pod_combat_calc_one_initiative_effect × 10) with this single
+	# loop; the helper became redundant once the slot story is the
+	# iteration scope (set_variable = { name = slot_X ... } writes
+	# the same field that the parametric pod_combat_set_slot_var_effect
+	# wrapper would have).
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = { var:slot_alive = 1 }
 		random_list = {
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c0_initiative value = { value = var:pod_combat_c0_prowess add = 30 } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 1  } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 5  } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 10 } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 15 } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 20 } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 25 } } }
+			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 30 } } }
 		}
+		set_variable = { name = slot_initiative value = scope:init_roll }
 		if = {
-			limit = { has_variable = pod_combat_c0_init_bonus }
-			change_variable = { name = pod_combat_c0_initiative add = var:pod_combat_c0_init_bonus }
-			remove_variable = pod_combat_c0_init_bonus
+			limit = { has_variable = slot_init_bonus }
+			change_variable = { name = slot_initiative add = var:slot_init_bonus }
+			remove_variable = slot_init_bonus
 		}
-		set_variable = { name = pod_combat_c0_has_acted value = 0 }
+		set_variable = { name = slot_has_acted value = 0 }
 	}
 
-	# Slot 1
-	if = {
-		limit = { has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c1_initiative value = { value = var:pod_combat_c1_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c1_init_bonus }
-			change_variable = { name = pod_combat_c1_initiative add = var:pod_combat_c1_init_bonus }
-			remove_variable = pod_combat_c1_init_bonus
-		}
-		set_variable = { name = pod_combat_c1_has_acted value = 0 }
-	}
+	# Stamp each slot's turn-order rank as a stored slot var so the
+	# datamodel-driven slot card widget can display "Turn N" without
+	# needing a per-slot SV that compares against all other slots
+	# (the slot story can't reach the host's other-slot pointers from
+	# its own scope, and dynamic SV-name construction isn't supported
+	# in GUI bindings).
+	pod_combat_calc_turn_orders_effect = yes
+}
 
-	# Slot 2
-	if = {
-		limit = { has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c2_initiative value = { value = var:pod_combat_c2_prowess add = 30 } } }
+# Compute slot_turn_order on every alive combatant after initiatives
+# are rolled. Rank semantics: highest initiative = rank 1, ties broken
+# by lower slot_index (so e.g. slot 0 beats slot 5 if both rolled the
+# same number).
+#
+# Implementation is a nested every_in_list: outer loop iterates each
+# alive slot story to compute its rank; inner loop counts how many
+# OTHER alive slots beat it on the (initiative, -slot_index)
+# lexicographic order. Saving scope:host before iterating lets the
+# inner loop re-enter host scope to iterate the active list again.
+# Saving scope:me lets the inner loop write back into the outer's
+# slot story.
+pod_combat_calc_turn_orders_effect = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			has_variable = slot_initiative
+			var:slot_alive = 1
 		}
-		if = {
-			limit = { has_variable = pod_combat_c2_init_bonus }
-			change_variable = { name = pod_combat_c2_initiative add = var:pod_combat_c2_init_bonus }
-			remove_variable = pod_combat_c2_init_bonus
+		save_scope_as = me
+		save_scope_value_as = { name = my_init  value = var:slot_initiative }
+		save_scope_value_as = { name = my_index value = var:slot_index }
+		# Start at rank 1; bump for each other slot that ranks above us.
+		set_variable = { name = slot_turn_order value = 1 }
+		# Re-enter host scope for the inner iteration over the same list.
+		scope:host = {
+			every_in_list = {
+				variable = pod_combat_active_slots
+				limit = {
+					has_variable = slot_initiative
+					var:slot_alive = 1
+					# Exclude self.
+					NOT = { this = scope:me }
+					# Strictly higher initiative, OR same initiative with
+					# lower slot_index (matches the legacy SVs' >= vs >
+					# asymmetric tiebreaker).
+					OR = {
+						var:slot_initiative > scope:my_init
+						AND = {
+							var:slot_initiative = scope:my_init
+							var:slot_index < scope:my_index
+						}
+					}
+				}
+				# Bump the OUTER slot's rank — write back via scope:me.
+				scope:me = {
+					change_variable = { name = slot_turn_order add = 1 }
+				}
+			}
 		}
-		set_variable = { name = pod_combat_c2_has_acted value = 0 }
 	}
-
-	# Slot 3
-	if = {
-		limit = { has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c3_initiative value = { value = var:pod_combat_c3_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c3_init_bonus }
-			change_variable = { name = pod_combat_c3_initiative add = var:pod_combat_c3_init_bonus }
-			remove_variable = pod_combat_c3_init_bonus
-		}
-		set_variable = { name = pod_combat_c3_has_acted value = 0 }
-	}
-
-	# Slot 4
-	if = {
-		limit = { has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c4_initiative value = { value = var:pod_combat_c4_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c4_init_bonus }
-			change_variable = { name = pod_combat_c4_initiative add = var:pod_combat_c4_init_bonus }
-			remove_variable = pod_combat_c4_init_bonus
-		}
-		set_variable = { name = pod_combat_c4_has_acted value = 0 }
-	}
-
-	# Slot 5
-	if = {
-		limit = { has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c5_initiative value = { value = var:pod_combat_c5_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c5_init_bonus }
-			change_variable = { name = pod_combat_c5_initiative add = var:pod_combat_c5_init_bonus }
-			remove_variable = pod_combat_c5_init_bonus
-		}
-		set_variable = { name = pod_combat_c5_has_acted value = 0 }
-	}
-
-	# Slot 6
-	if = {
-		limit = { has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c6_initiative value = { value = var:pod_combat_c6_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c6_init_bonus }
-			change_variable = { name = pod_combat_c6_initiative add = var:pod_combat_c6_init_bonus }
-			remove_variable = pod_combat_c6_init_bonus
-		}
-		set_variable = { name = pod_combat_c6_has_acted value = 0 }
-	}
-
-	# Slot 7
-	if = {
-		limit = { has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c7_initiative value = { value = var:pod_combat_c7_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c7_init_bonus }
-			change_variable = { name = pod_combat_c7_initiative add = var:pod_combat_c7_init_bonus }
-			remove_variable = pod_combat_c7_init_bonus
-		}
-		set_variable = { name = pod_combat_c7_has_acted value = 0 }
-	}
-
-	# Slot 8
-	if = {
-		limit = { has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c8_initiative value = { value = var:pod_combat_c8_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c8_init_bonus }
-			change_variable = { name = pod_combat_c8_initiative add = var:pod_combat_c8_init_bonus }
-			remove_variable = pod_combat_c8_init_bonus
-		}
-		set_variable = { name = pod_combat_c8_has_acted value = 0 }
-	}
-
-	# Slot 9
-	if = {
-		limit = { has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 }
-		random_list = {
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 1 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 5 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 10 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 15 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 20 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 25 } } }
-			1 = { set_variable = { name = pod_combat_c9_initiative value = { value = var:pod_combat_c9_prowess add = 30 } } }
-		}
-		if = {
-			limit = { has_variable = pod_combat_c9_init_bonus }
-			change_variable = { name = pod_combat_c9_initiative add = var:pod_combat_c9_init_bonus }
-			remove_variable = pod_combat_c9_init_bonus
-		}
-		set_variable = { name = pod_combat_c9_has_acted value = 0 }
-	}
-
-	# Count alive actors remaining
-	set_variable = { name = pod_combat_actors_remaining value = 0 }
-	if = { limit = { has_variable = pod_combat_c0_char var:pod_combat_c0_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
-	if = { limit = { has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 } change_variable = { name = pod_combat_actors_remaining add = 1 } }
 }
 
 ##############################################################################################
@@ -1889,124 +1554,28 @@ pod_combat_find_next_actor_effect = {
 	set_variable = { name = pod_combat_best_init value = -1 }
 	set_variable = { name = pod_combat_best_slot value = -1 }
 
-	# Check slot 0
-	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_alive = 1
-			var:pod_combat_c0_has_acted = 0
-			var:pod_combat_c0_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c0_initiative }
-		set_variable = { name = pod_combat_best_slot value = 0 }
-	}
+	# Iterate the active slot list and pick the highest-initiative
+	# slot that hasn't acted yet. Iteration order matches the slot
+	# stories' insertion order (slots 0..9), so among ties the
+	# lowest-indexed slot wins because the strict `>` check inside the
+	# body only updates best_* on a STRICTLY higher init.
 
-	# Check slot 1
-	if = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_alive = 1
-			var:pod_combat_c1_has_acted = 0
-			var:pod_combat_c1_initiative > var:pod_combat_best_init
+			var:slot_alive = 1
+			var:slot_has_acted = 0
 		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c1_initiative }
-		set_variable = { name = pod_combat_best_slot value = 1 }
-	}
-
-	# Check slot 2
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_alive = 1
-			var:pod_combat_c2_has_acted = 0
-			var:pod_combat_c2_initiative > var:pod_combat_best_init
+		save_scope_value_as = { name = current_init  value = var:slot_initiative }
+		save_scope_value_as = { name = current_index value = var:slot_index }
+		scope:host = {
+			if = {
+				limit = { scope:current_init > var:pod_combat_best_init }
+				set_variable = { name = pod_combat_best_init value = scope:current_init }
+				set_variable = { name = pod_combat_best_slot value = scope:current_index }
+			}
 		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c2_initiative }
-		set_variable = { name = pod_combat_best_slot value = 2 }
-	}
-
-	# Check slot 3
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_alive = 1
-			var:pod_combat_c3_has_acted = 0
-			var:pod_combat_c3_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c3_initiative }
-		set_variable = { name = pod_combat_best_slot value = 3 }
-	}
-
-	# Check slot 4
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_alive = 1
-			var:pod_combat_c4_has_acted = 0
-			var:pod_combat_c4_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c4_initiative }
-		set_variable = { name = pod_combat_best_slot value = 4 }
-	}
-
-	# Check slot 5
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_alive = 1
-			var:pod_combat_c5_has_acted = 0
-			var:pod_combat_c5_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c5_initiative }
-		set_variable = { name = pod_combat_best_slot value = 5 }
-	}
-
-	# Check slot 6
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_alive = 1
-			var:pod_combat_c6_has_acted = 0
-			var:pod_combat_c6_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c6_initiative }
-		set_variable = { name = pod_combat_best_slot value = 6 }
-	}
-
-	# Check slot 7
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_alive = 1
-			var:pod_combat_c7_has_acted = 0
-			var:pod_combat_c7_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c7_initiative }
-		set_variable = { name = pod_combat_best_slot value = 7 }
-	}
-
-	# Check slot 8
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_alive = 1
-			var:pod_combat_c8_has_acted = 0
-			var:pod_combat_c8_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c8_initiative }
-		set_variable = { name = pod_combat_best_slot value = 8 }
-	}
-
-	# Check slot 9
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_alive = 1
-			var:pod_combat_c9_has_acted = 0
-			var:pod_combat_c9_initiative > var:pod_combat_best_init
-		}
-		set_variable = { name = pod_combat_best_init value = var:pod_combat_c9_initiative }
-		set_variable = { name = pod_combat_best_slot value = 9 }
 	}
 
 	# Set the current actor from the best slot found
@@ -2032,90 +1601,61 @@ pod_combat_find_next_actor_effect = {
 ##############################################################################################
 
 pod_combat_ai_select_enemy_target_effect = {
-	# Select a target from enemy team (slots 5-9) for an ally AI actor
-	# Weighted toward lower HP targets
-	random_list = {
-		# Slot 5
-		1 = {
-			trigger = { has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 }
+	# Select a target from the enemy team (slots 5-9) for an ally
+	# AI actor. Weighted toward low-HP targets (×2 if 2 or fewer
+	# empty wound boxes left). Replaced random_list with 5 weighted
+	# entries by random_in_list iterating the active slots filtered
+	# to slot_index >= 5.
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			var:slot_index >= 5
+		}
+		weight = {
+			base = 1
+			modifier = { add = 50 }
 			modifier = {
-				add = 50
-			}
-			modifier = {
-				# Bonus weight for low HP
 				factor = 2
-				var:pod_combat_c5_char.POD_empty_damage_boxes <= 2
+				var:slot_char.POD_empty_damage_boxes <= 2
 			}
-			set_variable = { name = pod_combat_selected_target value = 5 }
 		}
-		# Slot 6
-		1 = {
-			trigger = { has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c6_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-		}
-		# Slot 7
-		1 = {
-			trigger = { has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c7_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-		}
-		# Slot 8
-		1 = {
-			trigger = { has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c8_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-		}
-		# Slot 9
-		1 = {
-			trigger = { has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c9_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 9 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
 	}
 }
 
 pod_combat_ai_select_player_target_effect = {
-	# Select a target from player team (slots 0-4) for an enemy AI actor
-	random_list = {
-		# Slot 0
-		1 = {
-			trigger = { has_variable = pod_combat_c0_char var:pod_combat_c0_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c0_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 0 }
+	# Select a target from the player team (slots 0-4) for an enemy
+	# AI actor. Same weight shape as the enemy-target effect; just
+	# the team filter inverts.
+	save_scope_as = host
+	random_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			var:slot_index <= 4
 		}
-		# Slot 1
-		1 = {
-			trigger = { has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 }
+		weight = {
+			base = 1
 			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c1_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 1 }
+			modifier = {
+				factor = 2
+				var:slot_char.POD_empty_damage_boxes <= 2
+			}
 		}
-		# Slot 2
-		1 = {
-			trigger = { has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c2_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-		}
-		# Slot 3
-		1 = {
-			trigger = { has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c3_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-		}
-		# Slot 4
-		1 = {
-			trigger = { has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 }
-			modifier = { add = 50 }
-			modifier = { factor = 2 var:pod_combat_c4_char.POD_empty_damage_boxes <= 2 }
-			set_variable = { name = pod_combat_selected_target value = 4 }
+		save_scope_as = chosen_target
+	}
+	if = {
+		limit = { exists = scope:chosen_target }
+		scope:host = {
+			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
 		}
 	}
 }
@@ -2137,104 +1677,62 @@ pod_combat_ai_select_player_target_effect = {
 ##############################################################################################
 
 pod_combat_restore_pc_target_effect = {
+	# Detect dead/missing pc_target via any_in_list — if NO active
+	# slot matches pc_target with slot_alive = 1, we need to retarget.
+	# The OR also covers the unset case (no pc_target var) and the
+	# self-targeting case (pc_target = 0 = PC). Replaced a 10-AND OR
+	# block keyed on integer slot index.
+	save_scope_as = host
 	if = {
 		limit = {
 			OR = {
 				NOT = { has_variable = pod_combat_pc_target }
 				var:pod_combat_pc_target = 0
-				AND = {
-					var:pod_combat_pc_target = 1
-					OR = { NOT = { has_variable = pod_combat_c1_char } var:pod_combat_c1_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 2
-					OR = { NOT = { has_variable = pod_combat_c2_char } var:pod_combat_c2_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 3
-					OR = { NOT = { has_variable = pod_combat_c3_char } var:pod_combat_c3_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 4
-					OR = { NOT = { has_variable = pod_combat_c4_char } var:pod_combat_c4_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 5
-					OR = { NOT = { has_variable = pod_combat_c5_char } var:pod_combat_c5_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 6
-					OR = { NOT = { has_variable = pod_combat_c6_char } var:pod_combat_c6_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 7
-					OR = { NOT = { has_variable = pod_combat_c7_char } var:pod_combat_c7_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 8
-					OR = { NOT = { has_variable = pod_combat_c8_char } var:pod_combat_c8_alive = 0 }
-				}
-				AND = {
-					var:pod_combat_pc_target = 9
-					OR = { NOT = { has_variable = pod_combat_c9_char } var:pod_combat_c9_alive = 0 }
+				NOT = {
+					any_in_list = {
+						variable = pod_combat_active_slots
+						var:slot_index = scope:host.var:pod_combat_pc_target
+						var:slot_alive = 1
+					}
 				}
 			}
 		}
-		# Auto-retarget: prefer alive enemies (5-9) first, then allies (1-4).
-		# If nothing is alive we fall through silently; combat is effectively over.
+		# Auto-retarget: prefer alive enemies (5-9) first, then allies
+		# (1-4). Two-pass iteration over pod_combat_active_slots: first
+		# pass finds the lowest-indexed alive enemy; second pass falls
+		# back to the lowest-indexed alive ally if no enemy was found.
+		# The `NOT = { exists = scope:chosen }` clause in each limit
+		# makes the iteration first-match (the slot iteration order is
+		# insertion order, 0..9). If nothing is alive we fall through
+		# silently — combat is effectively over.
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				NOT = { exists = scope:chosen }
+				var:slot_index >= 5
+				var:slot_alive = 1
+			}
+			save_scope_as = chosen
+		}
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				NOT = { exists = scope:chosen }
+				var:slot_index >= 1
+				var:slot_index <= 4
+				var:slot_alive = 1
+			}
+			save_scope_as = chosen
+		}
 		if = {
-			limit = { has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 5 }
-			set_variable = { name = pod_combat_selected_target value = 5 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 5 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 6 }
-			set_variable = { name = pod_combat_selected_target value = 6 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 6 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 7 }
-			set_variable = { name = pod_combat_selected_target value = 7 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 7 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 8 }
-			set_variable = { name = pod_combat_selected_target value = 8 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 8 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 9 }
-			set_variable = { name = pod_combat_selected_target value = 9 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 9 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 1 }
-			set_variable = { name = pod_combat_selected_target value = 1 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 1 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 2 }
-			set_variable = { name = pod_combat_selected_target value = 2 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 2 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 3 }
-			set_variable = { name = pod_combat_selected_target value = 3 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 3 }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 }
-			set_variable = { name = pod_combat_pc_target value = 4 }
-			set_variable = { name = pod_combat_selected_target value = 4 }
-			pod_combat_load_target_from_slot_effect = { SLOT = 4 }
+			limit = { exists = scope:chosen }
+			scope:host = {
+				set_variable = { name = pod_combat_pc_target value = scope:chosen.var:slot_index }
+				set_variable = { name = pod_combat_selected_target value = scope:chosen.var:slot_index }
+			}
+			scope:chosen = {
+				pod_combat_load_target_from_story_effect = yes
+			}
 		}
 	}
 	else = {
@@ -2242,15 +1740,11 @@ pod_combat_restore_pc_target_effect = {
 		# (in case an AI clobbered it with their own target during the previous turn)
 		# and reload the target workspace with the PC's choice.
 		set_variable = { name = pod_combat_selected_target value = var:pod_combat_pc_target }
-		if = { limit = { var:pod_combat_pc_target = 1 } pod_combat_load_target_from_slot_effect = { SLOT = 1 } }
-		else_if = { limit = { var:pod_combat_pc_target = 2 } pod_combat_load_target_from_slot_effect = { SLOT = 2 } }
-		else_if = { limit = { var:pod_combat_pc_target = 3 } pod_combat_load_target_from_slot_effect = { SLOT = 3 } }
-		else_if = { limit = { var:pod_combat_pc_target = 4 } pod_combat_load_target_from_slot_effect = { SLOT = 4 } }
-		else_if = { limit = { var:pod_combat_pc_target = 5 } pod_combat_load_target_from_slot_effect = { SLOT = 5 } }
-		else_if = { limit = { var:pod_combat_pc_target = 6 } pod_combat_load_target_from_slot_effect = { SLOT = 6 } }
-		else_if = { limit = { var:pod_combat_pc_target = 7 } pod_combat_load_target_from_slot_effect = { SLOT = 7 } }
-		else_if = { limit = { var:pod_combat_pc_target = 8 } pod_combat_load_target_from_slot_effect = { SLOT = 8 } }
-		else_if = { limit = { var:pod_combat_pc_target = 9 } pod_combat_load_target_from_slot_effect = { SLOT = 9 } }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_index = scope:host.var:pod_combat_pc_target }
+			pod_combat_load_target_from_story_effect = yes
+		}
 	}
 }
 
@@ -2265,7 +1759,7 @@ pod_combat_process_group_turns_effect = {
 	# This is called after the PC acts (slot 0) to run all AI turns
 
 	# Mark current actor (PC) as acted
-	set_variable = { name = pod_combat_c0_has_acted value = 1 }
+	pod_combat_set_slot_var_effect = { SLOT = 0 NAME = has_acted VALUE = 1 }
 
 	# Save PC's workspace back to slot 0
 	pod_combat_save_workspace_effect = yes
@@ -2400,17 +1894,18 @@ pod_combat_execute_ai_turn_effect = {
 	# Save workspace back to slots
 	pod_combat_save_workspace_effect = yes
 
-	# Mark actor as acted
-	if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 } set_variable = { name = pod_combat_c0_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 1 } set_variable = { name = pod_combat_c1_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 2 } set_variable = { name = pod_combat_c2_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 3 } set_variable = { name = pod_combat_c3_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 4 } set_variable = { name = pod_combat_c4_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 5 } set_variable = { name = pod_combat_c5_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 6 } set_variable = { name = pod_combat_c6_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 7 } set_variable = { name = pod_combat_c7_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 8 } set_variable = { name = pod_combat_c8_has_acted value = 1 } }
-	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 9 } set_variable = { name = pod_combat_c9_has_acted value = 1 } }
+	# Mark actor as acted — dispatch by current_actor index to the
+	# matching slot's has_acted flag.
+	if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 } pod_combat_set_slot_var_effect = { SLOT = 0 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 1 } pod_combat_set_slot_var_effect = { SLOT = 1 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 2 } pod_combat_set_slot_var_effect = { SLOT = 2 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 3 } pod_combat_set_slot_var_effect = { SLOT = 3 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 4 } pod_combat_set_slot_var_effect = { SLOT = 4 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 5 } pod_combat_set_slot_var_effect = { SLOT = 5 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 6 } pod_combat_set_slot_var_effect = { SLOT = 6 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 7 } pod_combat_set_slot_var_effect = { SLOT = 7 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 8 } pod_combat_set_slot_var_effect = { SLOT = 8 NAME = has_acted VALUE = 1 } }
+	else_if = { limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 9 } pod_combat_set_slot_var_effect = { SLOT = 9 NAME = has_acted VALUE = 1 } }
 
 	# Check victory
 	pod_combat_check_group_victory_effect = yes
@@ -2434,23 +1929,23 @@ pod_combat_check_group_victory_effect = {
 
 	# --- Check 1: All enemies knocked out ---
 	save_scope_value_as = { name = enemies_alive value = 0 }
-	if = { limit = { has_variable = pod_combat_c5_char var:pod_combat_c5_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c6_char var:pod_combat_c6_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c7_char var:pod_combat_c7_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c8_char var:pod_combat_c8_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c9_char var:pod_combat_c9_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char } var:pod_combat_slot_5.var:slot_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_6 var:pod_combat_slot_6 = { has_variable = slot_char } var:pod_combat_slot_6.var:slot_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_7 var:pod_combat_slot_7 = { has_variable = slot_char } var:pod_combat_slot_7.var:slot_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_8 var:pod_combat_slot_8 = { has_variable = slot_char } var:pod_combat_slot_8.var:slot_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_9 var:pod_combat_slot_9 = { has_variable = slot_char } var:pod_combat_slot_9.var:slot_alive = 1 } save_scope_value_as = { name = enemies_alive value = { value = scope:enemies_alive add = 1 } } }
 
 	if = {
 		limit = {
 			scope:enemies_alive <= 0
-			has_variable = pod_combat_c5_char
+			has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char }
 			NOT = { has_variable = pod_combat_is_over }
 		}
 		# Player team wins!
 		set_variable = { name = pod_combat_winner value = scope:combat_pc }
-		set_variable = { name = pod_combat_loser value = var:pod_combat_c5_char }
+		set_variable = { name = pod_combat_loser value = var:pod_combat_slot_5.var:slot_char }
 		set_variable = { name = pod_combat_is_over value = yes }
-		var:pod_combat_c5_char = { save_scope_as = pod_combat_target }
+		var:pod_combat_slot_5.var:slot_char = { save_scope_as = pod_combat_target }
 		# Combat window stays open — player clicks "End Combat" to dismiss
 	}
 
@@ -2459,37 +1954,37 @@ pod_combat_check_group_victory_effect = {
 	# End combat as a loss so the post-fight event can resolve wounds and outcomes.
 	if = {
 		limit = {
-			has_variable = pod_combat_c0_alive
-			var:pod_combat_c0_alive = 0
-			has_variable = pod_combat_c5_char
+			has_variable = pod_combat_slot_0
+			var:pod_combat_slot_0 = { has_variable = slot_char var:slot_alive = 0 }
+			has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char }
 			NOT = { has_variable = pod_combat_is_over }
 		}
-		set_variable = { name = pod_combat_winner value = var:pod_combat_c5_char }
+		set_variable = { name = pod_combat_winner value = var:pod_combat_slot_5.var:slot_char }
 		set_variable = { name = pod_combat_loser value = scope:combat_pc }
 		set_variable = { name = pod_combat_is_over value = yes }
-		var:pod_combat_c5_char = { save_scope_as = pod_combat_target }
+		var:pod_combat_slot_5.var:slot_char = { save_scope_as = pod_combat_target }
 		# Combat window stays open — player clicks "End Combat" to dismiss
 	}
 
 	# --- Check 3: All allies knocked out (covers edge cases where PC death check was bypassed) ---
 	save_scope_value_as = { name = allies_alive value = 0 }
-	if = { limit = { has_variable = pod_combat_c0_char var:pod_combat_c0_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c1_char var:pod_combat_c1_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c2_char var:pod_combat_c2_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c3_char var:pod_combat_c3_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
-	if = { limit = { has_variable = pod_combat_c4_char var:pod_combat_c4_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_0 var:pod_combat_slot_0 = { has_variable = slot_char } var:pod_combat_slot_0.var:slot_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_1 var:pod_combat_slot_1 = { has_variable = slot_char } var:pod_combat_slot_1.var:slot_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_2 var:pod_combat_slot_2 = { has_variable = slot_char } var:pod_combat_slot_2.var:slot_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_3 var:pod_combat_slot_3 = { has_variable = slot_char } var:pod_combat_slot_3.var:slot_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
+	if = { limit = { has_variable = pod_combat_slot_4 var:pod_combat_slot_4 = { has_variable = slot_char } var:pod_combat_slot_4.var:slot_alive = 1 } save_scope_value_as = { name = allies_alive value = { value = scope:allies_alive add = 1 } } }
 
 	if = {
 		limit = {
 			scope:allies_alive <= 0
-			has_variable = pod_combat_c5_char
+			has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char }
 			NOT = { has_variable = pod_combat_is_over }
 		}
 		# Enemy team wins
-		set_variable = { name = pod_combat_winner value = var:pod_combat_c5_char }
+		set_variable = { name = pod_combat_winner value = var:pod_combat_slot_5.var:slot_char }
 		set_variable = { name = pod_combat_loser value = scope:combat_pc }
 		set_variable = { name = pod_combat_is_over value = yes }
-		var:pod_combat_c5_char = { save_scope_as = pod_combat_target }
+		var:pod_combat_slot_5.var:slot_char = { save_scope_as = pod_combat_target }
 		# Combat window stays open — player clicks "End Combat" to dismiss
 	}
 }
@@ -2502,6 +1997,19 @@ pod_combat_check_group_victory_effect = {
 # to the slots.
 ##############################################################################################
 
+# Per-slot helper: reset one slot's live soak to its base_soak (round-
+# end revert for soak debuffs). Same shape as
+# pod_combat_calc_one_hit_chance_effect — body factored out so the
+# round-tick dispatcher below is 10 parametric calls.
+pod_combat_reset_one_slot_soak_effect = {
+	# $SLOT$ = 0..9
+	if = { limit = { has_variable = pod_combat_slot_$SLOT$ var:pod_combat_slot_$SLOT$ = { has_variable = slot_char } }
+		if = { limit = { var:pod_combat_slot_$SLOT$ = { has_variable = slot_base_soak } }
+			pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = soak VALUE = var:pod_combat_slot_$SLOT$.var:slot_base_soak }
+		}
+	}
+}
+
 pod_combat_clear_per_turn_slot_state_effect = {
 	# For each slot: reset live soak to base_soak. Only act on slots
 	# that exist (have a character assigned).
@@ -2512,56 +2020,16 @@ pod_combat_clear_per_turn_slot_state_effect = {
 	# Stealth's +30 hit bonus similarly stays until consumed, since it's
 	# tied to the stealth flag and the damage pipeline reverts it when
 	# the stealth is triggered.
-	if = { limit = { has_variable = pod_combat_c0_char }
-		if = { limit = { has_variable = pod_combat_c0_base_soak }
-			set_variable = { name = pod_combat_c0_soak value = var:pod_combat_c0_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c1_char }
-		if = { limit = { has_variable = pod_combat_c1_base_soak }
-			set_variable = { name = pod_combat_c1_soak value = var:pod_combat_c1_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c2_char }
-		if = { limit = { has_variable = pod_combat_c2_base_soak }
-			set_variable = { name = pod_combat_c2_soak value = var:pod_combat_c2_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c3_char }
-		if = { limit = { has_variable = pod_combat_c3_base_soak }
-			set_variable = { name = pod_combat_c3_soak value = var:pod_combat_c3_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c4_char }
-		if = { limit = { has_variable = pod_combat_c4_base_soak }
-			set_variable = { name = pod_combat_c4_soak value = var:pod_combat_c4_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c5_char }
-		if = { limit = { has_variable = pod_combat_c5_base_soak }
-			set_variable = { name = pod_combat_c5_soak value = var:pod_combat_c5_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c6_char }
-		if = { limit = { has_variable = pod_combat_c6_base_soak }
-			set_variable = { name = pod_combat_c6_soak value = var:pod_combat_c6_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c7_char }
-		if = { limit = { has_variable = pod_combat_c7_base_soak }
-			set_variable = { name = pod_combat_c7_soak value = var:pod_combat_c7_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c8_char }
-		if = { limit = { has_variable = pod_combat_c8_base_soak }
-			set_variable = { name = pod_combat_c8_soak value = var:pod_combat_c8_base_soak }
-		}
-	}
-	if = { limit = { has_variable = pod_combat_c9_char }
-		if = { limit = { has_variable = pod_combat_c9_base_soak }
-			set_variable = { name = pod_combat_c9_soak value = var:pod_combat_c9_base_soak }
-		}
-	}
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 0 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 1 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 2 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 3 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 4 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 5 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 6 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 7 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 8 }
+	pod_combat_reset_one_slot_soak_effect = { SLOT = 9 }
 }
 
 ##############################################################################################
@@ -2696,12 +2164,8 @@ pod_combat_process_pre_pc_turns_effect = {
 		# Restore the PC's chosen target (AI turns just clobbered selected_target)
 		pod_combat_restore_pc_target_effect = yes
 		pod_combat_load_workspace_effect = yes
-		remove_variable = pod_combat_player_is_guarding
-		remove_variable = pod_combat_opponent_is_guarding
-		remove_variable = pod_combat_player_is_dodging
-		remove_variable = pod_combat_opponent_is_dodging
-		set_variable = { name = pod_combat_player_soak value = var:pod_combat_player_base_soak }
-		set_variable = { name = pod_combat_opponent_soak value = var:pod_combat_opponent_base_soak }
+		# DO NOT reset is_guarding / is_dodging / soak here. Stance
+		# state persists until consumed.
 	}
 }
 

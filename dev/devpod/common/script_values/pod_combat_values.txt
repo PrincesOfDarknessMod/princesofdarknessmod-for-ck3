@@ -4,16 +4,22 @@
 
 # ─── COMBAT VARIABLE REFERENCE ─────────────────────────────────────────────
 #
-# All combat state is stored as character variables on the PLAYER character.
 # Group combat uses a 10-slot system (slots 0-4 = player team, 5-9 = enemy
-# team). A shared WORKSPACE (pod_combat_player_* / pod_combat_opponent_*)
-# holds whichever combatant is acting and whichever one is the current
-# target; the workspace is loaded from / saved back to the appropriate
-# slot at each action boundary by pod_combat_{load,save}_workspace_effect.
+# team). Per-combatant state lives on POD_combat_slot story_cycle scopes —
+# one story per slot, created at combat init and cleaned up at combat end.
+# Pointer variables pod_combat_slot_0..9 on the combat host (the PC) hand
+# back the matching story. The flat pod_combat_c{N}_* character-variable
+# namespace this used to use is gone; reads/writes go through slot stories
+# only.
+#
+# A shared WORKSPACE (pod_combat_player_* / pod_combat_opponent_*) holds
+# whichever combatant is acting and whichever one is the current target;
+# the workspace is loaded from / saved back to the appropriate slot story
+# at each action boundary by pod_combat_{load,save}_workspace_effect.
 # Skill effects read and write only the workspace, so the same generated
 # code runs for the PC, AI coterie, the primary opponent, and knights.
 #
-# ── Core state ──────────────────────────────────────────────────
+# ── Core state (on the combat host / PC character) ───────────────
 #   pod_combat_active                 — flag: combat is in progress
 #   pod_combat_is_over                — flag: combat is over (re-entry guard)
 #   pod_combat_mode                   — 0=1v1, 1=1vN, 2=Nv1, 3=NvN
@@ -26,52 +32,86 @@
 #                                       gate how many enemies still fit
 #   pod_combat_pc_target              — the PC's persistent target slot (1-9)
 #   pod_combat_selected_target        — slot loaded into opponent workspace
+#   pod_combat_slot_0..9              — pointer var per slot; resolves to
+#                                       the slot's POD_combat_slot story
+#                                       scope. Unset for unfilled slots.
+#   pod_combat_active_slots           — variable list of slot stories
+#                                       currently in play (filled slots
+#                                       only, in slot-index ascending
+#                                       order). Iterated by every dispatch
+#                                       loop instead of unrolling 0..9.
 #
-# ── Per-slot stats (N = 0-9) ─────────────────────────────────────
-#   pod_combat_c{N}_char              — character ref occupying the slot
-#   pod_combat_c{N}_alive             — 1 if slot is active, 0 if KO'd
-#   (team affiliation is computed from slot index — slots 0-4 = player
+# ── Per-slot stats (vars on each POD_combat_slot story) ──────────
+#   slot_index                        — 0..9, baked at slot creation
+#   slot_char                         — character ref occupying the slot
+#   slot_alive                        — 1 while in play, 0 when KO'd
+#   (team affiliation is computed from slot_index — slots 0-4 = player
 #    team, 5-9 = enemy team — not stored as a per-slot variable)
-# Health values are NOT stored as per-slot variables — they are live
-# script values derived from each slot character's PoD wound vars:
-#   pod_combat_c{N}_hp_value          — empty wound boxes (HP remaining)
-#   pod_combat_c{N}_max_hp_value      — wound track length (max HP)
-#   pod_combat_c{N}_agg_damage_sv     — aggravated wound boxes
-#   pod_combat_c{N}_total_damage_sv   — total wound boxes filled
-# (see COMBAT_DESIGN_HISTORY.md §2 for the cache-removal rationale)
-#   pod_combat_c{N}_morale            — current Morale
-#   pod_combat_c{N}_prowess           — current prowess
-#   pod_combat_c{N}_soak              — live soak chance (0-100)
-#   pod_combat_c{N}_base_soak         — soak before any tier effects
-#   pod_combat_c{N}_hit_chance        — live hit chance (20-95)
-#   pod_combat_c{N}_base_hit_chance   — hit chance before any tier effects
-#   pod_combat_c{N}_initiative        — initiative roll this round
-#   pod_combat_c{N}_init_bonus        — next-round initiative modifier
-#   pod_combat_c{N}_ap_drain          — AP drained from next turn
-#   pod_combat_c{N}_energy_used       — counter for AI energy-attrition weighting
+# Health is NOT stored on the slot story — it is live script values
+# derived from each slot character's PoD wound vars (the slot story
+# only holds the slot_char pointer; the SVs read POD_empty_damage_boxes
+# / POD_total_damage_boxes / POD_health_aggravated_damage_num off the
+# character):
+#   pod_combat_slot_hp_value          — empty wound boxes (HP remaining)
+#   pod_combat_slot_max_hp_value      — wound track length (max HP)
+#   pod_combat_slot_agg_damage_sv     — aggravated wound boxes
+#   pod_combat_slot_total_damage_sv   — total wound boxes filled
+# Caching HP on the slot story was tried earlier and rejected — stale
+# cache between turns vs PoD's wound writes was a constant source of
+# desync; deriving HP live keeps display and gameplay reads in lockstep
+# with the canonical PoD state.
+#   slot_morale                       — current Morale
+#   slot_prowess                      — current prowess
+#   slot_soak                         — live soak chance (0-100)
+#   slot_base_soak                    — soak before any tier effects
+#   slot_hit_chance                   — live hit chance (20-95)
+#   slot_base_hit_chance              — hit chance before any tier effects
+#   slot_initiative                   — initiative roll this round
+#   slot_init_bonus                   — next-round initiative modifier
+#   slot_ap_drain                     — AP drained from next turn
+#   slot_energy_used                  — counter for AI energy-attrition weighting
+#   slot_turn_order                   — turn-rank within the round
+#                                       (1 = first); stamped by
+#                                       pod_combat_calc_turn_orders_effect
+#                                       after initiative roll.
+#   slot_has_acted                    — 1 once the slot's turn resolves
+#                                       this round; reset to 0 by
+#                                       pod_combat_calculate_initiative_effect
+#                                       at the start of every round.
 #
-# ── Per-slot stance flags (N = 0-9) ─────────────────────────────
+# ── Per-slot stance flags (vars on the POD_combat_slot story) ────
 # All persist across rounds; only cleared when consumed or at combat end.
-#   pod_combat_c{N}_is_guarding       — Guard stance active
-#   pod_combat_c{N}_is_dodging        — Dodge stance active
-#   pod_combat_c{N}_is_stealthed      — Stealth active (includes +30 hit)
-#   pod_combat_c{N}_retaliate_hit     — retaliation damage if hit
-#   pod_combat_c{N}_retaliate_miss    — retaliation damage if missed
-#   pod_combat_c{N}_retaliate_{hit,miss}_agg  — aggravated variants
+#   slot_is_guarding                  — Guard stance active
+#   slot_is_dodging                   — Dodge stance active
+#   slot_is_stealthed                 — Stealth active (includes +30 hit)
+#   slot_retaliate_hit                — retaliation damage if hit
+#   slot_retaliate_miss               — retaliation damage if missed
+#   slot_retaliate_{hit,miss}_agg     — aggravated variants
 #
-# ── Tier variables (per slot) ─────────────────────────────────────
+# ── Per-slot spirit-damage capability ────────────────────────────
+#   slot_incorporeal_spirit           — slot character is incorporeal;
+#                                       physical attacks no-op unless the
+#                                       attacker has _can_damage_spirit.
+#   slot_can_damage_spirit            — slot character can land physical
+#                                       hits on incorporeal targets.
+#
+# ── Tier variables (vars on the POD_combat_slot story) ───────────
 # Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). Live stats are
 # rebuilt from base + sum of active tier magnitudes. See pod_combat_tier_effects.txt.
-#   pod_combat_c{N}_{stat}_{direction}_{duration}_tier
+#   slot_{stat}_{direction}_{duration}_tier
 #     stat:      soak | hit
 #     direction: buff | debuff
 #     duration:  round (cleared at round end) | combat (lasts the fight)
 #
 # ── Workspace (acting combatant + current target) ────────────────
 # Mirrors the per-slot fields for whoever is currently acting / targeted.
+# Lives on the combat host so saved scopes / scripted-effect parameters
+# can read it without crossing into the slot-story scope.
 #   pod_combat_player_*               — actor's stats (loaded from current_actor slot)
 #   pod_combat_opponent_*             — target's stats (loaded from selected_target slot)
-# The same tier, stance, retaliation, and base_* fields exist on both sides.
+# The same tier, stance, retaliation, spirit, and base_* fields exist on
+# both sides — load/save effects walk slot stories and write into / read
+# back from the matching workspace mirror.
 #   pod_combat_current_hit_chance     — active attacker's hit chance this attack
 #
 # ── Result / display ─────────────────────────────────────────────
@@ -133,8 +173,6 @@ pod_combat_max_morale = 20
 pod_combat_morale_from_hp_ratio = {
 	value = 2
 }
-
-# Used by POD_reload_combat_moves to detect save-data mismatch.
 
 POD_current_combat_version = 1
 
@@ -223,1718 +261,157 @@ pod_combat_player_sup_ceiling_value = {
 	}
 }
 
-###### PER-SLOT COMBAT VALUES (GROUP COMBAT) ######
-# Generated accessors for combatant slots 0-9
-# Slots 0-4 = player team, slots 5-9 = enemy team
+###### SLOT-STORY-SCOPED VALUE ACCESSORS ######
+# Caller scope = the slot story (set externally via
+# datacontext = "[GetPlayer.MakeScope.Var('pod_combat_slot_$N$')]"
+# from a single-instance widget invocation, OR implicitly via a
+# datamodel iteration over pod_combat_slots / pod_combat_active_slots —
+# the iteration scope IS the iterated story).
+#
+# These read slot vars off the current scope (= slot story) directly
+# via var:slot_X. Used by the datamodel-driven pod_combat_datamodel_slot
+# widget for the GUI's slot card rendering, which iterates the host's
+# pod_combat_active_slots variable list and emits one card per filled
+# slot.
+#
+# All gates short-circuit on tooltip-build (where slot stories don't
+# exist — pod_combat_create_one_slot_story_effect's create_story is
+# wrapped in hidden_effect_new_object). The datamodel iteration
+# itself is also a no-op during tooltip-build because pod_combat_slots
+# is populated inside the same hidden_effect_new_object block.
 
-pod_combat_c0_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c0_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c0_max_hp_value = {
+pod_combat_slot_max_hp_value = {
 	# Track length survives death (trait-based), so no is_alive gate.
 	if = {
-		limit = { has_variable = pod_combat_c0_char }
-		value = var:pod_combat_c0_char.POD_health_track_length
+		limit = { has_variable = slot_char }
+		value = var:slot_char.POD_health_track_length
 	}
 }
-pod_combat_c0_morale_value = {
-	if = { limit = { has_variable = pod_combat_c0_morale } value = var:pod_combat_c0_morale }
-}
-pod_combat_c0_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c0_morale }
-		value = var:pod_combat_c0_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c0_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
+pod_combat_slot_total_damage_sv = {
+	# Total wound boxes filled. Dead-char branch returns max_hp so the
+	# GUI shows a fully-filled bar instead of zero (PoD's wound SVs
+	# return 0 for dead chars via their own is_alive gate).
 	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c0_char.POD_total_damage_boxes
+		limit = { has_variable = slot_char var:slot_char = { is_alive = yes } }
+		value = var:slot_char.POD_total_damage_boxes
 		min = 0
 	}
 	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_char = { is_alive = no }
-		}
-		value = pod_combat_c0_max_hp_value
+		limit = { has_variable = slot_char var:slot_char = { is_alive = no } }
+		value = pod_combat_slot_max_hp_value
 	}
 }
-pod_combat_c0_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated.
+pod_combat_slot_agg_damage_sv = {
+	# Aggravated boxes. Same alive/dead branching as total_damage_sv.
 	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c0_char.POD_aggravated_damage_boxes
+		limit = { has_variable = slot_char var:slot_char = { is_alive = yes } }
+		value = var:slot_char.POD_aggravated_damage_boxes
 	}
 	if = {
-		limit = {
-			has_variable = pod_combat_c0_char
-			var:pod_combat_c0_char = { is_alive = no }
-		}
-		value = pod_combat_c0_max_hp_value
+		limit = { has_variable = slot_char var:slot_char = { is_alive = no } }
+		value = pod_combat_slot_max_hp_value
 	}
-	max = pod_combat_c0_total_damage_sv
+	max = pod_combat_slot_total_damage_sv
 }
-pod_combat_c0_soak_value = {
-	if = { limit = { has_variable = pod_combat_c0_soak } value = var:pod_combat_c0_soak }
+pod_combat_slot_morale_pct = {
+	value = var:slot_morale
+	multiply = @combat_pct_max
+	divide = pod_combat_max_morale
 	min = 0
 	max = @combat_pct_max
 }
-pod_combat_c0_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c0_hit_chance }
-		value = var:pod_combat_c0_hit_chance
+pod_combat_slot_soak_value = {
+	value = var:slot_soak
+	min = 0
+	max = @combat_pct_max
+}
+pod_combat_slot_hit_chance_value = {
+	# Two paths:
+	#   1. slot_hit_chance is set → return it (post calculate_all_hit_chances).
+	#   2. slot_hit_chance NOT set but slot_char is → synthesize a
+	#      neutral baseline (the brief mid-init window before
+	#      pod_combat_calculate_all_hit_chances_effect populates per-
+	#      slot hit_chance).
+	if = {
+		limit = { has_variable = slot_hit_chance }
+		value = var:slot_hit_chance
 	}
-	if = { limit = { NOT = { has_variable = pod_combat_c0_hit_chance } has_variable = pod_combat_c0_prowess }
+	if = {
+		limit = {
+			NOT = { has_variable = slot_hit_chance }
+			has_variable = slot_char
+		}
 		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c0_prowess
-			# Subtract currently targeted enemy's prowess
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
-			if = {
-				limit = {
-					NOT = { has_variable = pod_combat_pc_target }
-					has_variable = pod_combat_c5_prowess
-				}
-				subtract = var:pod_combat_c5_prowess
-			}
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c0_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c0_prowess } value = var:pod_combat_c0_prowess }
-}
-pod_combat_c0_alive_value = {
-	if = { limit = { has_variable = pod_combat_c0_alive } value = var:pod_combat_c0_alive }
-}
-pod_combat_c0_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c0_is_guarding } value = 1 }
-}
-pod_combat_c0_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c0_is_dodging } value = 1 }
-}
-pod_combat_c0_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c0_is_stealthed } value = 1 }
-}
-pod_combat_c0_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c0_initiative } value = var:pod_combat_c0_initiative }
-}
-pod_combat_c0_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_round_tier var:pod_combat_c0_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_buff_combat_tier var:pod_combat_c0_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_round_tier var:pod_combat_c0_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_soak_debuff_combat_tier var:pod_combat_c0_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_round_tier var:pod_combat_c0_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_buff_combat_tier var:pod_combat_c0_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_round_tier var:pod_combat_c0_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c0_hit_debuff_combat_tier var:pod_combat_c0_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c0_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c0_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c0_initiative } add = 1 }
-	}
-}
-
-pod_combat_c1_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c1_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c1_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c1_char }
-		value = var:pod_combat_c1_char.POD_health_track_length
-	}
-}
-pod_combat_c1_morale_value = {
-	if = { limit = { has_variable = pod_combat_c1_morale } value = var:pod_combat_c1_morale }
-}
-pod_combat_c1_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c1_morale }
-		value = var:pod_combat_c1_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c1_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c1_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_char = { is_alive = no }
-		}
-		value = pod_combat_c1_max_hp_value
-	}
-}
-pod_combat_c1_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated
-	if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c1_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c1_char
-			var:pod_combat_c1_char = { is_alive = no }
-		}
-		value = pod_combat_c1_max_hp_value
-	}
-	max = pod_combat_c1_total_damage_sv
-}
-pod_combat_c1_soak_value = {
-	if = { limit = { has_variable = pod_combat_c1_soak } value = var:pod_combat_c1_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c1_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c1_hit_chance }
-		value = var:pod_combat_c1_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c1_hit_chance } has_variable = pod_combat_c1_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c1_prowess
-			# Subtract currently targeted enemy's prowess
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
-			if = {
-				limit = {
-					NOT = { has_variable = pod_combat_pc_target }
-					has_variable = pod_combat_c5_prowess
-				}
-				subtract = var:pod_combat_c5_prowess
-			}
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c1_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c1_prowess } value = var:pod_combat_c1_prowess }
-}
-pod_combat_c1_alive_value = {
-	if = { limit = { has_variable = pod_combat_c1_alive } value = var:pod_combat_c1_alive }
-}
-pod_combat_c1_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c1_is_guarding } value = 1 }
-}
-pod_combat_c1_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c1_is_dodging } value = 1 }
-}
-pod_combat_c1_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c1_is_stealthed } value = 1 }
-}
-pod_combat_c1_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c1_initiative } value = var:pod_combat_c1_initiative }
-}
-pod_combat_c1_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_round_tier var:pod_combat_c1_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_buff_combat_tier var:pod_combat_c1_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_round_tier var:pod_combat_c1_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_soak_debuff_combat_tier var:pod_combat_c1_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_round_tier var:pod_combat_c1_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_buff_combat_tier var:pod_combat_c1_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_round_tier var:pod_combat_c1_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c1_hit_debuff_combat_tier var:pod_combat_c1_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c1_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c1_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c1_initiative } add = 1 }
-	}
-}
-
-pod_combat_c2_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c2_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c2_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c2_char }
-		value = var:pod_combat_c2_char.POD_health_track_length
-	}
-}
-pod_combat_c2_morale_value = {
-	if = { limit = { has_variable = pod_combat_c2_morale } value = var:pod_combat_c2_morale }
-}
-pod_combat_c2_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c2_morale }
-		value = var:pod_combat_c2_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c2_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c2_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_char = { is_alive = no }
-		}
-		value = pod_combat_c2_max_hp_value
-	}
-}
-pod_combat_c2_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c2_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c2_char
-			var:pod_combat_c2_char = { is_alive = no }
-		}
-		value = pod_combat_c2_max_hp_value
-	}
-	max = pod_combat_c2_total_damage_sv
-}
-pod_combat_c2_soak_value = {
-	if = { limit = { has_variable = pod_combat_c2_soak } value = var:pod_combat_c2_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c2_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c2_hit_chance }
-		value = var:pod_combat_c2_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c2_hit_chance } has_variable = pod_combat_c2_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c2_prowess
-			# Subtract currently targeted enemy's prowess
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
-			if = {
-				limit = {
-					NOT = { has_variable = pod_combat_pc_target }
-					has_variable = pod_combat_c5_prowess
-				}
-				subtract = var:pod_combat_c5_prowess
-			}
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c2_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c2_prowess } value = var:pod_combat_c2_prowess }
-}
-pod_combat_c2_alive_value = {
-	if = { limit = { has_variable = pod_combat_c2_alive } value = var:pod_combat_c2_alive }
-}
-pod_combat_c2_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c2_is_guarding } value = 1 }
-}
-pod_combat_c2_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c2_is_dodging } value = 1 }
-}
-pod_combat_c2_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c2_is_stealthed } value = 1 }
-}
-pod_combat_c2_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c2_initiative } value = var:pod_combat_c2_initiative }
-}
-pod_combat_c2_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_round_tier var:pod_combat_c2_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_buff_combat_tier var:pod_combat_c2_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_round_tier var:pod_combat_c2_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_soak_debuff_combat_tier var:pod_combat_c2_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_round_tier var:pod_combat_c2_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_buff_combat_tier var:pod_combat_c2_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_round_tier var:pod_combat_c2_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c2_hit_debuff_combat_tier var:pod_combat_c2_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c2_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c2_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c2_initiative } add = 1 }
-	}
-}
-
-pod_combat_c3_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c3_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c3_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c3_char }
-		value = var:pod_combat_c3_char.POD_health_track_length
-	}
-}
-pod_combat_c3_morale_value = {
-	if = { limit = { has_variable = pod_combat_c3_morale } value = var:pod_combat_c3_morale }
-}
-pod_combat_c3_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c3_morale }
-		value = var:pod_combat_c3_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c3_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c3_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_char = { is_alive = no }
-		}
-		value = pod_combat_c3_max_hp_value
-	}
-}
-pod_combat_c3_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c3_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c3_char
-			var:pod_combat_c3_char = { is_alive = no }
-		}
-		value = pod_combat_c3_max_hp_value
-	}
-	max = pod_combat_c3_total_damage_sv
-}
-pod_combat_c3_soak_value = {
-	if = { limit = { has_variable = pod_combat_c3_soak } value = var:pod_combat_c3_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c3_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c3_hit_chance }
-		value = var:pod_combat_c3_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c3_hit_chance } has_variable = pod_combat_c3_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c3_prowess
-			# Subtract currently targeted enemy's prowess
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
-			if = {
-				limit = {
-					NOT = { has_variable = pod_combat_pc_target }
-					has_variable = pod_combat_c5_prowess
-				}
-				subtract = var:pod_combat_c5_prowess
-			}
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c3_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c3_prowess } value = var:pod_combat_c3_prowess }
-}
-pod_combat_c3_alive_value = {
-	if = { limit = { has_variable = pod_combat_c3_alive } value = var:pod_combat_c3_alive }
-}
-pod_combat_c3_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c3_is_guarding } value = 1 }
-}
-pod_combat_c3_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c3_is_dodging } value = 1 }
-}
-pod_combat_c3_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c3_is_stealthed } value = 1 }
-}
-pod_combat_c3_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c3_initiative } value = var:pod_combat_c3_initiative }
-}
-pod_combat_c3_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_round_tier var:pod_combat_c3_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_buff_combat_tier var:pod_combat_c3_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_round_tier var:pod_combat_c3_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_soak_debuff_combat_tier var:pod_combat_c3_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_round_tier var:pod_combat_c3_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_buff_combat_tier var:pod_combat_c3_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_round_tier var:pod_combat_c3_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c3_hit_debuff_combat_tier var:pod_combat_c3_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c3_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative > var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c3_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c3_initiative } add = 1 }
-	}
-}
-
-pod_combat_c4_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c4_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c4_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c4_char }
-		value = var:pod_combat_c4_char.POD_health_track_length
-	}
-}
-pod_combat_c4_morale_value = {
-	if = { limit = { has_variable = pod_combat_c4_morale } value = var:pod_combat_c4_morale }
-}
-pod_combat_c4_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c4_morale }
-		value = var:pod_combat_c4_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c4_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c4_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_char = { is_alive = no }
-		}
-		value = pod_combat_c4_max_hp_value
-	}
-}
-pod_combat_c4_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c4_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c4_char
-			var:pod_combat_c4_char = { is_alive = no }
-		}
-		value = pod_combat_c4_max_hp_value
-	}
-	max = pod_combat_c4_total_damage_sv
-}
-pod_combat_c4_soak_value = {
-	if = { limit = { has_variable = pod_combat_c4_soak } value = var:pod_combat_c4_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c4_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c4_hit_chance }
-		value = var:pod_combat_c4_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c4_hit_chance } has_variable = pod_combat_c4_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c4_prowess
-			# Subtract currently targeted enemy's prowess
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 5 has_variable = pod_combat_c5_prowess } subtract = var:pod_combat_c5_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 6 has_variable = pod_combat_c6_prowess } subtract = var:pod_combat_c6_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 7 has_variable = pod_combat_c7_prowess } subtract = var:pod_combat_c7_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 8 has_variable = pod_combat_c8_prowess } subtract = var:pod_combat_c8_prowess }
-			if = { limit = { has_variable = pod_combat_pc_target var:pod_combat_pc_target = 9 has_variable = pod_combat_c9_prowess } subtract = var:pod_combat_c9_prowess }
-			if = {
-				limit = {
-					NOT = { has_variable = pod_combat_pc_target }
-					has_variable = pod_combat_c5_prowess
-				}
-				subtract = var:pod_combat_c5_prowess
-			}
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c4_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c4_prowess } value = var:pod_combat_c4_prowess }
-}
-pod_combat_c4_alive_value = {
-	if = { limit = { has_variable = pod_combat_c4_alive } value = var:pod_combat_c4_alive }
-}
-pod_combat_c4_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c4_is_guarding } value = 1 }
-}
-pod_combat_c4_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c4_is_dodging } value = 1 }
-}
-pod_combat_c4_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c4_is_stealthed } value = 1 }
-}
-pod_combat_c4_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c4_initiative } value = var:pod_combat_c4_initiative }
-}
-pod_combat_c4_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_round_tier var:pod_combat_c4_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_buff_combat_tier var:pod_combat_c4_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_round_tier var:pod_combat_c4_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_soak_debuff_combat_tier var:pod_combat_c4_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_round_tier var:pod_combat_c4_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_buff_combat_tier var:pod_combat_c4_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_round_tier var:pod_combat_c4_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c4_hit_debuff_combat_tier var:pod_combat_c4_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c4_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative > var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c4_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c4_initiative } add = 1 }
-	}
-}
-
-pod_combat_c5_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c5_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c5_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c5_char }
-		value = var:pod_combat_c5_char.POD_health_track_length
-	}
-}
-pod_combat_c5_morale_value = {
-	if = { limit = { has_variable = pod_combat_c5_morale } value = var:pod_combat_c5_morale }
-}
-pod_combat_c5_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c5_morale }
-		value = var:pod_combat_c5_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c5_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c5_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_char = { is_alive = no }
-		}
-		value = pod_combat_c5_max_hp_value
-	}
-}
-pod_combat_c5_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated.
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c5_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c5_char
-			var:pod_combat_c5_char = { is_alive = no }
-		}
-		value = pod_combat_c5_max_hp_value
-	}
-	max = pod_combat_c5_total_damage_sv
-}
-pod_combat_c5_soak_value = {
-	if = { limit = { has_variable = pod_combat_c5_soak } value = var:pod_combat_c5_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c5_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c5_hit_chance }
-		value = var:pod_combat_c5_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c5_hit_chance } has_variable = pod_combat_c5_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c5_prowess
-			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c5_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c5_prowess } value = var:pod_combat_c5_prowess }
-}
-pod_combat_c5_alive_value = {
-	if = { limit = { has_variable = pod_combat_c5_alive } value = var:pod_combat_c5_alive }
-}
-pod_combat_c5_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c5_is_guarding } value = 1 }
-}
-pod_combat_c5_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c5_is_dodging } value = 1 }
-}
-pod_combat_c5_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c5_is_stealthed } value = 1 }
-}
-pod_combat_c5_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c5_initiative } value = var:pod_combat_c5_initiative }
-}
-pod_combat_c5_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_round_tier var:pod_combat_c5_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_buff_combat_tier var:pod_combat_c5_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_round_tier var:pod_combat_c5_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_soak_debuff_combat_tier var:pod_combat_c5_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_round_tier var:pod_combat_c5_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_buff_combat_tier var:pod_combat_c5_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_round_tier var:pod_combat_c5_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c5_hit_debuff_combat_tier var:pod_combat_c5_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c5_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative > var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c5_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c5_initiative } add = 1 }
-	}
-}
-
-pod_combat_c6_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c6_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c6_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c6_char }
-		value = var:pod_combat_c6_char.POD_health_track_length
-	}
-}
-pod_combat_c6_morale_value = {
-	if = { limit = { has_variable = pod_combat_c6_morale } value = var:pod_combat_c6_morale }
-}
-pod_combat_c6_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c6_morale }
-		value = var:pod_combat_c6_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c6_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c6_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_char = { is_alive = no }
-		}
-		value = pod_combat_c6_max_hp_value
-	}
-}
-pod_combat_c6_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated.
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c6_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c6_char
-			var:pod_combat_c6_char = { is_alive = no }
-		}
-		value = pod_combat_c6_max_hp_value
-	}
-	max = pod_combat_c6_total_damage_sv
-}
-pod_combat_c6_soak_value = {
-	if = { limit = { has_variable = pod_combat_c6_soak } value = var:pod_combat_c6_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c6_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c6_hit_chance }
-		value = var:pod_combat_c6_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c6_hit_chance } has_variable = pod_combat_c6_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c6_prowess
-			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c6_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c6_prowess } value = var:pod_combat_c6_prowess }
-}
-pod_combat_c6_alive_value = {
-	if = { limit = { has_variable = pod_combat_c6_alive } value = var:pod_combat_c6_alive }
-}
-pod_combat_c6_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c6_is_guarding } value = 1 }
-}
-pod_combat_c6_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c6_is_dodging } value = 1 }
-}
-pod_combat_c6_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c6_is_stealthed } value = 1 }
-}
-pod_combat_c6_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c6_initiative } value = var:pod_combat_c6_initiative }
-}
-pod_combat_c6_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_round_tier var:pod_combat_c6_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_buff_combat_tier var:pod_combat_c6_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_round_tier var:pod_combat_c6_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_soak_debuff_combat_tier var:pod_combat_c6_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_round_tier var:pod_combat_c6_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_buff_combat_tier var:pod_combat_c6_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_round_tier var:pod_combat_c6_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c6_hit_debuff_combat_tier var:pod_combat_c6_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c6_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative > var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c6_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c6_initiative } add = 1 }
-	}
-}
-
-pod_combat_c7_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c7_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c7_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c7_char }
-		value = var:pod_combat_c7_char.POD_health_track_length
-	}
-}
-pod_combat_c7_morale_value = {
-	if = { limit = { has_variable = pod_combat_c7_morale } value = var:pod_combat_c7_morale }
-}
-pod_combat_c7_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c7_morale }
-		value = var:pod_combat_c7_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c7_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c7_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_char = { is_alive = no }
-		}
-		value = pod_combat_c7_max_hp_value
-	}
-}
-pod_combat_c7_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated.
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c7_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c7_char
-			var:pod_combat_c7_char = { is_alive = no }
-		}
-		value = pod_combat_c7_max_hp_value
-	}
-	max = pod_combat_c7_total_damage_sv
-}
-pod_combat_c7_soak_value = {
-	if = { limit = { has_variable = pod_combat_c7_soak } value = var:pod_combat_c7_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c7_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c7_hit_chance }
-		value = var:pod_combat_c7_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c7_hit_chance } has_variable = pod_combat_c7_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c7_prowess
-			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c7_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c7_prowess } value = var:pod_combat_c7_prowess }
-}
-pod_combat_c7_alive_value = {
-	if = { limit = { has_variable = pod_combat_c7_alive } value = var:pod_combat_c7_alive }
-}
-pod_combat_c7_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c7_is_guarding } value = 1 }
-}
-pod_combat_c7_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c7_is_dodging } value = 1 }
-}
-pod_combat_c7_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c7_is_stealthed } value = 1 }
-}
-pod_combat_c7_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c7_initiative } value = var:pod_combat_c7_initiative }
-}
-pod_combat_c7_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_round_tier var:pod_combat_c7_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_buff_combat_tier var:pod_combat_c7_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_round_tier var:pod_combat_c7_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_soak_debuff_combat_tier var:pod_combat_c7_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_round_tier var:pod_combat_c7_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_buff_combat_tier var:pod_combat_c7_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_round_tier var:pod_combat_c7_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c7_hit_debuff_combat_tier var:pod_combat_c7_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c7_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative > var:pod_combat_c7_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c7_initiative } add = 1 }
-	}
-}
-
-pod_combat_c8_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c8_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c8_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c8_char }
-		value = var:pod_combat_c8_char.POD_health_track_length
-	}
-}
-pod_combat_c8_morale_value = {
-	if = { limit = { has_variable = pod_combat_c8_morale } value = var:pod_combat_c8_morale }
-}
-pod_combat_c8_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c8_morale }
-		value = var:pod_combat_c8_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c8_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c8_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_char = { is_alive = no }
-		}
-		value = pod_combat_c8_max_hp_value
-	}
-}
-pod_combat_c8_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravate.
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c8_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c8_char
-			var:pod_combat_c8_char = { is_alive = no }
-		}
-		value = pod_combat_c8_max_hp_value
-	}
-	max = pod_combat_c8_total_damage_sv
-}
-pod_combat_c8_soak_value = {
-	if = { limit = { has_variable = pod_combat_c8_soak } value = var:pod_combat_c8_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c8_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c8_hit_chance }
-		value = var:pod_combat_c8_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c8_hit_chance } has_variable = pod_combat_c8_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c8_prowess
-			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c8_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c8_prowess } value = var:pod_combat_c8_prowess }
-}
-pod_combat_c8_alive_value = {
-	if = { limit = { has_variable = pod_combat_c8_alive } value = var:pod_combat_c8_alive }
-}
-pod_combat_c8_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c8_is_guarding } value = 1 }
-}
-pod_combat_c8_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c8_is_dodging } value = 1 }
-}
-pod_combat_c8_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c8_is_stealthed } value = 1 }
-}
-pod_combat_c8_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c8_initiative } value = var:pod_combat_c8_initiative }
-}
-pod_combat_c8_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_round_tier var:pod_combat_c8_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_buff_combat_tier var:pod_combat_c8_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_round_tier var:pod_combat_c8_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_soak_debuff_combat_tier var:pod_combat_c8_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_round_tier var:pod_combat_c8_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_buff_combat_tier var:pod_combat_c8_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_round_tier var:pod_combat_c8_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c8_hit_debuff_combat_tier var:pod_combat_c8_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c8_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative >= var:pod_combat_c8_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 var:pod_combat_c9_initiative > var:pod_combat_c8_initiative } add = 1 }
-	}
-}
-
-pod_combat_c9_hp_value = {
-	# HP = empty boxes on the character's PoD wound track. Returns 0
-	# for dead chars (is_alive guard keeps the wound SVs from lying
-	# about full HP post-death). Guard also keeps tooltip previews
-	# quiet when no active combat populated the slot's char var.
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c9_char.POD_empty_damage_boxes
-	}
-}
-pod_combat_c9_max_hp_value = {
-	# Track length survives death (trait-based), so no is_alive gate.
-	if = {
-		limit = { has_variable = pod_combat_c9_char }
-		value = var:pod_combat_c9_char.POD_health_track_length
-	}
-}
-pod_combat_c9_morale_value = {
-	if = { limit = { has_variable = pod_combat_c9_morale } value = var:pod_combat_c9_morale }
-}
-pod_combat_c9_morale_pct = {
-	if = { limit = { has_variable = pod_combat_c9_morale }
-		value = var:pod_combat_c9_morale
-		multiply = @combat_pct_max
-		divide = pod_combat_max_morale
-	}
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c9_total_damage_sv = {
-	# Total wound-boxes filled on the char's PoD track. Alive path
-	# reads POD_total_damage_boxes; dead path returns max_hp so the
-	# GUI shows a fully-filled "damaged" bar instead of the SV-zero
-	# that dead-char wound boxes would return.
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c9_char.POD_total_damage_boxes
-		min = 0
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_char = { is_alive = no }
-		}
-		value = pod_combat_c9_max_hp_value
-	}
-}
-pod_combat_c9_agg_damage_sv = {
-	# Aggravated wound boxes on the char. Same alive/dead branching
-	# as total_damage_sv — dead chars render as fully aggravated
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_char = { is_alive = yes }
-		}
-		value = var:pod_combat_c9_char.POD_aggravated_damage_boxes
-	}
-	if = {
-		limit = {
-			has_variable = pod_combat_c9_char
-			var:pod_combat_c9_char = { is_alive = no }
-		}
-		value = pod_combat_c9_max_hp_value
-	}
-	max = pod_combat_c9_total_damage_sv
-}
-pod_combat_c9_soak_value = {
-	if = { limit = { has_variable = pod_combat_c9_soak } value = var:pod_combat_c9_soak }
-	min = 0
-	max = @combat_pct_max
-}
-pod_combat_c9_hit_chance_value = {
-	if = { limit = { has_variable = pod_combat_c9_hit_chance }
-		value = var:pod_combat_c9_hit_chance
-	}
-	if = { limit = { NOT = { has_variable = pod_combat_c9_hit_chance } has_variable = pod_combat_c9_prowess }
-		value = pod_combat_hit_chance_base
-		add = {
-			value = var:pod_combat_c9_prowess
-			if = { limit = { has_variable = pod_combat_c0_prowess } subtract = var:pod_combat_c0_prowess }
-			divide = 2
-		}
-	}
-	min = @combat_hit_chance_min
-	max = @combat_hit_chance_max
-}
-pod_combat_c9_prowess_value = {
-	if = { limit = { has_variable = pod_combat_c9_prowess } value = var:pod_combat_c9_prowess }
-}
-pod_combat_c9_alive_value = {
-	if = { limit = { has_variable = pod_combat_c9_alive } value = var:pod_combat_c9_alive }
-}
-pod_combat_c9_is_guarding_value = {
-	if = { limit = { has_variable = pod_combat_c9_is_guarding } value = 1 }
-}
-pod_combat_c9_is_dodging_value = {
-	if = { limit = { has_variable = pod_combat_c9_is_dodging } value = 1 }
-}
-pod_combat_c9_is_stealthed_value = {
-	if = { limit = { has_variable = pod_combat_c9_is_stealthed } value = 1 }
-}
-pod_combat_c9_initiative_value = {
-	if = { limit = { has_variable = pod_combat_c9_initiative } value = var:pod_combat_c9_initiative }
-}
-pod_combat_c9_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_round_tier var:pod_combat_c9_soak_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_buff_combat_tier var:pod_combat_c9_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_round_tier var:pod_combat_c9_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_soak_debuff_combat_tier var:pod_combat_c9_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_round_tier var:pod_combat_c9_hit_buff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_buff_combat_tier var:pod_combat_c9_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_round_tier var:pod_combat_c9_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
-	if = { limit = { has_variable = pod_combat_c9_hit_debuff_combat_tier var:pod_combat_c9_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag }
-}
-pod_combat_c9_turn_order_value = {
-	if = { limit = { has_variable = pod_combat_c9_initiative var:pod_combat_c9_alive = 1 }
-		value = 1
-		if = { limit = { has_variable = pod_combat_c0_initiative var:pod_combat_c0_alive = 1 var:pod_combat_c0_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c1_initiative var:pod_combat_c1_alive = 1 var:pod_combat_c1_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c2_initiative var:pod_combat_c2_alive = 1 var:pod_combat_c2_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c3_initiative var:pod_combat_c3_alive = 1 var:pod_combat_c3_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c4_initiative var:pod_combat_c4_alive = 1 var:pod_combat_c4_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c5_initiative var:pod_combat_c5_alive = 1 var:pod_combat_c5_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c6_initiative var:pod_combat_c6_alive = 1 var:pod_combat_c6_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c7_initiative var:pod_combat_c7_alive = 1 var:pod_combat_c7_initiative >= var:pod_combat_c9_initiative } add = 1 }
-		if = { limit = { has_variable = pod_combat_c8_initiative var:pod_combat_c8_alive = 1 var:pod_combat_c8_initiative >= var:pod_combat_c9_initiative } add = 1 }
-	}
+		# No prowess-delta synthesis here because the slot story doesn't
+		# have a back-reference to the host (and thus no access to the
+		# opposing slot's prowess). The current actor / target dance in
+		# the workspace already handles correct hit chance during
+		# combat — this fallback is for the brief init window only.
+		min = @combat_hit_chance_min
+		max = @combat_hit_chance_max
+	}
+}
+pod_combat_slot_prowess_value = {
+	value = var:slot_prowess
+}
+pod_combat_slot_alive_value = {
+	value = var:slot_alive
+}
+pod_combat_slot_is_guarding_value = {
+	if = { limit = { has_variable = slot_is_guarding  } value = 1 }
+}
+pod_combat_slot_is_dodging_value = {
+	if = { limit = { has_variable = slot_is_dodging   } value = 1 }
+}
+pod_combat_slot_is_stealthed_value = {
+	if = { limit = { has_variable = slot_is_stealthed } value = 1 }
+}
+pod_combat_slot_initiative_value = {
+	if = { limit = { has_variable = slot_initiative } value = var:slot_initiative }
+}
+# Tier magnitude SVs — return the tier's magnitude (small/medium/large)
+# when the corresponding tier var is set to 1/2/3, else 0. Eight variants,
+# one per (stat × direction × duration) tuple matching the slot story's
+# slot_{stat}_{direction}_{duration}_tier var family.
+pod_combat_slot_soak_buff_round_mag_sv = {
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_soak_buff_combat_mag_sv = {
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_soak_debuff_round_mag_sv = {
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_soak_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_hit_buff_round_mag_sv = {
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_hit_buff_combat_mag_sv = {
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_hit_debuff_round_mag_sv = {
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 3 } value = @combat_tier_large_mag  }
+}
+pod_combat_slot_hit_debuff_combat_mag_sv = {
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
 }
 
 # Loadout bookkeeping — counts the equipped moves per combat_category
