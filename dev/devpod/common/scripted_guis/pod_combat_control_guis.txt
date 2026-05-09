@@ -1,153 +1,70 @@
-﻿##########################################
-######   POD COMBAT CONTROL GUIS
-##########################################
-# Static button handlers used by the combat window's chrome:
-#   - End Turn / End Combat
-#   - Auto-Resolve
-#   - Help / Overview (triggers pod_combat.0001)
-#   - Forfeit / Close (header X)
-#   - Target Selection (unified — pod_combat_select_target)
+﻿######################################################
+######   POD COMBAT CONTROL SGUIS
+######################################################
 #
-# Scope: ROOT = player character (via GuiScope.SetRoot(GetPlayer.MakeScope).End)
-
-###### END TURN BUTTON ######
-
-pod_combat_end_turn = {
-	is_valid = {
-		pod_combat_is_active_trigger = yes
-		# Valid during player's turn OR when combat is over (to dismiss)
-		OR = {
-			pod_combat_is_player_turn_trigger = yes
-			pod_combat_is_over_trigger = yes
-		}
-	}
-	effect = {
-		# If combat is over, run cleanup and close the window
-		if = {
-			limit = { pod_combat_is_over_trigger = yes }
-			pod_combat_end_combat_effect = yes
-		}
-		else = {
-			pod_combat_process_group_turns_effect = yes
-		}
-	}
-}
-
-###### AUTO-RESOLVE BUTTON ######
-
-pod_combat_auto_resolve = {
-	is_valid = {
-		pod_combat_is_active_trigger = yes
-		NOT = { pod_combat_is_over_trigger = yes }
-	}
-	effect = {
-		pod_combat_auto_resolve_effect = yes
-	}
-}
-
-###### HELP / OVERVIEW BUTTON ######
-
-pod_combat_help = {
-	is_valid = {
-		pod_combat_is_active_trigger = yes
-	}
-	effect = {
-		trigger_event = pod_combat.0001
-	}
-}
-
-###### FORFEIT / CLOSE BUTTON ######
-
-pod_combat_forfeit = {
-	is_valid = {
-		pod_combat_is_active_trigger = yes
-	}
-	effect = {
-		# Player forfeits — enemy team leader wins.
-		# Use slot 5's char (the canonical enemy team leader, set once
-		# at combat start in pod_combat_group_init) rather than
-		# var:pod_combat_opponent. In NvN the workspace pod_combat_opponent
-		# gets reassigned every time the player clicks a different target
-		# button, so by forfeit time it could be an ally (heal target), a
-		# KO'd enemy, or unset entirely. Slot 5 is invariant for the
-		# duration of the combat and works for both 1v1 (slot 5 is the
-		# only enemy) and NvN (slot 5 is the team leader the duel was
-		# nominally between).
-		if = {
-			limit = { has_variable = pod_combat_slot_5 var:pod_combat_slot_5 = { has_variable = slot_char } }
-			set_variable = { name = pod_combat_winner value = var:pod_combat_slot_5.var:slot_char }
-		}
-		else_if = {
-			limit = { has_variable = pod_combat_opponent }
-			set_variable = { name = pod_combat_winner value = var:pod_combat_opponent }
-		}
-		set_variable = { name = pod_combat_loser value = root }
-		set_variable = { name = pod_combat_player_morale value = 0 }
-		set_variable = { name = pod_combat_is_over value = yes }
-		# Combat window stays open — player clicks End Combat to dismiss
-	}
-}
-
-###### TARGET SELECTION ######
-# Called from the Target button on any non-PC card in the combat
-# window's datamodel-driven slot iteration (pod_combat_datamodel_slot).
-# Callers pass the iterated slot story via AddScope('target_slot',
-# Scope.Self); the SGUI reads slot_index off scope:target_slot to drive
-# pod_combat_pc_target / pod_combat_selected_target so the workspace
-# dispatch loads the correct slot into the opponent workspace.
+# Slot-card target selection. Invoked from each slot's "select
+# target" button in the combat window's slot panel via:
+#   GuiScope.SetRoot(GetPlayer.MakeScope)
+#       .AddScope('target_slot', Scope.Story.MakeScope)
 #
-# Slot 0 (the PC) can't be targeted — the gate `var:slot_index > 0`
-# excludes it. The widget hides the Target button on slot_index = 0
-# anyway, but the SGUI gate is the safety net for direct invocations.
-#
-# Hit-chance handling collapses to a single slot_index >= 5 branch:
-#   - Allies (slots 1-4): no attack will be made against them, so just
-#     mirror the actor's current hit_chance forward without
-#     recalculating against the ally's prowess.
-#   - Enemies (slots 5-9): call pod_combat_recalc_player_hit_chance_effect
-#     to derive a fresh hit_chance against the new opponent's prowess
-#     for the damage pipeline.
+# The slot story is passed as scope:target_slot. The SGUI reads
+# slot_index off it, then writes pod_combat_pc_target +
+# pod_combat_selected_target on the host (PC), reloads the
+# workspace target slot into the OPPONENT side, and recalcs the
+# PC's hit chance against the new opponent's prowess.
 #
 # Replaced an earlier set of nine per-slot SGUIs
-# (pod_combat_select_target_1 through _9) when the datamodel iteration
-# replaced the per-slot panel blocks. The per-slot variants were called
-# by name from the panel blocks; the datamodel iteration can't construct
-# an SGUI name dynamically, so a single SGUI taking the slot story as a
-# saved scope replaces all nine.
+# (pod_combat_select_target_1 through _9) when the datamodel
+# iteration replaced the per-slot panel blocks. The per-slot
+# variants were called by name from the panel blocks; the
+# datamodel iteration can't construct an SGUI name dynamically,
+# so a single SGUI taking the slot story as a saved scope
+# replaces all nine.
+
 pod_combat_select_target = {
+	scope = character
 	saved_scopes = { target_slot }
+
+	is_shown = {
+		exists = scope:target_slot
+		# Don't render the button on the PC's own slot card.
+		scope:target_slot = {
+			has_variable = slot_index
+			NOT = { var:slot_index = 0 }
+		}
+	}
+
 	is_valid = {
+		# Combat is live, it's the player's turn, and the slot is alive.
 		pod_combat_is_active_trigger = yes
 		pod_combat_is_player_turn_trigger = yes
+		exists = scope:target_slot
 		scope:target_slot = {
 			has_variable = slot_char
 			var:slot_alive = 1
-			var:slot_index > 0
+			has_variable = slot_index
+			NOT = { var:slot_index = 0 }
 		}
-		NOT = { pod_combat_is_over_trigger = yes }
 	}
+
 	effect = {
-		# Snapshot host scope so pod_combat_load_target_from_story_effect
-		# can re-enter host scope from inside the slot story flip below
-		# (the helper writes pod_combat_opponent_* on scope:host).
-		save_scope_as = host
-		set_variable = { name = pod_combat_pc_target value = scope:target_slot.var:slot_index }
-		set_variable = { name = pod_combat_selected_target value = scope:target_slot.var:slot_index }
-		scope:target_slot = {
-			pod_combat_load_target_from_story_effect = yes
+		# Save scope:target_slot's slot_index as the PC's persistent
+		# target AND the workspace's selected_target, then reload
+		# the workspace so the OPPONENT side mirrors the new slot.
+		set_variable = {
+			name  = pod_combat_pc_target
+			value = scope:target_slot.var:slot_index
 		}
-		# Enemy targets (slots 5-9) recompute the PC's hit chance
-		# against the new opponent's prowess. Ally targets just sync
-		# current_hit_chance forward without polluting the workspace
-		# with an ally-vs-actor comparison.
-		if = {
-			limit = { scope:target_slot = { var:slot_index >= 5 } }
-			pod_combat_recalc_player_hit_chance_effect = yes
+		set_variable = {
+			name  = pod_combat_selected_target
+			value = scope:target_slot.var:slot_index
 		}
-		else = {
-			set_variable = { name = pod_combat_current_hit_chance value = var:pod_combat_player_hit_chance }
-		}
+		# Reload the workspace's opponent_* fields from the new slot.
+		pod_combat_load_workspace_effect = yes
+		# Hit chance depends on the target's prowess — recompute the
+		# PC's base hit and reapply tier mods so the move-bar tooltips
+		# reflect the new matchup. Round-duration hit-buff tiers
+		# carry over (expire at round end, not on target swap).
+		pod_combat_recalc_actor_hit_chance_effect = yes
 	}
 }
-
-

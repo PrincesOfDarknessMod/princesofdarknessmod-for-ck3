@@ -181,9 +181,200 @@ POD_can_execute_combat_move = {
 
 	# team_ally and self are always satisfiable during the player turn —
 	# team_ally includes the acting PC (slot 0 is always alive during
-	# their own turn), and self is the actor. Same on the AI 
+	# their own turn), and self is the actor. Same on the AI
 	# side: team_ally always includes the acting AI itself, and
 	# self is self. single_enemy is vacuously satisfied because
 	# combat ends (victory check) when no enemies remain, so the AI
 	# never reaches selection without at least one valid enemy.
+}
+
+
+######################################################
+###### RESULT-CODE CONDITION TRIGGERS (Wave 4 B4 + B5)
+######################################################
+# Three primitive triggers that read pod_combat_last_result_code on the
+# host scope and partition the codes by outcome class. Both the rider
+# condition gate (B4) and the retaliation gate (B5) compose against
+# these so the result-code → outcome mapping lives in one place.
+#
+# Result codes (single source of truth — see pod_combat_effects.txt
+# header):
+#    0 — HP damage           ─┐
+#    6 — HP damage + retal    ├─ "hp_damage" partition
+#    7 — HP damage + retal soaked  ─┘
+#    1 — guard-blocked       ─┐
+#    2 — soaked               ├─ adds to "contact" partition
+#                              │  (hp_damage codes also count)
+#    3 — missed              ─┐
+#    5 — dodged               ├─ "miss" partition
+#   12 — stealth auto-miss   ─┘
+#    8 — utility (no contact attempted) — neither
+#    9 — morale-only outcome — neither (no HP step happened)
+#   10 — HP healed           — neither
+#   11 — morale healed       — neither
+
+# Codes 0 / 6 / 7 — the original attack landed real wound boxes on
+# the target. The retaliation overlay codes (6, 7) won't appear at
+# rider/retaliation gate time on the SAME move (retaliation hasn't
+# fired yet) but listing them keeps the partition complete and
+# future-safe for any downstream code that calls this trigger after
+# §15.
+pod_combat_result_code_indicates_hp_damage_trigger = {
+	has_variable = pod_combat_last_result_code
+	OR = {
+		var:pod_combat_last_result_code = 0
+		var:pod_combat_last_result_code = 6
+		var:pod_combat_last_result_code = 7
+	}
+}
+
+# Anything that made physical contact: hp_damage codes plus blocked /
+# soaked. Lets designers author "fires on touch even if absorbed"
+# riders (e.g. a poison that delivers on the strike whether or not
+# wounds were inflicted).
+pod_combat_result_code_indicates_contact_trigger = {
+	has_variable = pod_combat_last_result_code
+	OR = {
+		var:pod_combat_last_result_code = 0
+		var:pod_combat_last_result_code = 1
+		var:pod_combat_last_result_code = 2
+		var:pod_combat_last_result_code = 6
+		var:pod_combat_last_result_code = 7
+	}
+}
+
+# Anything that evaded the attack — straight miss, dodge consumed,
+# stealth auto-miss. Used by retaliate_if_missed and by
+# rider_condition = on_miss (e.g. a clumsy whiff that wounds the
+# actor on the overswing).
+pod_combat_result_code_indicates_miss_trigger = {
+	has_variable = pod_combat_last_result_code
+	OR = {
+		var:pod_combat_last_result_code = 3
+		var:pod_combat_last_result_code = 5
+		var:pod_combat_last_result_code = 12
+	}
+}
+
+
+######################################################
+###### RIDER CONDITION GATE (Wave 4 B4)
+######################################################
+# Generic gate for rider effects (heal / morale damage / self-damage).
+# A "rider" is a payload that piggybacks on the move's primary HP-damage
+# step — e.g. a vampire bite that heals when it lands, a brutal swing
+# that damages morale alongside HP, or a reckless charge that wounds
+# the actor only on miss. Each rider lives behind its own condition var
+# on the move story (heal_condition / morale_damage_condition /
+# self_damage_condition). The §6 HP-damage outcome (read off
+# pod_combat_last_result_code on the host) decides whether the rider
+# fires.
+#
+# Recognized condition flags (must match RIDER_CONDITIONS in the
+# generator):
+#   always       — fire unconditionally (default when var unset)
+#   on_hp_damage — codes 0 / 6 / 7 (HP damage landed)
+#   on_contact   — codes 0 / 1 / 2 / 6 / 7 (any physical contact made)
+#   on_miss      — codes 3 / 5 / 12 (miss / dodge / stealth-eaten)
+#
+# Caller scope: the combat host (where pod_combat_last_result_code
+# lives). $STORY$ is the move story; $RIDER_VAR$ is the variable name
+# on the story that holds the condition flag.
+#
+# Backward compat: pre-B4 the heal step gated drain inline on
+# var:pod_combat_last_result_code = 0. The generator now emits
+# heal_condition = on_hp_damage for any move with the legacy `drain`
+# token in its `special` column, so the runtime gate handles that
+# behavior here uniformly.
+pod_combat_rider_condition_passes_trigger = {
+	# $STORY$     = the POD_combat_move story_cycle
+	# $RIDER_VAR$ = the condition variable name on the story (e.g. heal_condition)
+	# Default: var unset OR var = always → pass.
+	trigger_if = {
+		limit = {
+			OR = {
+				NOT = { $STORY$ = { has_variable = $RIDER_VAR$ } }
+				$STORY$ = { var:$RIDER_VAR$ = flag:always }
+			}
+		}
+		always = yes
+	}
+	trigger_else_if = {
+		limit = { $STORY$ = { var:$RIDER_VAR$ = flag:on_hp_damage } }
+		pod_combat_result_code_indicates_hp_damage_trigger = yes
+	}
+	trigger_else_if = {
+		limit = { $STORY$ = { var:$RIDER_VAR$ = flag:on_contact } }
+		pod_combat_result_code_indicates_contact_trigger = yes
+	}
+	trigger_else_if = {
+		limit = { $STORY$ = { var:$RIDER_VAR$ = flag:on_miss } }
+		pod_combat_result_code_indicates_miss_trigger = yes
+	}
+	# Unknown flag value — fail safely. Generator validates rider-
+	# condition values against RIDER_CONDITIONS so unknown flags should
+	# never reach runtime, but the closing trigger_else avoids a silent
+	# pass on misconfigured data.
+	trigger_else = {
+		always = no
+	}
+}
+
+
+######################################################
+###### AOE TEAM-SIDE FILTERS (Wave 4 B6)
+######################################################
+# Slot-membership filters used by the AoE dispatchers in
+# pod_combat_move_effects.txt. Each iterator runs in slot-story scope
+# (every_in_list switches into pod_combat_slots entries) and needs to
+# decide "is this slot on the same team as the actor or the opposite
+# team?". Both filters read scope:host (the combat host save the
+# dispatcher establishes) for the actor's slot index and compare
+# against the iterated slot's slot_index.
+#
+# Slot layout: indices 0-4 are the PC team, 5-9 the opponent team.
+# - Same-team: actor < 5 + slot < 5  OR  actor >= 5 + slot >= 5
+# - Opposite-team: actor < 5 + slot >= 5  OR  actor >= 5 + slot < 5
+#
+# Pre-B6 each AoE dispatcher inlined the OR(AND, AND) block. Six
+# copies of the same logic drifted dangerously close to inconsistent
+# during the wave-3 work (one missed an alive guard, another flipped
+# the comparison). Extracting both filters here gives the team
+# decision a single source of truth that future AoE additions
+# (and A12 per-target retaliation, if it lands) can reuse without
+# re-deriving the index split.
+#
+# Caller contract:
+#   - Implicit scope must be the iterated slot story (var:slot_index
+#     lives there).
+#   - scope:host must be saved to the combat host (where
+#     pod_combat_current_actor is read).
+
+pod_combat_aoe_team_enemy_filter_trigger = {
+	# Slot belongs to the team OPPOSITE the current actor.
+	OR = {
+		AND = {
+			scope:host = { var:pod_combat_current_actor < 5 }
+			var:slot_index >= 5
+		}
+		AND = {
+			scope:host = { var:pod_combat_current_actor >= 5 }
+			var:slot_index < 5
+		}
+	}
+}
+
+pod_combat_aoe_team_ally_filter_trigger = {
+	# Slot belongs to the SAME team as the current actor (includes the
+	# actor's own slot — team_ally heals/buffs cover self).
+	OR = {
+		AND = {
+			scope:host = { var:pod_combat_current_actor < 5 }
+			var:slot_index < 5
+		}
+		AND = {
+			scope:host = { var:pod_combat_current_actor >= 5 }
+			var:slot_index >= 5
+		}
+	}
 }
