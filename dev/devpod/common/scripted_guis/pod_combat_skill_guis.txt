@@ -1,4 +1,4 @@
-######################################################
+﻿######################################################
 ######   POD COMBAT SCRIPTED GUIS
 ######################################################
 #
@@ -245,22 +245,51 @@ pod_combat_loadout_toggle = {
 				target = scope:story
 			}
 			# Not equipped — equip only if the move's category
-			# still has room.
+			# still has room. Each branch wraps its cap check in
+			# custom_description so the disabled-button tooltip
+			# surfaces a player-friendly "Attack slots full: 4/4"
+			# message instead of the raw trigger text. The
+			# trigger_if / trigger_else_if chain dispatches on the
+			# move's combat_category flag — exactly one branch
+			# fires per move; the chain stops at the first matched
+			# limit, keeping the message singular.
 			trigger_if = {
 				limit = { scope:story = { var:combat_category = flag:ATK } }
-				pod_combat_atk_count < pod_combat_max_per_category
+				custom_description = {
+					text = pod_combat_loadout_atk_full_tt
+					pod_combat_atk_count < pod_combat_max_per_category
+				}
 			}
-			trigger_if = {
+			trigger_else_if = {
 				limit = { scope:story = { var:combat_category = flag:DEF } }
-				pod_combat_def_count < pod_combat_max_per_category
+				custom_description = {
+					text = pod_combat_loadout_def_full_tt
+					pod_combat_def_count < pod_combat_max_per_category
+				}
 			}
-			trigger_if = {
+			trigger_else_if = {
 				limit = { scope:story = { var:combat_category = flag:CTL } }
-				pod_combat_ctl_count < pod_combat_max_per_category
+				custom_description = {
+					text = pod_combat_loadout_ctl_full_tt
+					pod_combat_ctl_count < pod_combat_max_per_category
+				}
 			}
-			trigger_if = {
+			trigger_else_if = {
 				limit = { scope:story = { var:combat_category = flag:PWR } }
-				pod_combat_pwr_count < pod_combat_max_per_category
+				custom_description = {
+					text = pod_combat_loadout_pwr_full_tt
+					pod_combat_pwr_count < pod_combat_max_per_category
+				}
+			}
+			trigger_else = {
+				# Catch-all for moves with no recognized combat_category.
+				# Should never fire in practice — every implemented move
+				# carries one of ATK/DEF/CTL/PWR — but CK3 1.18 requires
+				# every trigger_else_if chain to terminate with a
+				# trigger_else. always = no makes the OR-clause fail for
+				# unmatched categories, matching the safe semantics
+				# (don't equip moves with unknown category).
+				always = no
 			}
 		}
 	}
@@ -567,54 +596,36 @@ pod_combat_move_desc = {
 	scope = character
 	saved_scopes = { story }
 	effect = {
-		# AP cost — always rendered, variant by attack_type
+		# Combined cost line — first bullet under the title so the
+		# player sees what the move costs before what it does.
+		# pod_combat_desc_costs concatenates five
+		# PODCombatXxxCostInline customizable_localization calls
+		# (one per resource); each returns either its component
+		# substring or vanilla blank_line, so a move with two costs
+		# renders "Costs: 2 vitae 5 gold" on a single line. The
+		# OR-of-five gate suppresses the dispatcher (and its
+		# dangling "Costs:" prefix) when no cost variable is set.
+		#
+		# Earlier attempt: a single SelectLocalization-based loc
+		# string. Failed because the data-binding parser treats `#`
+		# as a comment marker and rejects nested `[X]` substitutions
+		# inside function-argument strings. The customizable_localization
+		# path resolves a separate loc-file entry per branch, so the
+		# `#bold`/`[Var]` tokens live in a normal loc string instead
+		# of being passed as a function argument.
 		if = {
 			limit = {
 				scope:story = {
-					has_variable = attack_type
-					var:attack_type = flag:supernatural
+					OR = {
+						has_variable = energy_cost
+						has_variable = gold_cost
+						has_variable = piety_cost
+						has_variable = prestige_cost
+						has_variable = stress_cost
+					}
 				}
 			}
-			custom_tooltip = pod_combat_desc_ap_cost_supernatural
-		}
-		else_if = {
-			limit = {
-				scope:story = {
-					has_variable = attack_type
-					var:attack_type = flag:mental
-				}
-			}
-			custom_tooltip = pod_combat_desc_ap_cost_mental
-		}
-		else_if = {
-			# hp_damage present without explicit attack_type → physical default
-			limit = { scope:story = { has_variable = hp_damage } }
-			custom_tooltip = pod_combat_desc_ap_cost_physical
-		}
-		else = {
-			custom_tooltip = pod_combat_desc_ap_cost
-		}
-
-		# Resource costs
-		if = {
-			limit = { scope:story = { has_variable = energy_cost } }
-			custom_tooltip = pod_combat_desc_energy_cost
-		}
-		if = {
-			limit = { scope:story = { has_variable = stress_cost } }
-			custom_tooltip = pod_combat_desc_stress_cost
-		}
-		if = {
-			limit = { scope:story = { has_variable = gold_cost } }
-			custom_tooltip = pod_combat_desc_gold_cost
-		}
-		if = {
-			limit = { scope:story = { has_variable = piety_cost } }
-			custom_tooltip = pod_combat_desc_piety_cost
-		}
-		if = {
-			limit = { scope:story = { has_variable = prestige_cost } }
-			custom_tooltip = pod_combat_desc_prestige_cost
+			custom_tooltip = pod_combat_desc_costs
 		}
 
 		# HP damage — combined drain variants first, then plain.
@@ -839,6 +850,81 @@ pod_combat_move_desc = {
 			custom_tooltip = pod_combat_desc_morale_heal
 		}
 
+		# Capability callouts — replaces the old Physical / Supernatural
+		# / Mental tag with concrete "what does this move actually do
+		# differently" descriptions derived from the move's capability
+		# flags. Each callout fires when its flag is ABSENT on the move
+		# story (capability flags are present-when-true; the absence of
+		# requires_hit_roll, for example, means the move auto-hits).
+		# Gated on has_variable = hp_damage so utility / heal / buff
+		# moves don't surface contact-resolver properties they don't
+		# trigger.
+		#
+		# A "default Physical" damage move has all four capability flags
+		# set, so all four callouts skip. A Supernatural move (auto-hit,
+		# bypass guard, hits spirits) shows three callouts. A Mental
+		# move shows three. Per-move overrides (override_requires_hit_roll
+		# = no, etc.) flip individual callouts on/off without touching
+		# the others.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = requires_hit_roll }
+				}
+			}
+			custom_tooltip = pod_combat_desc_always_hits
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_guard }
+				}
+			}
+			custom_tooltip = pod_combat_desc_bypass_guard
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_stance }
+				}
+			}
+			custom_tooltip = pod_combat_desc_undodgeable
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_spirit_gate }
+				}
+			}
+			custom_tooltip = pod_combat_desc_hits_spirits
+		}
+		# Stance-strip flags — bypass_dodge and bypass_stealth actively
+		# REMOVE the target's stance pre-damage (pod_combat_move_effects.txt
+		# §5 strips pod_combat_target_is_dodging / _is_stealthed before
+		# the contact resolver runs). Distinct from the Undodgeable
+		# capability callout above: that one fires when the move ignores
+		# stance evasion entirely (NOT has_variable = checks_stance), but
+		# the target's stance flags STAY set after the move resolves and
+		# can still apply to the next attack. bypass_dodge / bypass_stealth
+		# CONSUME the stance, so a follow-up move from a different actor
+		# also catches the stanceless target.
+		if = {
+			limit = { scope:story = { has_variable = bypass_dodge } }
+			custom_tooltip = pod_combat_desc_bypass_dodge
+		}
+		if = {
+			limit = { scope:story = { has_variable = bypass_stealth } }
+			custom_tooltip = pod_combat_desc_bypass_stealth
+		}
+
+		# Resource costs are dispatched at the top of the effect chain
+		# (above the HP damage section) so they read first; nothing to
+		# emit here.
+
 		# Tier buffs / debuffs
 		if = {
 			limit = { scope:story = { has_variable = soak_buff_round_tier } }
@@ -891,19 +977,14 @@ pod_combat_move_desc = {
 			custom_tooltip = pod_combat_desc_remove_guard
 		}
 
-		# Bypass flags
-		if = {
-			limit = { scope:story = { has_variable = bypass_guard } }
-			custom_tooltip = pod_combat_desc_bypass_guard
-		}
-		if = {
-			limit = { scope:story = { has_variable = bypass_dodge } }
-			custom_tooltip = pod_combat_desc_bypass_dodge
-		}
-		if = {
-			limit = { scope:story = { has_variable = bypass_stealth } }
-			custom_tooltip = pod_combat_desc_bypass_stealth
-		}
+		# Legacy bypass-flag block dropped — bypass_guard / bypass_dodge
+		# / bypass_stealth are no longer dispatched here. The capability
+		# callouts above (Always hits / Bypasses Guard / Undodgeable /
+		# Hits spirits) cover the same player-facing semantics keyed off
+		# the contact-resolver capability flags the runtime actually
+		# reads. bypass_stealth keeps a dedicated callout in that block
+		# because it's a distinct mechanic (cancels target's Stealth on
+		# hit) not subsumed by checks_stance.
 
 		# Retaliation stances
 		if = {
@@ -929,33 +1010,17 @@ pod_combat_move_desc = {
 			custom_tooltip = pod_combat_desc_initiative_debuff
 		}
 
-		# Targeting hint (skip single_enemy default; render every other
-		# targeting flag explicitly so AoE / self / ally / PC moves
-		# advertise their scope).
-		if = {
-			limit = { scope:story = { var:targeting = flag:team_enemy } }
-			custom_tooltip = pod_combat_desc_target_team_enemy
-		}
-		else_if = {
-			limit = { scope:story = { var:targeting = flag:team_ally } }
-			custom_tooltip = pod_combat_desc_target_team_ally
-		}
-		else_if = {
-			limit = { scope:story = { var:targeting = flag:single_ally } }
-			custom_tooltip = pod_combat_desc_target_single_ally
-		}
-		else_if = {
-			limit = { scope:story = { var:targeting = flag:single_pc } }
-			custom_tooltip = pod_combat_desc_target_single_pc
-		}
-		else_if = {
-			limit = { scope:story = { var:targeting = flag:self } }
-			custom_tooltip = pod_combat_desc_target_self
-		}
+		# Standalone target hint dropped — the target description now
+		# folds inline into the damage / heal / morale lines above
+		# (e.g. "Deal 5 superficial fire to one enemy"). Buff-only and
+		# stance-only moves are self-implicit; pure-utility AoE moves
+		# (rare — almost all team-targeted moves carry damage or heal
+		# that absorbs the target callout) lose the explicit "all
+		# enemies" line, which is an acceptable trade for the cleaner
+		# damage-row reading.
 
-		# Designer-facing flavor line from the CSV `notes` column is
-		# NOT rendered here — the SGUI's BuildTooltip context can't
-		# resolve Decision.GetCommandDescForPlayer (the data-binding
+		# The SGUI's BuildTooltip context can't resolve
+		# Decision.GetCommandDescForPlayer (the data-binding
 		# evaluator inside custom_tooltip doesn't expose Decision
 		# methods on Var('decision')). Instead the flavor is appended
 		# to the top-level POD_combat_move_tooltip / POD_combat_log_move_tooltip

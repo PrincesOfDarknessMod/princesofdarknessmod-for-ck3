@@ -2,133 +2,16 @@
 ######   POD COMBAT MOVE EXECUTION ENGINE
 ######################################################
 # Single generic effect that executes any combat move by reading the
-# attributes off its story_cycle.
+# attributes off its story_cycle. Called from the
+# pod_combat_execute_move SGUI (PC) and pod_combat_ai_select_and_execute_move_effect
+# (AI). Caller scope is the combat host; the workspace is assumed loaded.
+# Damage / soak / retaliation helpers live in pod_combat_effects.txt;
+# tier recalc in pod_combat_tier_effects.txt; slot load/save in
+# pod_combat_group_effects.txt — this file just dispatches.
 #
-# Called from:
-#   - pod_combat_execute_move SGUI (mid-combat PC button)
-#   - pod_combat_ai_select_and_execute_move_effect (AI turn)
-#
-# Character scope: the combat host (the PC). The workspace alias pair
-# (pod_combat_actor_* / pod_combat_target_*) is loaded against the
-# acting character's slot before this fires; "actor" = whoever is
-# taking the action this turn (PC OR any AI combatant), "target" =
-# the current single-target (rotates per AoE iteration / AI swap).
-# The workspace is assumed loaded by the caller.
-#
-# All damage pipelines, retaliation, healing, tier recalc, morale, and
-# log helpers live in the peer files:
-#   pod_combat_effects.txt            — damage, soak, retaliate, push_log
-#   pod_combat_tier_effects.txt       — tier magnitude recalc
-#   pod_combat_group_effects.txt      — slot load/save, workspace
-# This file just dispatches to them based on story variables.
-#
-# ═════════════════════════════════════════════════════════════════════
-# POD_execute_combat_move — Phase Contract
-# ═════════════════════════════════════════════════════════════════════
-#
-# Phases run top-to-bottom. The cross-phase invariants below are
-# load-bearing — reordering will silently break behavior.
-#
-# §0   Capture combat host scope        — saved as scope:combat_host so
-#                                          AoE iteration bodies can
-#                                          re-enter host scope without
-#                                          their own root-save dance.
-# §1   AP spend                         — must precede §6 (committed move)
-# §2   Result-flag reset + log metadata — must precede every §3-§15 write
-# §3   Energy cost                      — runs on actor scope (not host)
-# §4   CK3 resource costs               — PC only (slot 0)
-# §5   Target stance bypass             — strips workspace target stances
-#                                          (bypass_dodge / bypass_stealth /
-#                                          remove_guard) before §6 reads.
-# §5b  AoE debuff pre-broadcast         — strips slot stances; must
-#                                          precede §6 so per-target damage
-#                                          iteration sees the post-strip
-#                                          state.
-# §6   HP damage dispatch               — reads §5 / §5b stance state.
-#                                          Writes pod_combat_last_result_code
-#                                          on the host (consumed by the
-#                                          rider gates §7 / §8 / §9).
-# §7   Morale damage                    — independent of §6 in pipeline,
-#                                          but rider-gated by
-#                                          morale_damage_condition (B4).
-#                                          Default = always; set to
-#                                          on_hp_damage / on_contact /
-#                                          on_miss to make the morale
-#                                          payload conditional.
-# §8   Self-damage                      — rider-gated by self_damage_condition
-#                                          (B4). Default = always (current
-#                                          reckless-charge behavior).
-#                                          MUST preserve §6 result flags
-#                                          via the snapshot/restore
-#                                          pattern even when the rider
-#                                          fires, since the self-hit
-#                                          writes its own pod_combat_last_*
-#                                          state inside the call.
-# §9   HP heal                          — rider-gated by heal_condition
-#                                          (B4). Default = always; legacy
-#                                          drain moves emit
-#                                          heal_condition = on_hp_damage
-#                                          at codegen so they still gate
-#                                          on a landed hit. MUST run AFTER
-#                                          §6 for the rider gate to read
-#                                          the right outcome.
-# §10  Morale heal                      — currently always-fire (no rider
-#                                          condition wired). Symmetric
-#                                          extension is one column away
-#                                          if a future move needs it.
-# §11  Tier buffs/debuffs               — applied to actor / target. Should
-#                                          precede §12 so a "buff yourself
-#                                          then guard" composes as expected
-#                                          (stat-then-stance).
-# §12  Stance flags (set_guard / dodge / — applied to actor AFTER damage,
-#       stealth)                          so a "set guard then attack"
-#                                          attacks first then guards
-#                                          (intuitive ordering for the
-#                                          end-of-turn defensive stance).
-# §12b AoE buff broadcast               — extends §11/§12 to allies on
-#                                          team_ally moves; runs after
-#                                          actor's own buffs are written.
-# §13  Retaliation setup                — actor-side; the retaliate_*
-#                                          workspace slots written here
-#                                          arm reactions for the NEXT
-#                                          turn's §15 to consume.
-# §14  Parametric flags (AP gain/drain, — order-independent.
-#       initiative_debuff)
-# §15  Reaction phase                   — fires reactions armed by the
-#                                          PREVIOUS turn's §13. Each
-#                                          reaction is gated by a
-#                                          result-code partition trigger
-#                                          (pod_combat_result_code_indicates_*)
-#                                          that reads §6's outcome on
-#                                          this scope. Today: retaliate-
-#                                          on-contact (hp damage / guard
-#                                          blocked / soaked all qualify
-#                                          — thorns semantics) and
-#                                          retaliate-on-evasion (miss /
-#                                          dodge / stealth all qualify
-#                                          — riposte semantics).
-#                                          Adding a new reaction = one
-#                                          workspace slot pair + one
-#                                          partition trigger + one
-#                                          dispatch line. See the
-#                                          REACTION PHASE block in
-#                                          pod_combat_effects.txt.
-# §16  Push log                         — reads ALL prior flags + amount
-#                                          fields. MUST run last.
-#
-# Anti-invariants (these orderings MUST NOT happen):
-#   §6 before §5/§5b   — damage hits unstripped stances.
-#   §7/§8/§9 before §6 — rider gates read pod_combat_last_result_code,
-#                        which is set by §6. Reordering breaks
-#                        on_hp_damage / on_contact / on_miss conditions.
-#   §15 before §6      — retaliation reads stale state from prior move.
-#   §16 anywhere but last — log captures partial result, missing the
-#                           rider amounts the later phases populated.
-#
-# To add a new phase: pick a numeric position, document its dependencies
-# in this header, and update the result-flag reset block (§2) and the
-# cleanup block in pod_combat_cleanup_effect if it produces a new flag.
-# ═════════════════════════════════════════════════════════════════════
+# Phase contract (§0 setup → §16 push log) and the load-bearing
+# anti-invariants live in COMBAT_REFERENCE.info §2. Read that before
+# reordering anything.
 
 
 ######################################################
@@ -163,9 +46,7 @@ POD_execute_combat_move = {
 	# Reset to the -1 sentinel ("no result yet"). Damage / heal /
 	# stance helpers along the pipeline will overwrite this with
 	# their outcome (0..12); push_log defaults to 8 (utility) when
-	# the value is still -1 at log-push time. The 11 separate
-	# pod_combat_last_was_* presence flags this used to clear were
-	# collapsed into the single result_code int (closes A9).
+	# the value is still -1 at log-push time.
 	set_variable = { name = pod_combat_last_result_code value = -1 }
 	# Parallel amount fields — each pipeline (damage / heal / morale
 	# damage / morale heal) writes its own variable so a damage+heal
@@ -186,11 +67,11 @@ POD_execute_combat_move = {
 
 	# Move ref is threaded explicitly through pod_combat_push_log_effect's
 	# MOVE_STORY parameter at §16 — no host-var handoff required. The
-	# legacy var:pod_combat_executing_move was a function-arg-as-host-
-	# variable workaround that broke whenever push_log was called from
-	# anywhere other than this single execute_combat_move path. With an
-	# explicit parameter the contract is local: caller passes the story,
-	# push_log receives it, no shared mutable state in between.
+	# explicit-parameter contract is local: caller passes the story,
+	# push_log receives it, no shared mutable state in between. Don't
+	# replace this with a host var; push_log gets called from paths
+	# other than execute_combat_move, and a host-var-as-arg pattern
+	# breaks the moment a caller forgets to stamp it.
 
 	# ── 3. Energy cost (splat-agnostic) ──────────────────────────
 	# PoD's splat-agnostic accessor routes to blood/gnosis/pathos/angst/
@@ -221,10 +102,7 @@ POD_execute_combat_move = {
 		# pod_combat_actor_energy_used tracks "the current actor used
 		# an energy-cost move" — true for PC and AI alike — and the
 		# energy-attrition weighting in the AI selector keys off the
-		# acting character's history. Originally named with the "actor"
-		# prefix while the rest of the workspace still used the legacy
-		# "player" prefix; the workspace-wide rename to pod_combat_actor_*
-		# / pod_combat_target_* aligned the naming convention everywhere.
+		# acting character's history.
 		if = {
 			limit = { has_variable = pod_combat_actor_energy_used }
 			change_variable = { name = pod_combat_actor_energy_used add = 1 }
@@ -309,8 +187,8 @@ POD_execute_combat_move = {
 	# resolution) followed by pod_combat_apply_damage_payload_effect on
 	# hit. Pipeline behavior (hit roll / guard check / spirit gate) is
 	# selected by the move's capability flags rather than by branching
-	# to a dedicated effect. See pod_combat_effects.txt §B2 for the
-	# contact-resolver implementation.
+	# to a dedicated effect. See pod_combat_effects.txt's UNIFIED
+	# CONTACT RESOLVER block for the implementation.
 	if = {
 		limit = { $STORY$ = { has_variable = hp_damage } }
 		if = {
@@ -328,10 +206,10 @@ POD_execute_combat_move = {
 	# dodge still works). Source is informational — routed the same way
 	# regardless of damage_source.
 	#
-	# Rider gate (Wave 4 B4): default fires unconditionally; designers
-	# can author "morale damage only on hit" / "only on miss" /
-	# "only on contact" by setting morale_damage_condition on the move.
-	# Trigger reads the §6 outcome via pod_combat_last_result_code on
+	# Rider gate: default fires unconditionally; designers can author
+	# "morale damage only on hit" / "only on miss" / "only on contact"
+	# by setting morale_damage_condition on the move. Trigger reads
+	# the §6 outcome via pod_combat_last_result_code on
 	# the host (this scope).
 	if = {
 		limit = {
@@ -374,15 +252,7 @@ POD_execute_combat_move = {
 	#     damage. Likewise self-damage that lands after a soaked main
 	#     hit would flip code 2 into code 0.
 	#
-	# The result_code consolidation (B1) cut this snapshot from three
-	# fields (last_damage + last_was_damage + last_was_soaked) to two
-	# (last_damage + last_result_code) — the multiple flag fields
-	# collapsed into a single integer code, and the if/else restore
-	# logic became a flat write each way. Closes most of A10; full
-	# elimination would require parameterizing every damage helper
-	# to redirect writes, which isn't worth the surface for a single
-	# caller.
-	# Rider gate (Wave 4 B4): default fires unconditionally; designers
+	# Rider gate: default fires unconditionally; designers
 	# can author "self-damage on miss" (reckless overswings) or
 	# "self-damage on hit" (blood payment for landing the strike) by
 	# setting self_damage_condition on the move. Trigger reads §6's
@@ -431,14 +301,13 @@ POD_execute_combat_move = {
 	# single-target heals (and self heals via targeting=self) just run
 	# on the player-side workspace.
 	#
-	# Rider gate (Wave 4 B4): heal_condition controls whether the heal
-	# fires based on §6's outcome. Default = always (utility heals).
-	# Drain heals (vampire bite, spectre soul-drain, etc.) get
-	# heal_condition = on_hp_damage emitted automatically by the
-	# generator when the move has the legacy `drain` token in `special`,
-	# preserving the pre-B4 "only heal on landed hit" behavior. Designers
-	# writing new moves should prefer setting heal_condition explicitly
-	# in the CSV column — `drain` remains for backward compat.
+	# Rider gate: heal_condition controls whether the heal fires based
+	# on §6's outcome. Default = always (utility heals). Drain heals
+	# (vampire bite, spectre soul-drain, etc.) get heal_condition =
+	# on_hp_damage emitted automatically by the generator when the
+	# move has the `drain` token in `special`, so "only heal on a
+	# landed hit" runs through the same machinery as every other
+	# rider condition.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_heal }
@@ -716,7 +585,7 @@ POD_execute_combat_move = {
 
 	# ── 16. Push combat log entry ────────────────────────────────
 	# Move story passed explicitly so push_log doesn't depend on a
-	# host-var handoff (var:pod_combat_executing_move retired).
+	# host-var handoff.
 	pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
 }
 
@@ -724,7 +593,7 @@ POD_execute_combat_move = {
 ######################################################
 ###### HP DAMAGE DISPATCH (single target)
 ######################################################
-# Three-stage dispatch (Wave 4 B2):
+# Three-stage dispatch:
 #   1. POD_combat_apply_single_hp_damage    — handles mental no-op +
 #      aggravated override + delegates to dispatch_by_source.
 #   2. POD_combat_dispatch_by_source        — maps var:damage_source
@@ -734,10 +603,8 @@ POD_execute_combat_move = {
 #      fires pod_combat_apply_damage_payload_effect on hit.
 #
 # Capability flags drive what the resolver does: requires_hit_roll /
-# checks_guard / checks_stance / checks_spirit_gate. Pre-B2 the
-# pipeline branched at this dispatch layer to one of three near-duplicate
-# damage helpers (physical / supernatural / physical_bypass_guard);
-# now the resolver IS the pipeline and branching happens via flag
+# checks_guard / checks_stance / checks_spirit_gate. The resolver IS
+# the pipeline and branching happens via flag
 # presence on scope:current_move.
 
 POD_combat_apply_single_hp_damage = {
@@ -763,17 +630,19 @@ POD_combat_apply_single_hp_damage = {
 	# → resolve_contact / apply_payload) all see the same scope:current_move.
 	$STORY$ = { save_scope_as = current_move }
 
-	# Mental attacks deal no HP damage by definition — they route
-	# morale damage through pod_combat_deal_morale_damage_effect
-	# elsewhere in the execution engine.
-	if = { limit = { $STORY$ = { has_variable = attack_type var:attack_type = flag:mental } } }
-
 	# Aggravated override: damage_type = aggravated forces the
 	# wound to be aggravated regardless of source or target splat.
 	# Delegates straight to the unified dispatcher with the canonical
 	# duel_aggravated reason — capability flags on the move story
 	# (set at init from attack_type defaults) drive pipeline behavior.
-	else_if = {
+	#
+	# Mental moves never reach this effect: the §6 dispatcher in
+	# POD_execute_combat_move gates on has_variable = hp_damage, and
+	# the generator skips emitting set_hp_damage for attack_type=mental
+	# (see generate_combat_files.py — `if hp_dmg > 0 and not is_retaliate
+	# and at != "mental"`). No inline mental gate needed; trust the
+	# generator filter.
+	if = {
 		limit = { $STORY$ = { has_variable = damage_type var:damage_type = flag:aggravated } }
 		POD_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel_aggravated }
 	}
@@ -801,16 +670,6 @@ POD_combat_apply_single_hp_damage = {
 # already keys aggravated promotion against true_faith for vampires
 # and other faith-vulnerable splats.
 #
-# To add a new damage source:
-#   1. Append a CSV row + regenerate so the move's damage_source flag
-#      gets set.
-#   2. Add a new else_if branch below mapping the flag to its REASON.
-#   3. Update the loc / icon set in pod_combat_static_l_english.yml
-#      and pod_combat_log_custom_loc.txt's PODCombatDamageSourceMarker.
-# CK3 script can't pass `var:damage_source` as a REASON parameter
-# directly (REASON is a token, not a value-lookup), so the chain
-# stays — but it's contained here, and the multi-axis caller
-# (POD_combat_apply_single_hp_damage) is no longer cluttered with it.
 POD_combat_dispatch_by_source = {
 	# $STORY$ = move story
 	# $TARGET_SIDE$ = "player" or "opponent"
@@ -851,9 +710,8 @@ POD_combat_dispatch_damage_pipeline = {
 	# $TARGET_SIDE$ = "player" or "opponent"
 	# $REASON$ = PoD death_reason suffix (passed through to the payload)
 	#
-	# Unified contact-resolver + damage-payload flow (Wave 4 B2). The
-	# three legacy pipelines (physical / supernatural / physical-bypass-
-	# guard) were collapsed into capability-flag-driven branches inside
+	# Unified contact-resolver + damage-payload flow. Capability flags
+	# on the executing move drive branching inside
 	# pod_combat_resolve_contact_effect — the dispatcher no longer
 	# selects a pipeline; it just runs the resolver, fires the payload
 	# on hit, and consumes the actor's stealth.
@@ -897,13 +755,12 @@ POD_combat_dispatch_damage_pipeline = {
 #   team_ally:  actor on player team → buff/heal slots 0-4 (includes self).
 #               actor on enemy team → buff/heal slots 5-9.
 #
-# The team-side decision is encapsulated in two shared triggers (B6):
+# The team-side decision is encapsulated in two shared triggers:
 #   pod_combat_aoe_team_enemy_filter_trigger
 #   pod_combat_aoe_team_ally_filter_trigger
 # Both read scope:host.var:pod_combat_current_actor and the iterated
-# slot's slot_index. Pre-B6 each dispatcher inlined the OR(AND, AND)
-# pattern; centralising removes 24 lines of duplication and one
-# source of "did this OR-AND get the comparison flipped?" drift.
+# slot's slot_index. Single source of truth for the team decision so
+# future AoE additions don't re-derive the index split.
 #
 # Damage-side dispatchers also call
 # pod_combat_aoe_check_target_alive_effect after each save_target so

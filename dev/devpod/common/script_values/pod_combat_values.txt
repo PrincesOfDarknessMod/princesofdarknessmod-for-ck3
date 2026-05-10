@@ -1,159 +1,11 @@
 ﻿######################################
 ######   POD COMBAT VALUES   ######
 ######################################
-
-# ─── COMBAT VARIABLE REFERENCE ─────────────────────────────────────────────
-#
-# Group combat uses a 10-slot system (slots 0-4 = player team, 5-9 = enemy
-# team). Per-combatant state lives on POD_combat_slot story_cycle scopes —
-# one story per slot, created at combat init and cleaned up at combat end.
-# Pointer variables pod_combat_slot_0..9 on the combat host (the PC) hand
-# back the matching story. The flat pod_combat_c{N}_* character-variable
-# namespace this used to use is gone; reads/writes go through slot stories
-# only.
-#
-# A shared WORKSPACE (pod_combat_actor_* / pod_combat_target_*) holds
-# whichever combatant is acting and whichever one is the current target;
-# the workspace is loaded from / saved back to the appropriate slot story
-# at each action boundary by pod_combat_{load,save}_workspace_effect.
-# Skill effects read and write only the workspace, so the same generated
-# code runs for the PC, AI coterie, the primary opponent, and knights.
-#
-# ── Core state (on the combat host / PC character) ───────────────
-#   pod_combat_active                 — flag: combat is in progress
-#   pod_combat_is_over                — flag: combat is over (re-entry guard)
-#   pod_combat_mode                   — 0=1v1, 1=1vN, 2=Nv1, 3=NvN
-#   pod_combat_round                  — current round number
-#   pod_combat_current_actor          — slot index of the acting combatant (0-9)
-#   pod_combat_current_ap             — AP remaining this turn
-#   pod_combat_current_turn_side      — 0 = player-team turn, 1 = enemy-team turn
-#   pod_combat_enemy_team_size        — number of occupied enemy slots (5-9);
-#                                       used by the slots-6-9 fill pass to
-#                                       gate how many enemies still fit
-#   pod_combat_pc_target              — the PC's persistent target slot (1-9)
-#   pod_combat_selected_target        — slot loaded into opponent workspace
-#   pod_combat_slot_0..9              — pointer var per slot; resolves to
-#                                       the slot's POD_combat_slot story
-#                                       scope. Unset for unfilled slots.
-#   pod_combat_active_slots           — variable list of slot stories
-#                                       currently in play (filled slots
-#                                       only, in slot-index ascending
-#                                       order). Iterated by every dispatch
-#                                       loop instead of unrolling 0..9.
-#
-# ── Per-slot stats (vars on each POD_combat_slot story) ──────────
-#   slot_index                        — 0..9, baked at slot creation
-#   slot_char                         — character ref occupying the slot
-#   slot_alive                        — 1 while in play, 0 when KO'd
-#   (team affiliation is computed from slot_index — slots 0-4 = player
-#    team, 5-9 = enemy team — not stored as a per-slot variable)
-# Health is NOT stored on the slot story — it is live script values
-# derived from each slot character's PoD wound vars (the slot story
-# only holds the slot_char pointer; the SVs read POD_empty_damage_boxes
-# / POD_total_damage_boxes / POD_health_aggravated_damage_num off the
-# character):
-#   pod_combat_slot_hp_value          — empty wound boxes (HP remaining)
-#   pod_combat_slot_max_hp_value      — wound track length (max HP)
-#   pod_combat_slot_agg_damage_sv     — aggravated wound boxes
-#   pod_combat_slot_total_damage_sv   — total wound boxes filled
-# Caching HP on the slot story was tried earlier and rejected — stale
-# cache between turns vs PoD's wound writes was a constant source of
-# desync; deriving HP live keeps display and gameplay reads in lockstep
-# with the canonical PoD state.
-#   slot_morale                       — current Morale
-#   slot_prowess                      — current prowess
-#   slot_soak                         — live soak chance (0-100)
-#   slot_base_soak                    — soak before any tier effects
-#   slot_hit_chance                   — live hit chance (20-95)
-#   slot_base_hit_chance              — hit chance before any tier effects
-#   slot_initiative                   — initiative roll this round
-#   slot_init_bonus                   — next-round initiative modifier
-#   slot_ap_drain                     — AP drained from next turn
-#   slot_energy_used                  — counter for AI energy-attrition weighting
-#   slot_turn_order                   — turn-rank within the round
-#                                       (1 = first); stamped by
-#                                       pod_combat_calc_turn_orders_effect
-#                                       after initiative roll.
-#   slot_has_acted                    — 1 once the slot's turn resolves
-#                                       this round; reset to 0 by
-#                                       pod_combat_calculate_initiative_effect
-#                                       at the start of every round.
-#
-# ── Per-slot stance flags (vars on the POD_combat_slot story) ────
-# All persist across rounds; only cleared when consumed or at combat end.
-#   slot_is_guarding                  — Guard stance active
-#   slot_is_dodging                   — Dodge stance active
-#   slot_is_stealthed                 — Stealth active (includes +30 hit)
-#   slot_retaliate_hit                — retaliation damage if hit
-#   slot_retaliate_miss               — retaliation damage if missed
-#   slot_retaliate_{hit,miss}_agg     — aggravated variants
-#
-# ── Per-slot spirit-damage capability ────────────────────────────
-#   slot_incorporeal_spirit           — slot character is incorporeal;
-#                                       physical attacks no-op unless the
-#                                       attacker has _can_damage_spirit.
-#   slot_can_damage_spirit            — slot character can land physical
-#                                       hits on incorporeal targets.
-#
-# ── Tier variables (vars on the POD_combat_slot story) ───────────
-# Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). Live stats are
-# rebuilt from base + sum of active tier magnitudes. See pod_combat_tier_effects.txt.
-#   slot_{stat}_{direction}_{duration}_tier
-#     stat:      soak | hit
-#     direction: buff | debuff
-#     duration:  round (cleared at round end) | combat (lasts the fight)
-#
-# ── Workspace (acting combatant + current target) ────────────────
-# Mirrors the per-slot fields for whoever is currently acting / targeted.
-# Lives on the combat host so saved scopes / scripted-effect parameters
-# can read it without crossing into the slot-story scope.
-#   pod_combat_actor_*                — actor's stats (loaded from current_actor slot)
-#   pod_combat_target_*               — target's stats (loaded from selected_target slot)
-# The same tier, stance, retaliation, spirit, and base_* fields exist on
-# both sides — load/save effects walk slot stories and write into / read
-# back from the matching workspace mirror.
-#   pod_combat_current_hit_chance     — active attacker's hit chance this attack
-#
-# ── Result / display ─────────────────────────────────────────────
-#   pod_combat_winner                 — character ref: who won (or team leader)
-#   pod_combat_loser                  — character ref: who lost
-#   (the move story is no longer host-side; push_log receives it as
-#    an explicit MOVE_STORY parameter from POD_execute_combat_move §16)
-#   pod_combat_last_damage            — last HP damage amount dealt
-#   pod_combat_last_heal_amount       — last HP heal amount applied
-#   pod_combat_last_morale_damage_amount — last morale damage amount
-#   pod_combat_last_morale_heal_amount   — last morale heal amount
-#   pod_combat_last_result_code       — last action's resolved outcome
-#                                       as a single int (B1):
-#                                          -1 = no result yet (sentinel)
-#                                           0 = HP damage
-#                                           1 = guard-blocked
-#                                           2 = soaked
-#                                           3 = missed
-#                                           5 = dodged
-#                                           6 = HP damage + retaliation
-#                                           7 = HP damage + retaliate soaked
-#                                           8 = utility (no damage)
-#                                           9 = morale damage only
-#                                          10 = HP heal
-#                                          11 = morale heal
-#                                          12 = stealthed
-#                                       Replaces the 11 pod_combat_last_was_*
-#                                       presence flags this used to use.
-#
-# ── AI move-history (per-actor, NOT per-host) ────────────────────
-# These live on the acting AI character object — saved by
-# POD_execute_combat_move via save_actor_to_slot, cleared during
-# slot cleanup (pod_combat_group_cleanup_effect). They are STORY
-# REFERENCES (point at a POD_combat_move scope), not flags. The AI
-# selector uses `scope:move = scope:ai_actor.var:pod_combat_ai_last_move`
-# style scope-equality checks for anti-repetition penalties.
-#   pod_combat_ai_last_move           — story ref: most recent move
-#   pod_combat_ai_prev_move           — story ref: 2 turns ago
-#   pod_combat_ai_prev2_move          — story ref: 3 turns ago
-#
-# Hit chance formula: 60 + (own prowess − target prowess) / 2, clamped 20-95.
-# ────────────────────────────────────────────────────────────────────
+# Static constants and script values for the combat minigame.
+# The per-move data lives in pod_combat_move_list_effects.txt
+# For the variable namespace, slot-story field catalogue,
+# workspace pattern, hit-chance formula, and result-code map, see
+# COMBAT_REFERENCE.info §1 (Variable namespace) and §4 (Result codes).
 
 ###### CONSTANTS ######
 # Tier magnitudes — small/medium/large = ±10/±20/±30, applied by the
@@ -427,12 +279,96 @@ pod_combat_slot_hit_debuff_combat_mag_sv = {
 	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
 }
 
-# Loadout bookkeeping — counts the equipped moves per combat_category
-# and in total by iterating the character's pod_combat_loadout variable
-# list.
+# ────────────────────────────────────────────────────────────────────
+# Move-story tier magnitudes for combat-log riders.
 #
-# Called on character scope. The GUI reads them via
-# GetPlayer.MakeScope.ScriptValue('...').
+# The eight slot mag SVs above read slot-scoped tier vars
+# (slot_X_buff/debuff_round/combat_tier) and feed the per-slot stat
+# recalc. The four SVs below run against a MOVE STORY scope and
+# collapse round-or-combat into a single per-stat magnitude — used by
+# the combat log's pod_combat_log_buff_X_buff / _X_debuff loc strings
+# to surface "+30% Soak" instead of just "+Soak".
+#
+# Move stories carry either soak_buff_round_tier OR soak_buff_combat_tier for 
+# a given stat (never both — a move's design is round-duration or combat-duration, 
+# not both at once). The SV chains six `if` branches over both duration vars,
+# each setting `value = @<size>_mag` based on the matched tier. Plain
+# `if` (not `else_if`) matches the existing slot-mag-SV pattern; mutual
+# exclusivity is guaranteed by the per-move tier-var pair invariant.
+#
+# Using @combat_tier_*_mag rather than tier × 10 keeps the magnitude
+# linked to the same constants the slot SVs use, so a balance pass that
+# changed medium from 20 to 25 would propagate to the log row text
+# without needing this block to be re-edited.
+
+pod_combat_move_soak_buff_mag_value = {
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 3 } value = @combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+
+pod_combat_move_soak_debuff_mag_value = {
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 3 } value = @combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+
+pod_combat_move_hit_buff_mag_value = {
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 3 } value = @combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+
+pod_combat_move_hit_debuff_mag_value = {
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 3 } value = @combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 1 } value = @combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 2 } value = @combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
+}
+
+# ────────────────────────────────────────────────────────────────────
+# Combat log: display gate for the elemental damage-source rider
+# (the fire / silver / sun / holy / etc. icon that follows the wound
+# box on damage rows).
+#
+# Suppresses the icon on attack-failure rcodes (1 blocked, 3 missed,
+# 5 dodged, 12 stealth-missed). The icon describes the elemental
+# flavor of damage that WAS delivered — on a miss / block / dodge no
+# damage of any element landed, so showing "fire" next to a Blocked
+# row adds noise without information. Damage that lands (rcode 0 / 6
+# / 7), morale damage (9), heals (10 / 11), and utility moves (8)
+# keep the icon if their move declared one, since those rows still
+# benefit from the elemental flavor cue.
+#
+# Caller scope must be a combat-log entry story (the var:result_code
+# read below resolves against entry.var). Returns 1 to show, 0 to
+# hide; the consumer gates with GreaterThan_CFixedPoint > 0.
+
+pod_combat_log_show_damage_source_value = {
+	value = 1
+	if = {
+		limit = {
+			OR = {
+				var:result_code = 1   # blocked
+				var:result_code = 3   # missed
+				var:result_code = 5   # dodged
+				var:result_code = 12  # stealth-missed
+			}
+		}
+		value = 0
+	}
+}
 
 pod_combat_atk_count = {
 	every_in_list = {

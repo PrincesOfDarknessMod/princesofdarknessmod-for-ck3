@@ -1,6 +1,15 @@
 # Combat-PoD Manual Move Authoring Guide
 
-This guide covers adding a new combat move
+This guide covers adding a new combat move by hand — useful when a
+move's logic doesn't fit the CSV schema or when prototyping outside
+the generator pipeline.
+
+For the system internals (variable namespace, execution phases,
+result codes, tier model, capability flags, design decisions), see
+`COMBAT_REFERENCE.info`. This guide focuses on the
+authoring workflow; the reference doc is the source of truth for
+what each piece does at runtime.
+
 ---
 
 ## The four artifacts every move needs
@@ -165,12 +174,24 @@ parse-time substitution; both forms work identically.
 
 | Setter | Parameter | Affects |
 |---|---|---|
-| `POD_combat_move_set_attack_type = { VALUE = X }` | `physical` / `supernatural` / `mental` | Pipeline shape. **Physical** = full pipeline (stealth/dodge/hit-roll/guard/soak). **Supernatural** = stealth + dodge only (auto-hit, skips guard, skips soak roll's guard variants). **Mental** = no HP damage path; use `morale_damage` instead. **Default if omitted: physical.** Don't emit this for physical moves — leaving it absent is the canonical way to declare physical. |
+| Capability flags (see "Example Pipeline via capability tags" below) | one or more `POD_combat_move_set_flag = { NAME = X }` calls | Compose the four capability tags (`checks_spirit_gate`, `requires_hit_roll`, `checks_guard`, `checks_stance`) to express the pipeline. The runtime reads these directly; no separate attack-type variable exists at runtime. |
 | `POD_combat_move_set_damage_source = { VALUE = X }` | `fire` / `cold` / `lightning` / `sun` / `silver` / `gold` / `holy` / `balefire` | Damage flavor flag, routes to the matching PoD death_reason. Forces aggravated wounds against vulnerable splats — silver vs werewolves, sun vs vampires, holy vs the unholy, etc. **Omit for generic damage** with no special routing. |
 | `POD_combat_move_set_hp_damage = { VALUE = N }` | integer | HP damage dealt to the target. Defaults to superficial. |
 | `POD_combat_move_set_damage_type_aggravated = yes` | (no params) | Forces the move's HP damage to land as aggravated regardless of source. Use for moves that should be unsoakable / hard to heal. |
-| `POD_combat_move_set_morale_damage = { VALUE = N }` | integer | Morale damage. Routes through its own auto-hit pipeline; ignores `attack_type`/`damage_source`. Spills over as Mental Strain on the target character (`pod_combat_morale_stress_multiplier` = 5x). |
+| `POD_combat_move_set_morale_damage = { VALUE = N }` | integer | Morale damage. Routes through its own auto-hit pipeline; ignores capability flags / `damage_source`. Spills over as Mental Strain on the target character (`pod_combat_morale_stress_multiplier` = 5x). |
 | `POD_combat_move_set_self_damage = { VALUE = N }` | integer | HP damage dealt to the **actor** (themselves) when the move fires. Always superficial, soakable, ignores stances. Used for reckless attacks. |
+
+#### Example Pipeline via capability tags
+
+Four capability tags help compose the pipeline shape:
+
+| Pipeline | Tags to set | Behaviour |
+|---|---|---|
+| **Physical** (default — full pipeline) | `checks_spirit_gate`, `requires_hit_roll`, `checks_guard`, `checks_stance` | Spirit gate + stealth/dodge + hit roll + guard + soak. Can be soaked, dodged, guarded, missed against incorporeal targets. |
+| **Supernatural** (auto-hit, skips guard) | `checks_stance` only | Stealth + dodge only. Auto-hits past evasion, ignores guard, soak still applies. Hits incorporeal targets. |
+| **Mental** (morale-only) | `checks_stance` only + omit `hp_damage`, set `morale_damage` instead | Same flag profile as supernatural; differentiated by routing morale damage through its own pipeline. |
+
+`POD_combat_move_set_flag = { NAME = checks_spirit_gate }` etc. is the canonical way to set each. To author a guard-bypassing physical strike, set `checks_spirit_gate`, `requires_hit_roll`, `checks_stance` (drop `checks_guard`). To author an always-hits physical strike, drop `requires_hit_roll`.
 
 ### Healing
 
@@ -178,6 +199,26 @@ parse-time substitution; both forms work identically.
 |---|---|---|
 | `POD_combat_move_set_hp_heal = { VALUE = N TYPE = X }` | integer + `superficial` / `aggravated` | Heals the target. `superficial` only refills below the aggravated ceiling; `aggravated` reduces aggravated wound boxes first then spills into superficial. |
 | `POD_combat_move_set_morale_heal = { VALUE = N }` | integer | Restores morale. Caps at the morale max (20). |
+
+### Rider conditions (gate heal / morale damage / self-damage on outcome)
+
+By default a heal, morale-damage, or self-damage payload fires
+unconditionally when its setter is present. To make any of those
+payloads fire only on a specific outcome of the move's primary
+HP-damage step, set the matching condition flag:
+
+| Setter | Parameter | Affects |
+|---|---|---|
+| `POD_combat_move_set_heal_condition = { VALUE = X }` | `always` / `on_hp_damage` / `on_contact` / `on_miss` | Gates `hp_heal` on the §6 outcome. Default = always. Drain attacks (vampire bite, soul-rend) use `on_hp_damage`. |
+| `POD_combat_move_set_morale_damage_condition = { VALUE = X }` | same flags | Gates `morale_damage` on the §6 outcome. Default = always. Use `on_hp_damage` for "morale damage rides on a landed wound", `on_miss` for "intimidation only fires on the whiff", etc. |
+| `POD_combat_move_set_self_damage_condition = { VALUE = X }` | same flags | Gates `self_damage` on the §6 outcome. Default = always (matches the existing reckless-charge pattern). Use `on_miss` for "you only hurt yourself when you whiff." |
+
+| Flag value | Fires when the §6 outcome is |
+|---|---|
+| `always` | any (default if condition unset) |
+| `on_hp_damage` | HP damage landed (codes 0 / 6 / 7) |
+| `on_contact` | any physical contact (codes 0 / 1 / 2 / 6 / 7 — includes guard-blocked and soaked) |
+| `on_miss` | miss / dodge / stealth (codes 3 / 5 / 12) |
 
 ### Tier buffs and debuffs
 
@@ -227,16 +268,25 @@ Available flag names:
 | `set_guard` | Activates Guard stance on the actor (next physical attack against them is blocked). |
 | `dodge` | Activates Dodge stance (next attack of any type auto-misses). |
 | `stealth` | Activates Stealth (next incoming attack auto-misses + actor's next attack gets +30 hit). |
-| `bypass_guard` | This attack ignores the target's Guard stance. |
-| `bypass_dodge` | This attack ignores the target's Dodge stance. |
+| `bypass_dodge` | This attack ignores the target's Dodge stance — strips the stance from the target's workspace before the contact resolver reads it. |
 | `bypass_stealth` | This attack breaks the target's Stealth (and reverses the +30 hit bonus). |
 | `remove_guard` | Strips the target's Guard stance without dealing damage. AI gets +15 weight when target is guarding. |
 | `retaliate_if_hit` | Sets a counter-attack stance — if the actor is hit (or contacted via guard/soak), they deal `retaliate_damage` back to the attacker. |
 | `retaliate_if_missed` | Same, but fires when the attacker misses, dodges, or whiffs against stealth. |
-| `drain` | Marks an `hp_heal` as life-stealing — the heal only triggers if the attack actually landed. Pair with `hp_damage` and `hp_heal`. Equivalent to `heal_condition = on_hp_damage`; the generator emits the rider condition automatically when this token is present. |
-
-**Aggravated retaliation:** the generator emits `POD_combat_move_set_retaliate_agg = yes` whenever a retaliation move's `damage_type` column is set to `Aggravated`. There is no `retaliate_agg` token in `special` — the parser doesn't recognise it. Drive aggravated counter-strikes through the existing `damage_type` column instead.
+| `drain` | Marks an `hp_heal` as life-stealing — authors should pair this with `POD_combat_move_set_heal_condition = { VALUE = on_hp_damage }` so the heal actually gates on a landed hit. (Setting just the `drain` flag without the heal_condition setter only sets the flag — the runtime gates on heal_condition, not on `drain` directly.) |
 | `is_starter_move` | Marks the move as part of the PC's default loadout. The configure decision seeds these. Also signals to the AI selector "this is a generic baseline move" — the +10 trait-gate bonus does NOT apply. Reserve for the few baseline starters every character should have. |
+
+**Note on guard bypass.** There's no `bypass_guard` flag — a
+guard-bypassing physical strike is authored by *omitting*
+`checks_guard` from the capability tags. See "Pipeline shape via
+capability tags" above.
+
+**Aggravated retaliation.** Pair `POD_combat_move_set_retaliate_agg = yes`
+with `POD_combat_move_set_retaliate_damage = { VALUE = N }` and
+the matching `retaliate_if_hit` / `retaliate_if_missed` flag.
+The `retaliate_agg` setter only marks the counter-attack as
+aggravated; the actor's own primary damage is independent
+(controlled by `POD_combat_move_set_damage_type_aggravated`).
 
 ---
 
@@ -315,16 +365,11 @@ want the gate to be silent.
 
 ## Localization keys
 
-Three keys per move, in any `.yml` file under
-`devpod/localization/english/`. The file must start with a UTF-8 BOM
-and the `l_english:` header.
+Three keys per move, in any `\localization\english\gui\POD_combat_l_english.yml`. 
 
-```yaml
-l_english:
  POD_combat_move_<skill_key>:0 "Display Name"
  POD_combat_move_<skill_key>_desc:0 "[PODCombatMoveDesc('POD_combat_move_<skill_key>')]"
  POD_combat_move_<skill_key>_tooltip:0 ""
-```
 
 | Key | What it does |
 |---|---|
@@ -359,7 +404,7 @@ POD_init_combat_move = {
 ```
 scope:new_combat_move = {
     POD_combat_move_set_energy_cost = { VALUE = @energy_cost_minor }  # 2 Blood
-    POD_combat_move_set_attack_type = { VALUE = supernatural }
+    POD_combat_move_set_flag = { NAME = checks_stance }
     POD_combat_move_set_hp_damage = { VALUE = @damage_minor }           # 2 damage per enemy
     POD_combat_move_set_damage_type_aggravated = yes
     POD_combat_move_set_flag = { NAME = bypass_dodge }
@@ -394,10 +439,9 @@ POD_combat_move_breath_of_basilisk = {
 A Setite vampire with Serpentis at advanced level, who has unlocked
 the breath_of_the_basilisk perk, sees this in their PWR loadout slot.
 Costs 6 AP (a full turn) + 2 Blood. Deals 2 aggravated damage to
-*every* enemy in slots 5-9, supernatural pipeline so it auto-hits
-through their hit chance, and ignores their Dodge stance. Excellent
-crowd-clear at the cost of being prohibitively expensive on a
-single-enemy fight.
+*every* enemy in slots 5-9, through their hit chance, and ignores their
+Dodge stance. Excellent crowd-clear at the cost of being prohibitively
+expensive on a single-enemy fight.
 
 ---
 
@@ -530,8 +574,7 @@ signature mental attacks (Intimidate-style moves).
 | 12 | PWR moves — situational power plays |
 | 15 | ATK moves — primary damage dealing |
 
-These match the `AI_WEIGHT_DEFAULTS` map in the generator. Hand-authored
-moves should follow the same convention so the AI behaves predictably.
+Moves should follow the same convention so the AI behaves predictably.
 Override only when the move is exceptionally strong or weak relative to
 its category baseline (e.g., a 6-AP signature move might warrant AI_WEIGHT
 20 to make sure the AI considers it).
@@ -610,15 +653,15 @@ deliberately.
 
 ### "I want a basic single-enemy attack"
 
-Set `attack_type = physical` (or omit), `hp_damage`, and TARGETING =
-single_enemy. Damage source optional.
+Set the four physical-pipeline tags (`checks_spirit_gate`,
+`requires_hit_roll`, `checks_guard`, `checks_stance`), set `hp_damage`,
+and TARGETING = single_enemy. Damage source optional.
 
 ### "I want a discipline attack" (vampire/fera/wraith etc.)
 
-Same as above but add `energy_cost`, set `attack_type = supernatural`
-to skip guard, and gate the decision on the relevant
-trait+perk. Often pair with a `damage_source` flavor (fire for Lure of
-Flames, etc.) to make it aggravated against vulnerable splats.
+Same as above but add `energy_cost`, and gate the decision on the relevant t
+rait+perk. Often pair with a `damage_source` flavor (fire for Lure of Flames, etc.) 
+to make it aggravated against vulnerable splats.
 
 ### "I want an AoE attack"
 
@@ -690,7 +733,7 @@ Before testing in-game, verify:
 - [ ] If the move deals HP damage, you set `hp_damage`. If it heals, you set `hp_heal` (with `TYPE`). If it buffs, you set a tier. If it stances, you set a flag. (A move with no setters compiles but does nothing when fired.)
 - [ ] `team_enemy` / `team_ally` AoE moves use a damage value designed for *per-enemy* damage, not summed.
 - [ ] If you set `retaliate_damage`, you also set the matching `retaliate_if_hit` or `retaliate_if_missed` flag.
-- [ ] If the move is supernatural (auto-hit), you set `attack_type = supernatural` AND removed any hit-chance-related comments (a low hit chance won't matter — the move auto-hits).
+- [ ] Verify the capability tags reflect goal for example `checks_stance`,`requires_hit_roll`, `checks_guard`. 
 
 In-game smoke test:
 

@@ -1,0 +1,531 @@
+# POD Combat — System Reference
+
+Single source of truth for the combat minigame's runtime model. Code
+files reference sections of this doc instead of re-stating the
+contract in their own headers.
+
+If you're reading this for the first time, scan the **Architecture
+overview** below, then jump to whatever section the file you opened
+points at.
+
+---
+
+## Architecture overview
+
+Group combat uses a **10-slot system** (slots 0-4 = player team, 5-9
+= enemy team). Per-combatant state lives on `POD_combat_slot`
+story_cycle scopes: one story per slot, created at combat init and
+cleaned up at combat end. Pointer variables `pod_combat_slot_0..9`
+on the combat host (the PC) hand back the matching story.
+
+A shared **workspace** (`pod_combat_actor_*` / `pod_combat_target_*`)
+holds whichever combatant is acting and whichever one is the current
+target; the workspace is loaded from / saved back to the appropriate
+slot story at each action boundary by
+`pod_combat_{load,save}_workspace_effect`. Skill effects read and
+write only the workspace, so the same code runs for the
+PC, AI coterie, the primary opponent, and knights.
+
+Combat hits four supporting story_cycle scopes besides slots:
+`POD_combat_move` (the move catalogue), `POD_combat_log_entry` (rows
+in the rolling log), `POD_combat_persistent` (encounter-level state
+held on the host), and the per-actor "AI move history" pointers
+saved on the acting AI character.
+
+**Hit chance formula:** `60 + (own prowess − target prowess) / 2`,
+clamped `20-95`.
+
+---
+
+## §1 Variable namespace
+
+### Core state (on the combat host / PC character)
+
+| Variable | Meaning |
+|---|---|
+| `pod_combat_active` | flag: combat is in progress |
+| `pod_combat_is_over` | flag: combat is over (re-entry guard) |
+| `pod_combat_mode` | 0=1v1, 1=1vN, 2=Nv1, 3=NvN |
+| `pod_combat_round` | current round number |
+| `pod_combat_current_actor` | slot index of the acting combatant (0-9) |
+| `pod_combat_current_ap` | AP remaining this turn |
+| `pod_combat_current_turn_side` | 0 = player-team turn, 1 = enemy-team turn |
+| `pod_combat_enemy_team_size` | number of occupied enemy slots (5-9); used by the slots-6-9 fill pass to gate how many enemies still fit |
+| `pod_combat_pc_target` | the PC's persistent target slot (1-9) |
+| `pod_combat_selected_target` | slot loaded into opponent workspace |
+| `pod_combat_slot_0..9` | pointer var per slot; resolves to the slot's `POD_combat_slot` story scope. Unset for unfilled slots. |
+| `pod_combat_active_slots` | variable list of slot stories currently in play (filled slots only, in slot-index ascending order). Iterated by every dispatch loop instead of unrolling 0..9. |
+
+### Per-slot stats (vars on each `POD_combat_slot` story)
+
+| Variable | Meaning |
+|---|---|
+| `slot_index` | 0..9, baked at slot creation |
+| `slot_char` | character ref occupying the slot |
+| `slot_alive` | 1 while in play, 0 when KO'd |
+| `slot_morale` | current Morale |
+| `slot_prowess` | current prowess |
+| `slot_soak` | live soak chance (0-100) |
+| `slot_base_soak` | soak before any tier effects |
+| `slot_hit_chance` | live hit chance (20-95) |
+| `slot_base_hit_chance` | hit chance before any tier effects |
+| `slot_initiative` | initiative roll this round |
+| `slot_init_bonus` | next-round initiative modifier |
+| `slot_ap_drain` | AP drained from next turn |
+| `slot_energy_used` | counter for AI energy-attrition weighting |
+| `slot_turn_order` | turn-rank within the round (1 = first); stamped by `pod_combat_calc_turn_orders_effect` after initiative roll |
+| `slot_has_acted` | 1 once the slot's turn resolves this round; reset to 0 by `pod_combat_calculate_initiative_effect` at the start of every round |
+
+Team affiliation is computed from `slot_index` (0-4 = player team,
+5-9 = enemy team) — not stored as a per-slot variable.
+
+**Health is NOT stored on the slot story.** Live script values
+derive HP from each slot character's PoD wound vars. The slot
+story only holds the `slot_char` pointer; the SVs read
+`POD_empty_damage_boxes` / `POD_total_damage_boxes` /
+`POD_health_aggravated_damage_num` off the character:
+
+| SV | Meaning |
+|---|---|
+| `pod_combat_slot_hp_value` | empty wound boxes (HP remaining) |
+| `pod_combat_slot_max_hp_value` | wound track length (max HP) |
+| `pod_combat_slot_agg_damage_sv` | aggravated wound boxes |
+| `pod_combat_slot_total_damage_sv` | total wound boxes filled |
+
+### Per-slot stance flags (on the `POD_combat_slot` story)
+
+All persist across rounds; only cleared when consumed or at combat end.
+
+| Variable | Meaning |
+|---|---|
+| `slot_is_guarding` | Guard stance active |
+| `slot_is_dodging` | Dodge stance active |
+| `slot_is_stealthed` | Stealth active (includes +30 hit) |
+| `slot_retaliate_hit` | retaliation damage if hit |
+| `slot_retaliate_miss` | retaliation damage if missed |
+| `slot_retaliate_{hit,miss}_agg` | aggravated variants |
+
+### Per-slot spirit-damage capability
+
+| Variable | Meaning |
+|---|---|
+| `slot_incorporeal_spirit` | slot character is incorporeal; physical attacks no-op unless the attacker has `slot_can_damage_spirit` |
+| `slot_can_damage_spirit` | slot character can land physical hits on incorporeal targets |
+
+### Tier variables (on the `POD_combat_slot` story)
+
+Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). Live stats
+are rebuilt from base + sum of active tier magnitudes. See the
+**Tier system** section below.
+
+```
+slot_{stat}_{direction}_{duration}_tier
+  stat:      soak | hit
+  direction: buff | debuff
+  duration:  round (cleared at round end) | combat (lasts the fight)
+```
+
+### Workspace (acting combatant + current target)
+
+Mirrors the per-slot fields for whoever is currently acting / targeted.
+Lives on the combat host so saved scopes / scripted-effect parameters
+can read it without crossing into the slot-story scope.
+
+| Variable | Meaning |
+|---|---|
+| `pod_combat_actor_*` | actor's stats (loaded from `current_actor` slot) |
+| `pod_combat_target_*` | target's stats (loaded from `selected_target` slot) |
+| `pod_combat_current_hit_chance` | active attacker's hit chance this attack |
+
+The same tier, stance, retaliation, spirit, and `base_*` fields exist
+on both sides — load/save effects walk slot stories and write into /
+read back from the matching workspace mirror.
+
+### Result / display
+
+| Variable | Meaning |
+|---|---|
+| `pod_combat_winner` | character ref: who won (or team leader) |
+| `pod_combat_loser` | character ref: who lost |
+| `pod_combat_last_damage` | last HP damage amount dealt |
+| `pod_combat_last_heal_amount` | last HP heal amount applied |
+| `pod_combat_last_morale_damage_amount` | last morale damage amount |
+| `pod_combat_last_morale_heal_amount` | last morale heal amount |
+| `pod_combat_last_result_code` | last action's resolved outcome (see **Result codes** section) |
+
+The move story is no longer host-side; `push_log` receives it as an
+explicit `MOVE_STORY` parameter from `POD_execute_combat_move §16`.
+
+### AI move-history (per-actor, NOT per-host)
+
+These live on the acting AI character object — saved by
+`POD_execute_combat_move` via `save_actor_to_slot`, cleared during
+slot cleanup (`pod_combat_group_cleanup_effect`). They are STORY
+REFERENCES (point at a `POD_combat_move` scope), not flags. The AI
+selector uses `scope:move = scope:ai_actor.var:pod_combat_ai_last_move`
+style scope-equality checks for anti-repetition penalties.
+
+| Variable | Meaning |
+|---|---|
+| `pod_combat_ai_last_move` | story ref: most recent move |
+| `pod_combat_ai_prev_move` | story ref: 2 turns ago |
+| `pod_combat_ai_prev2_move` | story ref: 3 turns ago |
+
+---
+
+## §2 Execution phases — `POD_execute_combat_move`
+
+Single generic effect that executes any combat move by reading
+attributes off its story_cycle. Lives in
+`pod_combat_move_effects.txt`. Called from:
+
+- `pod_combat_execute_move` SGUI (mid-combat PC button)
+- `pod_combat_ai_select_and_execute_move_effect` (AI turn)
+
+**Caller scope:** combat host (the PC). The workspace alias pair
+(`pod_combat_actor_*` / `pod_combat_target_*`) is loaded against
+the acting character's slot before this fires; "actor" = whoever is
+taking the action this turn (PC OR any AI combatant), "target" = the
+current single-target (rotates per AoE iteration / AI swap). The
+workspace is assumed loaded by the caller.
+
+Phases run top-to-bottom. The cross-phase invariants below are
+load-bearing — reordering will silently break behavior.
+
+| § | Phase | Notes |
+|---|---|---|
+| §0 | Capture combat host scope | saved as `scope:combat_host` so AoE iteration bodies can re-enter host scope without their own root-save dance |
+| §1 | AP spend | must precede §6 (committed move) |
+| §2 | Result-flag reset + log metadata | must precede every §3-§15 write |
+| §3 | Energy cost | runs on actor scope (not host) |
+| §4 | CK3 resource costs | PC only (slot 0) |
+| §5 | Target stance bypass | strips workspace target stances (`bypass_dodge` / `bypass_stealth` / `remove_guard`) before §6 reads |
+| §5b | AoE debuff pre-broadcast | strips slot stances; must precede §6 so per-target damage iteration sees the post-strip state |
+| §6 | HP damage dispatch | reads §5 / §5b stance state. Writes `pod_combat_last_result_code` on the host (consumed by the rider gates §7 / §8 / §9) |
+| §7 | Morale damage | independent of §6 in pipeline, but rider-gated by `morale_damage_condition`. Default = always; set to `on_hp_damage` / `on_contact` / `on_miss` to make the morale payload conditional |
+| §8 | Self-damage | rider-gated by `self_damage_condition`. Default = always (current reckless-charge behavior). MUST preserve §6 result flags via the snapshot/restore pattern even when the rider fires, since the self-hit writes its own `pod_combat_last_*` state inside the call |
+| §9 | HP heal | rider-gated by `heal_condition`. Default = always; legacy drain moves emit `heal_condition = on_hp_damage` at codegen so they still gate on a landed hit. MUST run AFTER §6 for the rider gate to read the right outcome |
+| §10 | Morale heal | currently always-fire (no rider condition wired). Symmetric extension is one column away if a future move needs it |
+| §11 | Tier buffs/debuffs | applied to actor / target. Should precede §12 so a "buff yourself then guard" composes as expected (stat-then-stance) |
+| §12 | Stance flags (`set_guard` / `dodge` / `stealth`) | applied to actor AFTER damage, so a "set guard then attack" attacks first then guards (intuitive ordering for the end-of-turn defensive stance) |
+| §12b | AoE buff broadcast | extends §11/§12 to allies on `team_ally` moves; runs after actor's own buffs are written |
+| §13 | Retaliation setup | actor-side; the `retaliate_*` workspace slots written here arm reactions for the NEXT turn's §15 to consume |
+| §14 | Parametric flags (AP gain/drain, `initiative_debuff`) | order-independent |
+| §15 | Reaction phase | fires reactions armed by the PREVIOUS turn's §13. Each reaction is gated by a result-code partition trigger (`pod_combat_result_code_indicates_*`) that reads §6's outcome on this scope. Today: retaliate-on-contact (hp damage / guard blocked / soaked all qualify — thorns semantics) and retaliate-on-evasion (miss / dodge / stealth all qualify — riposte semantics). See **Reaction system** below |
+| §16 | Push log | reads ALL prior flags + amount fields. MUST run last |
+
+### Anti-invariants — orderings that MUST NOT happen
+
+- §6 before §5/§5b — damage hits unstripped stances.
+- §7/§8/§9 before §6 — rider gates read `pod_combat_last_result_code`,
+  which is set by §6. Reordering breaks `on_hp_damage` / `on_contact` /
+  `on_miss` conditions.
+- §15 before §6 — retaliation reads stale state from prior move.
+- §16 anywhere but last — log captures partial result, missing the
+  rider amounts the later phases populated.
+
+### Adding a new phase
+
+Pick a numeric position, document its dependencies in this section,
+and update the result-flag reset block (§2) and the cleanup block in
+`pod_combat_cleanup_effect` if it produces a new flag.
+
+---
+
+## §3 Slot lifecycle
+
+`POD_combat_slot` story type (declared in `POD_story_cycle_combat.txt`)
+is the sole data container for per-combatant state. Lifecycle helpers
+live in `pod_combat_slot_effects.txt`:
+
+- `pod_combat_create_slot_stories_effect` runs once at combat start
+  from `pod_combat_initialize_effect`, BEFORE any per-slot init runs
+  (so `pod_combat_init_slot_from_character_effect` can read/write
+  the slot story for the slot it's populating).
+- `pod_combat_clear_slot_stories_effect` runs once at combat end
+  from `pod_combat_group_cleanup_effect`. `end_story` takes every
+  slot var with it, so no per-field cleanup pass is needed.
+
+**Caller scope:** the combat host (the PC). All saves / list adds
+happen on the host; the actual stories live on Charon
+(`POD_wraith_01`) like the move catalogue and log entries.
+
+### Slot creation field defaults
+
+`pod_combat_create_one_slot_story_effect` initializes each slot
+story with:
+
+| Field | Default | Purpose |
+|---|---|---|
+| `slot_index` | the slot's integer position (0-9) | baked at creation |
+| `slot_alive` | 1 | the slot is "occupied" until KO'd; init effect for individual fields will overwrite if the slot is unfilled |
+| `slot_morale` | 0 | overwritten from character if filled |
+| `slot_prowess` | 0 | same |
+| `slot_soak` | 0 | same |
+| `slot_energy_used` | 0 | same |
+| `slot_has_acted` | 0 | same |
+
+These fields are pure values (no absence-as-signal semantics) so a
+default of 0 is safe — readers gate on `has_variable =
+pod_combat_slot_$SLOT$` (the slot exists) and just read the value.
+
+### Fields NOT pre-initialized (deliberately absence-as-signal)
+
+| Field | Absence semantics |
+|---|---|
+| `slot_char` | meaningful only as a scope reference; absence = "slot is empty" |
+| `slot_base_soak` | gate for the round-end soak revert in `pod_combat_reset_one_slot_soak_effect` |
+| `slot_hit_chance` | gate for the synthesis fallback in `pod_combat_slot_hit_chance_value` (the fallback fires when `hit_chance` hasn't been written yet by `calculate_all_hit_chances`) |
+| `slot_base_hit_chance` | gate in `pod_combat_recalc_slot_stats_effect` |
+| `slot_initiative` | set during initiative calc (alive slots only); presence distinguishes "filled-and-rolled this round" from "unfilled or pre-calc" |
+| `slot_turn_order` | turn rank within the round, stamped by `pod_combat_calc_turn_orders_effect` after initiative is rolled |
+| `slot_init_bonus` | presence = active initiative bonus to fold into the next initiative roll |
+| `slot_ap_drain` | presence = pending AP drain to apply on the actor's next turn |
+| `slot_incorporeal_spirit` | presence = combatant is incorporeal; physical attacks no-op unless the attacker has `slot_can_damage_spirit` |
+| `slot_can_damage_spirit` | presence = combatant can damage incorporeal targets |
+| `slot_is_guarding` / `_is_dodging` / `_is_stealthed` | stance flags |
+| `slot_retaliate_*` | retaliate state |
+| `slot_*_tier` | tier vars; `has_variable` detects "no buff active" |
+
+Readers of these fields use per-field `has_variable` checks.
+
+---
+
+## §4 Result codes
+
+Single-int outcome model held in `pod_combat_last_result_code` on
+the host. Replaces an earlier 11-flag `pod_combat_last_was_*` scheme
+(see **Internal milestone glossary** § B1). Helpers along the damage
+and heal pipelines write directly to this var; `push_log` reads it
+unconditionally and dispatches to the matching log loc key.
+
+| Code | Outcome |
+|---:|---|
+| -1 | sentinel — "no code yet" |
+| 0 | HP damage |
+| 1 | guard-blocked |
+| 2 | soaked |
+| 3 | missed |
+| 4 | reserved (was "countered"; never written by current code, kept reserved so the existing rcode numbering doesn't shift if a future move type needs the slot) |
+| 5 | dodged |
+| 6 | HP damage + retaliation triggered |
+| 7 | HP damage + retaliation soaked |
+| 8 | utility move applied (no damage; default if no helper writes a code) |
+| 9 | morale damage only |
+| 10 | HP healed |
+| 11 | morale healed |
+| 12 | stealth-triggered auto-miss (distinct from rcode 5 dodged so the loc line links to the Stealth concept, not Dodge) |
+
+**Sentinel handling:** Callers default `pod_combat_last_result_code`
+to -1 in §2 of `POD_execute_combat_move`, then helpers write their
+code as the move resolves. `push_log` defaults to 8 when the final
+value is still -1 (utility / no-op moves).
+
+**Priority semantics:** Most damage-side outcomes are SET by a single
+mutually-exclusive branch in the damage pipeline, so a plain
+`set_variable` is sufficient. The exceptions:
+
+- Retaliation OVERLAYS damage: `0→6`, `2→7` conditionally
+  (`pod_combat_set_result_code_promote_retaliation`).
+- Secondary effects (morale damage, heal) only set their code if no
+  primary HP-damage code has fired
+  (`pod_combat_set_result_code_if_unset`).
+
+**Self-damage snapshot/restore.** §8 stashes
+`pod_combat_last_damage` + `pod_combat_last_result_code` into
+`pod_combat_pre_self_last_damage` + `pod_combat_pre_self_result_code`,
+fires the bypass-guard damage helper (which overwrites both with the
+self-hit's outcome), then restores from the snapshot so the log line
+reflects the MAIN hit's number and rcode. The B1 result-code
+consolidation cut the snapshot from three fields to two; the
+restore-then-call pattern itself is still load-bearing.
+
+**Result-code partition triggers** (in
+`pod_combat_move_execution_triggers.txt`) compose against the rcode
+to express the rider/reaction gates:
+
+- `pod_combat_result_code_indicates_contact_trigger` — codes
+  0/1/2/6/7 (HP damage / blocked / soaked / retaliation overlays).
+- `pod_combat_result_code_indicates_miss_trigger` — codes 3/5/12
+  (miss / dodge / stealth).
+- `pod_combat_result_code_indicates_hp_damage_trigger` — codes
+  0/6/7 (a wound went through).
+
+### Log dispatcher
+
+`PODCombatLogResultText` customizable_localization
+(`pod_combat_log_custom_loc.txt`) consumes three saved scopes:
+
+- `entry` — the log entry story scope, for `var:damage` / `heal_amount`
+  / `morale_damage_amount` / `morale_heal_amount` reads
+- `move` — the executing move story, for `damage_type` / `damage_source`
+  / `targeting` / buff-tier checks the AoE intercept and rider
+  customizable_locs need
+- `rcode` — a value-scope wrapping `result_code`, for the dispatch
+  triggers
+
+Each trigger branch checks `scope:rcode` against an integer; matching
+branch resolves to the corresponding loc key. `rcodes 0/6/7/10`
+split into `_aggravated` variants in the dispatch — the wound-box
+icon swaps from neutral (superficial) to red (aggravated) based on
+`scope:move.var:damage_type` / `heal_type`.
+
+---
+
+## §5 Tier system
+
+Static buff/debuff infrastructure for `soak` and `hit_chance`. Lives
+in `pod_combat_tier_effects.txt`.
+
+### Data model
+
+| Var | Role |
+|---|---|
+| `pod_combat_{side,c{N}}_base_soak` | soak before any tier effects |
+| `pod_combat_{side,c{N}}_base_hit_chance` | hit chance before any tier effects |
+| `pod_combat_{side,c{N}}_soak` | live soak (base + buff mags - debuff mags) |
+| `pod_combat_{side,c{N}}_hit_chance` | live hit chance (same formula) |
+| `pod_combat_{side,c{N}}_{stat}_{direction}_{duration}_tier` | current tier (1/2/3) |
+
+### Magnitudes
+
+| Tier | Magnitude |
+|---:|---|
+| 1 (small) | ±10 |
+| 2 (medium) | ±20 |
+| 3 (large) | ±30 |
+
+### Apply / revert flow (recalc-from-base, no deltas)
+
+- **Applying tier N:** set the tier var, then call a recalc effect.
+  The stat is rebuilt from base + sum of active tier magnitudes,
+  clamped on write. Clamping losses do NOT accumulate because each
+  apply and each revert starts from the pristine base.
+- **Round end:** round-duration tier vars are cleared, then every
+  slot is recalculated. Combat-duration tiers persist.
+- **Combat end:** all tier vars cleared.
+
+### When to edit `pod_combat_tier_effects.txt` directly
+
+- The number of slots changes (currently 10).
+- The tier stat categories change (currently `soak`, `hit`).
+- Tier magnitudes change (must remain in lockstep with the move-side
+  tier setters in `pod_combat_move_init_effects.txt`).
+
+---
+
+## §6 Reaction system
+
+The §15 "the target gets to react to your move" phase. Today only
+retaliation lives here, but the structure is uniform: each reaction
+is a (trigger condition, payload) pair set up in §13 of the previous
+turn and consumed here.
+
+The dispatcher `pod_combat_check_retaliation_effect` walks the
+workspace `pod_combat_$TARGET_SIDE$_retaliate_*` slots and fires
+each one whose §6 outcome matched its trigger condition.
+
+### Existing reactions
+
+| Reaction | Trigger | Result codes that fire it |
+|---|---|---|
+| **Retaliate on contact** ("thorns") | `pod_combat_result_code_indicates_contact_trigger` | 0 (hp damage) · 1 (guard-blocked) · 2 (soaked) · 6/7 (retaliation overlays) |
+| **Retaliate on evasion** ("riposte") | `pod_combat_result_code_indicates_miss_trigger` | 3 (miss) · 5 (dodge) · 12 (stealth) |
+
+Retaliation damage inherits the `damage_source` and `damage_type`
+from the skill that armed the stance:
+
+- **Superficial:** goes through the actor's soak check (can be soaked).
+- **Aggravated:** can not be soaked, tracked as aggravated damage.
+
+The `_agg` companion variable (presence = aggravated, absent =
+superficial) is set on the workspace alongside the amount in §13.
+
+### Adding a new reaction class
+
+1. Add the workspace slot pair (amount + agg flag) and a §13 setup
+   branch that writes them.
+2. Pick the existing result-code partition trigger that matches the
+   desired condition (or add a new one).
+3. Add a new `pod_combat_apply_reaction_if_triggered_effect` call in
+   `pod_combat_check_retaliation_effect` with the matching
+   `CONDITION_TRIGGER` param.
+
+The shared payload helper handles the spirit gate, the bypass-guard
+damage call, the result-code promotion, and the pre/post
+`last_damage` save/restore, so each new reaction stays a few lines
+of declaration.
+
+---
+
+## §7 File map
+
+Code-side entry points and where they live.
+
+### Scripted effects
+
+| File | Purpose |
+|---|---|
+| `POD_combat/pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Read by the generator-emitted move list. |
+| `POD_combat/pod_combat_move_list_effects.txt` | `POD_init_combat_move`, plus analyzer-suppression blocks. |
+| `POD_combat/pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§16 phase contract above. |
+| `POD_combat/pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
+| `POD_combat/pod_combat_group_effects.txt` | Workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
+| `POD_combat/pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
+| `POD_combat/pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
+| `POD_combat/pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. |
+| `POD_combat/PoD_override_single_combat_effects.txt` | Late-load override that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. |
+
+### Scripted triggers
+
+| File | Purpose |
+|---|---|
+| `POD_combat/pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
+| `POD_combat/pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. |
+
+### Story cycles
+
+| File | Purpose |
+|---|---|
+| `POD_story_cycle_combat.txt` | Defines `POD_combat_move`, `POD_combat_slot`, `POD_combat_log_entry`, `POD_combat_persistent`. |
+
+### Decisions
+
+| File | Purpose |
+|---|---|
+| `POD_combat/pod_combat_decisions.txt` | Player-facing decisions (`pod_combat_configure_skills`, debug interactions). |
+| `POD_combat/pod_combat_move_decisions.txt` | One hidden decision per move, used by `can_execute_decision` for unlock gating. |
+
+### GUI
+
+| File | Purpose |
+|---|---|
+| `POD_windows/pod_combat_window.gui` | The mid-combat window — move buttons, log, slot panels. |
+| `POD_windows/pod_combat_skills_window.gui` | The loadout editor (Configure Skills decision). |
+| `pod_texticons_combat.gui` | Inline `@<name>!` icons for stances and damage sources. |
+| `window_decisions.gui` | Vanilla override that hides the `hidden` decision group from the Decisions panel. |
+
+### Localization
+
+| File | Purpose |
+|---|---|
+| `pod_combat_static_l_english.yml` | Hand-authored loc — desc keys, log loc, capability callouts, etc. |
+| `pod_combat_l_english.yml` | One `pod_combat_move_<key>` per move (display name + `_tooltip` flavor). |
+
+### Customizable localization
+
+| File | Purpose |
+|---|---|
+| `pod_combat_log_custom_loc.txt` | `PODCombatXxxCostInline`, `PODCombatMoveInlineTooltip`,`PODCombatLogResultText` and the rider customizable_locs the log GUI invokes. |
+
+### Data binding
+
+| File | Purpose |
+|---|---|
+| `pod_combat_macros.txt` | `PODCombatMoveEffect`, `PODCombatMoveDesc`, `PODCombatMoveFlavor`, `PODGetCombatMoveFromKey`. |
+
+### Game concepts
+
+| File | Purpose |
+|---|---|
+| `pod_combat_concepts.txt` | Concept cards for combat stats / stances / elemental damage flavors / aggravated-vs-superficial. |
