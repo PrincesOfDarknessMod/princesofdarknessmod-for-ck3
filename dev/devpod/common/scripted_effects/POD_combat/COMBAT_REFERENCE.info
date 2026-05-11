@@ -151,7 +151,7 @@ read back from the matching workspace mirror.
 | `pod_combat_last_heal_amount` | last HP heal amount applied |
 | `pod_combat_last_morale_damage_amount` | last morale damage amount |
 | `pod_combat_last_morale_heal_amount` | last morale heal amount |
-| `pod_combat_last_result_code` | last action's resolved outcome (see **Result codes** section) |
+| `pod_combat_last_result` | last action's resolved outcome as a flag value (see **Result codes** section) |
 
 The move story is no longer host-side; `push_log` receives it as an
 explicit `MOVE_STORY` parameter from `POD_execute_combat_move §16`.
@@ -217,7 +217,7 @@ load-bearing — reordering will silently break behavior.
 ### Anti-invariants — orderings that MUST NOT happen
 
 - §6 before §5/§5b — damage hits unstripped stances.
-- §7/§8/§9 before §6 — rider gates read `pod_combat_last_result_code`,
+- §7/§8/§9 before §6 — rider gates read `pod_combat_last_result`,
   which is set by §6. Reordering breaks `on_hp_damage` / `on_contact` /
   `on_miss` conditions.
 - §15 before §6 — retaliation reads stale state from prior move.
@@ -293,63 +293,65 @@ Readers of these fields use per-field `has_variable` checks.
 
 ## §4 Result codes
 
-Single-int outcome model held in `pod_combat_last_result_code` on
-the host. Replaces an earlier 11-flag `pod_combat_last_was_*` scheme
-(see **Internal milestone glossary** § B1). Helpers along the damage
-and heal pipelines write directly to this var; `push_log` reads it
-unconditionally and dispatches to the matching log loc key.
+Flag-valued outcome model held in `pod_combat_last_result` on the
+host (entry-side mirror is `entry.var:result` on the log story).
+Helpers along the damage and heal pipelines write directly to this
+var; `push_log` reads it unconditionally and dispatches to the
+matching log loc key.
 
-| Code | Outcome |
-|---:|---|
-| -1 | sentinel — "no code yet" |
-| 0 | HP damage |
-| 1 | guard-blocked |
-| 2 | soaked |
-| 3 | missed |
-| 4 | reserved (was "countered"; never written by current code, kept reserved so the existing rcode numbering doesn't shift if a future move type needs the slot) |
-| 5 | dodged |
-| 6 | HP damage + retaliation triggered |
-| 7 | HP damage + retaliation soaked |
-| 8 | utility move applied (no damage; default if no helper writes a code) |
-| 9 | morale damage only |
-| 10 | HP healed |
-| 11 | morale healed |
-| 12 | stealth-triggered auto-miss (distinct from rcode 5 dodged so the loc line links to the Stealth concept, not Dodge) |
+| Flag | Outcome |
+|---|---|
+| _unset_ | sentinel — "no result yet" (use `NOT has_variable`) |
+| `flag:hp_damage` | HP damage landed |
+| `flag:guard_blocked` | attack blocked by guard |
+| `flag:soaked` | attack soaked |
+| `flag:missed` | attack missed |
+| `flag:dodged` | target dodged |
+| `flag:hp_damage_retal` | HP damage landed + retaliation triggered |
+| `flag:soaked_retal` | HP damage + retaliation soaked |
+| `flag:utility` | utility move applied (no damage; default if no helper writes) |
+| `flag:morale_damage` | morale damage only |
+| `flag:hp_healed` | HP healed |
+| `flag:morale_healed` | morale healed |
+| `flag:stealthed` | stealth-triggered auto-miss (distinct from `flag:dodged` so the loc line links to the Stealth concept, not Dodge) |
 
-**Sentinel handling:** Callers default `pod_combat_last_result_code`
-to -1 in §2 of `POD_execute_combat_move`, then helpers write their
-code as the move resolves. `push_log` defaults to 8 when the final
-value is still -1 (utility / no-op moves).
+**Sentinel handling:** §2 of `POD_execute_combat_move` removes
+`pod_combat_last_result` so absence is the "no result yet" sentinel
+for the new move's pipeline. Helpers write the matching flag as the
+move resolves. `push_log` defaults to `flag:utility` when the var is
+still unset at log-push time.
 
-**Priority semantics:** Most damage-side outcomes are SET by a single
-mutually-exclusive branch in the damage pipeline, so a plain
-`set_variable` is sufficient. The exceptions:
+**Priority semantics:** Most damage-side outcomes are SET by a
+single mutually-exclusive branch in the damage pipeline, so a plain
+`set_variable = { name = pod_combat_last_result value = flag:X }`
+is sufficient. The exceptions:
 
-- Retaliation OVERLAYS damage: `0→6`, `2→7` conditionally
-  (`pod_combat_set_result_code_promote_retaliation`).
-- Secondary effects (morale damage, heal) only set their code if no
-  primary HP-damage code has fired
-  (`pod_combat_set_result_code_if_unset`).
+- Retaliation OVERLAYS damage: `flag:hp_damage → flag:hp_damage_retal`,
+  `flag:soaked → flag:soaked_retal` conditionally
+  (`pod_combat_promote_result_code_retaliation_effect`).
+- Secondary effects (morale damage, heal) only set their flag if no
+  primary HP-damage outcome has fired
+  (`pod_combat_set_result_code_if_unset_effect`).
 
-**Self-damage snapshot/restore.** §8 stashes
-`pod_combat_last_damage` + `pod_combat_last_result_code` into
-`pod_combat_pre_self_last_damage` + `pod_combat_pre_self_result_code`,
-fires the bypass-guard damage helper (which overwrites both with the
-self-hit's outcome), then restores from the snapshot so the log line
-reflects the MAIN hit's number and rcode. The B1 result-code
-consolidation cut the snapshot from three fields to two; the
-restore-then-call pattern itself is still load-bearing.
+**Self-damage snapshot/restore.** §8 stashes `pod_combat_last_damage`
++ `pod_combat_last_result` into `pod_combat_pre_self_last_damage` +
+`pod_combat_pre_self_result`, fires the bypass-guard damage helper
+(which overwrites both with the self-hit's outcome), then restores
+from the snapshot so the log line reflects the MAIN hit's number
+and outcome.
 
 **Result-code partition triggers** (in
-`pod_combat_move_execution_triggers.txt`) compose against the rcode
-to express the rider/reaction gates:
+`pod_combat_move_execution_triggers.txt`) compose against the result
+flag to express the rider/reaction gates:
 
-- `pod_combat_result_code_indicates_contact_trigger` — codes
-  0/1/2/6/7 (HP damage / blocked / soaked / retaliation overlays).
-- `pod_combat_result_code_indicates_miss_trigger` — codes 3/5/12
-  (miss / dodge / stealth).
-- `pod_combat_result_code_indicates_hp_damage_trigger` — codes
-  0/6/7 (a wound went through).
+- `pod_combat_result_code_indicates_contact_trigger` —
+  `flag:hp_damage / guard_blocked / soaked / hp_damage_retal / soaked_retal`
+  (HP damage / blocked / soaked / retaliation overlays).
+- `pod_combat_result_code_indicates_miss_trigger` —
+  `flag:missed / dodged / stealthed` (miss / dodge / stealth).
+- `pod_combat_result_code_indicates_hp_damage_trigger` —
+  `flag:hp_damage / hp_damage_retal / soaked_retal` (a wound went
+  through).
 
 ### Log dispatcher
 
@@ -361,13 +363,15 @@ to express the rider/reaction gates:
 - `move` — the executing move story, for `damage_type` / `damage_source`
   / `targeting` / buff-tier checks the AoE intercept and rider
   customizable_locs need
-- `rcode` — a value-scope wrapping `result_code`, for the dispatch
-  triggers
+- `rcode` — a flag-scope wrapping `entry.var:result`, bound via
+  `MakeScopeFlag(...GetFlagKey)` in the GUI raw_text bindings
 
-Each trigger branch checks `scope:rcode` against an integer; matching
-branch resolves to the corresponding loc key. `rcodes 0/6/7/10`
-split into `_aggravated` variants in the dispatch — the wound-box
-icon swaps from neutral (superficial) to red (aggravated) based on
+Each trigger branch checks `scope:rcode` against a flag literal;
+matching branch resolves to the corresponding loc key (e.g.
+`pod_combat_log_result_text_hp_damage`). The HP-track outcomes
+(`hp_damage` / `hp_damage_retal` / `soaked_retal` / `hp_healed`)
+split into `_aggravated` variants — the wound-box icon swaps from
+neutral (superficial) to red (aggravated) based on
 `scope:move.var:damage_type` / `heal_type`.
 
 ---
