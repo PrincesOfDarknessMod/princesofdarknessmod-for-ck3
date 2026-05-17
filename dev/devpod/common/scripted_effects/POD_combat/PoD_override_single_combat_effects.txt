@@ -160,9 +160,10 @@ configure_start_single_combat_effect = {
 	# Mostly a port of PoD's original `if = { limit = attacker != defender }`
 	# clause (minus the scope setup ran above). Two deliberate
 	# adaptations:
-	#   1. The fera shapeshift branches at lines ~221 and ~232 carry an
-	#      `is_ai = yes` guard so PC-side fera don't auto-shapeshift in
-	#      this fallback path. 
+	#   1. The fera shapeshift branches further down (the two
+	#      POD_shapeshift_fera_warform_effect call sites; current
+	#      lines ~274 and ~286) carry an `is_ai = yes` guard so PC-side
+	#      fera don't auto-shapeshift in this fallback path.
 	#   2. Signature-weapon and shirtlessness setup were lightly
 	#      reorganized to fold cleanly with the scope-setup hoisted.
 	# This branch fires for AI-vs-AI duels (preserved verbatim semantics
@@ -300,16 +301,23 @@ configure_start_single_combat_effect = {
 # Combat-PoD minigame launcher — called from configure_start_single_combat_effect
 ##################################################
 #
-# Runs in the PC's scope. Stashes the PoD duel metadata as character
-# variables so pod_combat_end_combat_effect can reconstruct scopes and fire
-# the original follow-up event when the minigame ends, then hands off to
+# Runs in the PC's scope. Builds a POD_combat_sc_context story_cycle on
+# Charon to stash the PoD duel metadata (sc_* refs, rule flags,
+# follow-up event id, parent-event aliases) as story variables. The PC
+# carries a single pointer var (pod_combat_sc_context) into the story
+# so pod_combat.9999 can reconstruct scopes and fire the original
+# follow-up event when the minigame ends, then hands off to
 # pod_combat_initialize_effect.
 #
 # Parameters:
-#   $OPPONENT$           — the non-PC combatant (character scope)
-#   $OUTPUT_EVENT$       — follow-up event fired on sc_initiator at end
-#   $INVALIDATION_EVENT$ — fired instead if the duel is invalid (kept for
-#                          symmetry; self-match case is handled upstream)
+#   $OPPONENT$     — the non-PC combatant (character scope)
+#   $OUTPUT_EVENT$ — follow-up event fired on sc_initiator at end
+#   $FATALITY$     — flag: default / possible / no / always / practice
+#   $FIXED$        — flag: sc_attacker / sc_defender / no
+#   $LOCALE$       — flag: battlefield / terrain_scope / throne_room / etc.
+# (INVALIDATION_EVENT is NOT a launcher parameter — the self-match
+#  invalidation fires from the override's Part 2 BEFORE the launcher
+#  runs, so the launcher doesn't need to carry the event id.)
 ##################################################
 
 ##################################################
@@ -358,11 +366,25 @@ configure_start_single_combat_effect = {
 #                              `$killer$ = { save_temporary_scope_as =
 #                              pod_killer }` and $killer$ resolves from it.)
 #
-# Still NOT stashed (add as they surface): scope:vassal_war /
-# scope:vassal_claim / scope:laamp_title (typed scope objects, same
-# variable-storage pattern should work — add when triggered in testing)
-# and raw scope values like scope:duel_legal / scope:fp2_*_gate which
-# need a different detection mechanism than `exists = scope:X`.
+# Still NOT stashed (add as they surface):
+#   - scope:vassal_war  — used by epidemic_events_2.txt, but that
+#     file's duel call doesn't pass OUTPUT_EVENT, so it isn't on
+#     the minigame intercept path. Add if PoD updates wire it as
+#     a duel follow-up scope.
+#   - scope:laamp_title — only a single read in
+#     ep3_laamp_flavour_ewan_events.txt:15807, and that read isn't
+#     in a duel follow-up event. Add if it surfaces.
+#   - scope:fp2_*_gate  — only `exists` checks in
+#     fp2_struggle_events.txt; not currently in any duel follow-up.
+#     Raw / non-typed scope values would also need a different
+#     detection mechanism than `exists = scope:X`.
+#   - scope:duel_legal  — read by ep3_laamp_flavour_ewan.2092
+#     (a real duel follow-up) at line 12913, BUT grep across
+#     CK3/PoD references finds no `save_scope_as = duel_legal`
+#     anywhere — the scope is never actually set, so the check
+#     `NOT = { exists = scope:duel_legal }` is dead defense and
+#     stashing it would capture nothing. Add if a future caller
+#     starts setting it.
 ##################################################
 
 pod_combat_sc_stash_parent_aliases_effect = {
@@ -397,6 +419,17 @@ pod_combat_sc_stash_parent_aliases_effect = {
 	# resolves; without this stash, its option tooltips throw "Undefined
 	# event target 'scheme'" and the final end_scheme call fails.
 	if = { limit = { exists = scope:scheme           } scope:sc_ctx = { set_variable = { name = alias_scheme           value = scope:scheme } } }
+	# Title alias — vanilla hold_court.8210 (the vassal-rebellion
+	# legal-duel chain) saves scope:vassal_claim before launching the
+	# duel; hold_court.8211 (OUTPUT_EVENT) reads it twice to transfer
+	# the title from the loser to scope:sc_victor. The PC can be
+	# either party in this chain (aggressor_vassal or defender_vassal),
+	# so the minigame intercepts the duel and the follow-up fires via
+	# pod_combat.9999. Without this stash, hold_court.8211 throws
+	# "Undefined event target 'vassal_claim'" and the title transfer
+	# silently fails. Typed scope (a title), stores fine in a story
+	# variable.
+	if = { limit = { exists = scope:vassal_claim     } scope:sc_ctx = { set_variable = { name = alias_vassal_claim     value = scope:vassal_claim } } }
 }
 
 pod_combat_sc_launch_minigame_effect = {
@@ -410,17 +443,11 @@ pod_combat_sc_launch_minigame_effect = {
 	# mid-combat. The presence of pod_combat_sc_context on the PC is
 	# itself the "duel-driven" flag; no separate driven marker needed.
 	#
-	# Tooltip-build / hidden_effect_new_object: tooltip-building walks
-	# every interaction's effect chain symbolically and skips
-	# state-mutating calls including create_story. With creation
-	# skipped, save_scope_as = sc_ctx never binds, and any subsequent
-	# scope:sc_ctx reads error with "Undefined event target 'sc_ctx'"
-	# during tooltip preview. The right tool here is
-	# hidden_effect_new_object (NOT plain hidden_effect — that only
-	# hides display; it still evaluates). PoD's heist system uses the
-	# exact same pattern in POD_heist_create_node. Real execution runs
-	# the body normally; only tooltip preview skips the
-	# new-object-dependent block.
+	# hidden_effect_new_object wrap — without it, tooltip-build skips
+	# create_story so save_scope_as = sc_ctx never binds and downstream
+	# scope:sc_ctx reads error with "Undefined event target 'sc_ctx'".
+	# Note: NOT plain hidden_effect (that only hides display, the body
+	# still evaluates). See COMBAT_REFERENCE.info §7 for the full rationale.
 
 	save_scope_as = combat_pc
 
@@ -545,8 +572,13 @@ configure_start_group_combat_effect = {
 	#     influence).
 	#   - PC-vs-PC duel (the minigame UI is single-perspective; in MP
 	#     only one PC would see it, so we route both to auto-resolve).
+	#   - The pod_combat_enabled game rule is off (mirrors the
+	#     single-combat intercept's gate at the top of this file —
+	#     when the player has disabled the combat minigame, group
+	#     fights should fall through to vanilla auto-resolve too).
 	else_if = {
 		limit = {
+			has_game_rule = pod_combat_enabled
 			# Exactly one side is PC.
 			OR = {
 				AND = {
@@ -578,10 +610,13 @@ configure_start_group_combat_effect = {
 		# pod_combat_init_slot_from_character_effect for all combatants.
 
 		# Dispatch to the minigame launcher on the PC's side.
-		# INVALIDATION_EVENT is NOT passed through — Part 2 above already
-		# fired the invalidation event via scope:invalidation_event when
-		# attacker == defender, and the launcher doesn't need to retain
-		# the event id for downstream use.
+		# INVALIDATION_EVENT is NOT passed through — the launcher
+		# doesn't need to retain it. The single-combat override's
+		# Part 2 (above, in the same file) fired the invalidation
+		# event via scope:invalidation_event when attacker == defender;
+		# group combat reaches this point only when attacker !=
+		# defender (the group-combat override has its own upstream
+		# guards), so there's nothing further to invalidate from here.
 		if = {
 			limit = { scope:sc_attacker = { is_ai = no } }
 			scope:sc_attacker = {

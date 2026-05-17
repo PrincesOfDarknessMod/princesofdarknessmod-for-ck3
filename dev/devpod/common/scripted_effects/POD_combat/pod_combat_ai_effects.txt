@@ -6,6 +6,97 @@
 # pod_combat_ai_select_and_execute_move_effect below. A 1v1 fight is
 # a degenerate NvN with slots 0 and 5 populated; the same
 # workspace-relative move effects handle both.
+#
+# AI model — one combatant's turn:
+#   1. Turn start: pick an initial enemy target via
+#      pod_combat_ai_select_{enemy,player}_target_effect (weighted
+#      random favoring low-HP). Sets pod_combat_selected_target.
+#   2. Up to 6 action attempts per turn (a hard cap, not strictly
+#      one per AP — moves can refund AP via ap_gain, but the loop
+#      caps at 6 unrolled calls regardless). Each attempt:
+#        a. refresh_target_if_dead — re-pick if previous action KO'd
+#           the original target; no-op when still alive.
+#        b. select_and_execute_move — random_in_list over the actor's
+#           loadout, weighted by base ai_weight + situational modifiers
+#           (anti-repetition, energy attrition, target HP / morale
+#           finish bonuses, hit-chance penalties, round-buff anti-spam
+#           and late-turn hit-buff penalties). Moves failing
+#           POD_can_execute_combat_move are filtered out.
+#        c. swap_for_story — flip workspace to single_ally / single_pc
+#           slot if the move's targeting demands; restore after.
+#        d. save_workspace — propagate mutations and run victory check
+#           (early exit if combat ended this action).
+
+
+# ─────────────────────────────────────────────────────────────
+# AI TUNING CONSTANTS — edit these to tweak AI behaviour
+# ─────────────────────────────────────────────────────────────
+# CK3 `@name = value` parse-time numeric literals, referenced
+# from the weight block in
+# pod_combat_ai_select_and_execute_move_effect below.
+
+# Anti-repetition (three-deep history).
+@ai_repeat_last         = -35
+@ai_repeat_prev         = -20
+@ai_repeat_prev2        = -12
+
+# Need-based bonuses.
+@ai_heal_needed         = 30   # hp_heal when applicable hp track has room
+@ai_morale_heal_low     = 30   # morale_heal when morale below threshold
+@ai_defense_when_hurt   = 15   # guard / dodge / stealth / soak-buff while hp < max
+@ai_hitbuff_low_acc     = 15   # hit_buff while hit_chance ≤ threshold
+
+# Round-buff lifecycle penalties.
+@ai_round_buff_spam     = -8   # generic round-duration buff (any stat)
+@ai_round_buff_lateap   = -20  # round hit-buff specifically, low AP remaining
+
+# Remove-guard bias.
+@ai_remove_guard_hit    = 15   # target IS guarding
+@ai_remove_guard_miss   = -15  # target NOT guarding (strip would no-op)
+
+# Target-aware offensive bonuses (single_enemy moves only).
+@ai_bypass_dodge        = 15   # bypass_dodge vs dodging target
+@ai_bypass_stealth      = 15   # bypass_stealth vs stealthed target
+@ai_cash_in_stealth     = 20   # actor stealthed → spend the +30 hit window
+@ai_aggravated_vs_soak  = 20   # high-soak target → bias aggravated
+@ai_weakness_exploit    = 25   # damage_source matches target splat weakness
+
+# Finish bonuses.
+@ai_hp_finish_1box      = 25   # target near death, any damage finishes
+@ai_hp_finish_2box      = 15   # target hurt, move deals ≥ ai_thresh_finish_damage
+@ai_mor_finish_low      = 25   # target morale low, any morale damage finishes
+@ai_mor_finish_mid      = 15   # target morale mid, move deals ≥ ai_thresh_finish_morale
+
+# Hit-chance penalties (requires_hit_roll moves only).
+@ai_hit_penalty_low     = -25  # hit_chance ≤ ai_thresh_hit_low
+@ai_hit_penalty_mid     = -15  # hit_chance ≤ ai_thresh_hit_mid
+
+# Energy attrition (stacking per step of actor_energy_used).
+@ai_energy_step1        = -8
+@ai_energy_step2        = -10
+@ai_energy_step3        = -12
+@ai_energy_step4        = -14
+
+# Class / repertoire bias.
+@ai_trait_gated         = 10   # non-starter move (perk/trait/splat-gated)
+
+# Final-weight floor (random_in_list ignores items with weight ≤ 0).
+@ai_weight_floor        = 1
+
+# Comparison thresholds read by the modifier `limit`s.
+@ai_thresh_morale_shaken   = 10   # morale-heal trigger
+@ai_thresh_hit_low         = 30   # hit_penalty_low fires at-or-below
+@ai_thresh_hit_mid         = 40   # hit_penalty_mid fires at-or-below
+@ai_thresh_hit_buff_band   = 50   # hitbuff_low_acc fires at-or-below
+@ai_thresh_high_soak       = 70   # aggravated_vs_soak fires at-or-above
+@ai_thresh_late_ap         = 5    # round_buff_lateap fires at-or-below (base 6 − 1)
+@ai_thresh_hp_finish_1     = 1    # empty_damage_boxes ≤ this → hp_finish_1box fires
+@ai_thresh_hp_finish_2     = 2    # empty_damage_boxes ≤ this → hp_finish_2box fires
+@ai_thresh_finish_damage   = 2    # hp_finish_2box also requires hp_damage ≥ this
+@ai_thresh_mor_finish_low  = 2    # target morale ≤ this → mor_finish_low fires
+@ai_thresh_mor_finish_mid  = 4    # target morale ≤ this → mor_finish_mid fires
+@ai_thresh_finish_morale   = 2    # mor_finish_mid also requires morale_damage ≥ this
+
 
 pod_combat_ai_refresh_target_if_dead_effect = {
 	# Re-pick the AI's selected_target if the slot it currently points
@@ -51,8 +142,11 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 
 
 pod_combat_ai_take_turn_effect = {
-	# AI acts up to 6 times (max AP=6 / min cost=1)
-	# Each call is a no-op if AP < 1 or combat is over
+	# Hard cap of 6 action attempts per turn — six unrolled try_action
+	# calls, each gated by `pod_combat_current_ap >= 1`. AP refunds
+	# via ap_gain CAN raise current AP mid-turn, but they can't
+	# unlock a seventh attempt. Each call is a no-op when AP < 1 or
+	# combat is over.
 	pod_combat_ai_try_action_effect = yes
 	pod_combat_ai_try_action_effect = yes
 	pod_combat_ai_try_action_effect = yes
@@ -119,11 +213,15 @@ pod_combat_ai_select_and_execute_move_effect = {
 
 		# Two scopes matter in this effect:
 		#   scope:combat_host  — the PC character where combat state and
-		#                        the "player workspace" vars live
-		#                        (pod_combat_current_ap, _player_hp, etc.,
-		#                        loaded from the acting slot each turn).
-		#                        Required for POD_execute_combat_move and
-		#                        all affordability checks.
+		#                        the workspace mirror vars live
+		#                        (pod_combat_current_ap,
+		#                        pod_combat_actor_*, pod_combat_target_*,
+		#                        loaded from the acting slot each turn;
+		#                        HP itself derives live from the slot
+		#                        character's PoD wound vars, not cached
+		#                        on the workspace). Required for
+		#                        POD_execute_combat_move and all
+		#                        affordability checks.
 		#   scope:ai_actor     — the acting AI character, where the
 		#                        AI's pod_combat_loadout list and
 		#                        pod_combat_ai_last_move live.
@@ -157,17 +255,14 @@ pod_combat_ai_select_and_execute_move_effect = {
 						# already active. Without this the AI
 						# happily re-applies the same Toughness or
 						# Vanish every turn, burning AP for no
-						# state change. The currently no move  
-						# combines damage with a tier or stance
-						# rider (pure-self-buff moves and pure
-						# debuff moves are the only thing the
-						# guard applies to), so blanket-excluding
-						# is safe, no partially-useful action gets
-						# stranded. Tier checks compare the actor's
-						# current tier against the move's tier so
-						# a Tier-2 buff can still upgrade a Tier-1
-						# stack but a Tier-1 buff can't downgrade
-						# a Tier-2.
+						# state change. Currently no damaging move
+						# carries a tier or stance rider, so a
+						# blanket exclude on pure buff/debuff/stance
+						# moves doesn't strand any partially-useful
+						# action. Tier checks use strict `<` so a
+						# Tier-2 buff can still upgrade a Tier-1
+						# stack but a Tier-1 buff can't downgrade a
+						# Tier-2.
 						#
 						# All checks read against the workspace
 						# (pod_combat_actor_* = acting AI,
@@ -327,7 +422,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 				weight = {
 					base = 0
 
-					# Per-move base weight
+					# Per-move base weight (8-15).
 					modifier = {
 						add = var:ai_weight
 					}
@@ -340,17 +435,17 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# infinitum. Three slots force the AI to look
 					# further down its list before repeating.
 					modifier = {
-						add = -35
+						add = @ai_repeat_last
 						scope:ai_actor = { has_variable = pod_combat_ai_last_move }
 						this = scope:ai_actor.var:pod_combat_ai_last_move
 					}
 					modifier = {
-						add = -20
+						add = @ai_repeat_prev
 						scope:ai_actor = { has_variable = pod_combat_ai_prev_move }
 						this = scope:ai_actor.var:pod_combat_ai_prev_move
 					}
 					modifier = {
-						add = -12
+						add = @ai_repeat_prev2
 						scope:ai_actor = { has_variable = pod_combat_ai_prev2_move }
 						this = scope:ai_actor.var:pod_combat_ai_prev2_move
 					}
@@ -371,10 +466,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 					#     remain, so hp < max_hp is the right gate.
 					# A heal move with hp_heal but no heal_type set
 					# triggers neither branch and stays at base weight,
-					# which is the safe failure mode if the setter
-					# ever drops the heal_type pair.
+					# which is the safe failure mode.
 					modifier = {
-						add = 30
+						add = @ai_heal_needed
 						has_variable = hp_heal
 						has_variable = heal_type
 						var:heal_type = flag:superficial
@@ -383,7 +477,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 					modifier = {
-						add = 30
+						add = @ai_heal_needed
 						has_variable = hp_heal
 						has_variable = heal_type
 						var:heal_type = flag:aggravated
@@ -393,13 +487,13 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 					# Morale heal when shaken.
 					modifier = {
-						add = 30
+						add = @ai_morale_heal_low
 						has_variable = morale_heal
-						scope:combat_host = { var:pod_combat_actor_morale < 10 }
+						scope:combat_host = { var:pod_combat_actor_morale < @ai_thresh_morale_shaken }
 					}
 					# Guard when hurt.
 					modifier = {
-						add = 15
+						add = @ai_defense_when_hurt
 						has_variable = set_guard
 						scope:combat_host = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
@@ -407,7 +501,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 					# dodge when hurt.
 					modifier = {
-						add = 15
+						add = @ai_defense_when_hurt
 						has_variable = dodge
 						scope:combat_host = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
@@ -415,7 +509,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 					# stealth when hurt.
 					modifier = {
-						add = 15
+						add = @ai_defense_when_hurt
 						has_variable = stealth
 						scope:combat_host = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
@@ -429,7 +523,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# upgrade. Either round-duration or combat-duration
 					# soak buff qualifies.
 					modifier = {
-						add = 15
+						add = @ai_defense_when_hurt
 						OR = {
 							has_variable = soak_buff_round_tier
 							has_variable = soak_buff_combat_tier
@@ -446,23 +540,57 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# tier-redundancy guard upstream filters non-upgrades
 					# so any candidate here is a meaningful tier raise.
 					modifier = {
-						add = 15
+						add = @ai_hitbuff_low_acc
 						OR = {
 							has_variable = hit_buff_round_tier
 							has_variable = hit_buff_combat_tier
 						}
 						scope:combat_host = {
-							var:pod_combat_actor_hit_chance <= 50
+							var:pod_combat_actor_hit_chance <= @ai_thresh_hit_buff_band
 						}
+					}
+					# Round-buff anti-spam penalty — round-duration tier
+					# buffs expire at end of round so the actor gets at
+					# most one follow-up action to benefit. A flat -8
+					# keeps them out of the default rotation while leaving
+					# the +15 buff-when-needed bonuses above able to win
+					# the tie (net +7) in situations where the buff
+					# actually solves a problem. Combat-duration buffs are
+					# untouched — they pay off across the whole fight
+					# regardless of when in the turn they land.
+					modifier = {
+						add = @ai_round_buff_spam
+						OR = {
+							has_variable = soak_buff_round_tier
+							has_variable = hit_buff_round_tier
+						}
+					}
+					# Late-turn hit-buff penalty — a round hit buff with
+					# no AP left to attack is pure waste; the buff vanishes
+					# at end of round without ever being applied to a hit
+					# roll. Threshold = base AP (6) − 1, so the modifier
+					# fires the moment current_ap drops below the starting
+					# allowance. Note this also fires on the first action
+					# of an AP-drained turn (drain pulls current_ap below
+					# 6 before any spend) — that's a deliberate false
+					# positive: a drained actor has fewer follow-up attacks
+					# and is even worse-positioned to capitalize on a
+					# round hit buff, so the penalty stands. Stacks with
+					# the -8 above for -28 total once the actor commits
+					# to a turn.
+					modifier = {
+						add = @ai_round_buff_lateap
+						has_variable = hit_buff_round_tier
+						scope:combat_host = { var:pod_combat_current_ap <= @ai_thresh_late_ap }
 					}
 					# Remove-guard vs guarded target.
 					modifier = {
-						add = 15
+						add = @ai_remove_guard_hit
 						has_variable = remove_guard
 						scope:combat_host = { has_variable = pod_combat_target_is_guarding }
 					}
 					modifier = {
-						add = -15
+						add = @ai_remove_guard_miss
 						has_variable = remove_guard
 						scope:combat_host = { NOT = { has_variable = pod_combat_target_is_guarding } }
 					}
@@ -477,7 +605,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 
 					# Bypass-dodge bonus when target is dodging.
 					modifier = {
-						add = 15
+						add = @ai_bypass_dodge
 						has_variable = bypass_dodge
 						var:targeting = flag:single_enemy
 						scope:combat_host = { has_variable = pod_combat_target_is_dodging }
@@ -485,64 +613,133 @@ pod_combat_ai_select_and_execute_move_effect = {
 
 					# Bypass-stealth bonus when target is stealthed.
 					modifier = {
-						add = 15
+						add = @ai_bypass_stealth
 						has_variable = bypass_stealth
 						var:targeting = flag:single_enemy
 						scope:combat_host = { has_variable = pod_combat_target_is_stealthed }
 					}
 
-					# HP-finish bonus tier 1 — target near death (1 box
+					# Capitalize-on-stealth bonus: when the AI is
+					# currently stealthed (the +30 hit-chance bonus
+					# is live), bias hard toward damage-dealing
+					# moves so the actor cashes in the stealth
+					# window instead of burning it on heals, buffs,
+					# or stance changes. Stealth is consumed by the
+					# next attack via
+					# pod_combat_consume_actor_stealth_effect, so a
+					# non-damage move both wastes the +30 AND leaves
+					# the actor visible afterward (stealth flag
+					# round-trips to slot when the next save fires
+					# without the flag set, depending on path).
+					# Single-enemy gate matches the other offense
+					# biases — a self-targeted stealth move
+					# shouldn't get the bonus.
+					modifier = {
+						add = @ai_cash_in_stealth
+						has_variable = hp_damage
+						var:targeting = flag:single_enemy
+						scope:combat_host = { has_variable = pod_combat_actor_is_stealthed }
+					}
+
+					# Aggravated-vs-soak bonus: when the workspace target
+					# has high soak (≥ 70%), bias toward aggravated-damage
+					# moves. Aggravated bypasses the soak roll entirely for
+					# the vast majority of targets (PoD's
+					# POD_damage_type_is_soakable returns no for aggravated
+					# death reasons; only Mokole undying-body, Demon
+					# infernal-fortitude, Dragon ichor-temp, and Autumn-armor
+					# combatants opt back in via POD_can_soak_aggravated_damage,
+					# and even those roll a separate, usually narrower
+					# aggravated-soak). A superficial move would mostly
+					# bounce off; an aggravated alternative in the actor's
+					# loadout is the right answer.
+					modifier = {
+						add = @ai_aggravated_vs_soak
+						has_variable = hp_damage
+						has_variable = damage_type
+						var:damage_type = flag:aggravated
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							var:pod_combat_target_soak >= @ai_thresh_high_soak
+						}
+					}
+
+					# Weakness-exploitation bonus: when the candidate's
+					# damage_source matches a splat weakness of the
+					# workspace target, +25. The mapping lives in
+					# pod_combat_damage_source_weakness_triggers.txt; edit
+					# the per-source triggers there to add or remove
+					# weaknesses without touching this selector.
+					#
+					# Why +25: hitting a splat weakness either lands aggravated
+					# wounds on a target that wouldn't otherwise take them
+					# (silver vs werewolf, gold vs mokole, sun vs vampire)
+					# or doubles the damage box count (fire vs bushi). Both
+					# are stronger than the +20 aggravated-vs-soak bias
+					# above, on par with the +25 HP-finish-tier-1 bonus.
+					modifier = {
+						add = @ai_weakness_exploit
+						has_variable = hp_damage
+						has_variable = damage_source
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+						}
+						pod_combat_move_exploits_target_weakness_trigger = yes
+					}
+
+					# HP-finish bonus tier 1: target near death (1 box
 					# left), any damage move can finish them. Reads HP
 					# directly off the opponent character's PoD wound
 					# track since there's no opponent_hp_value SV.
 					modifier = {
-						add = 25
+						add = @ai_hp_finish_1box
 						has_variable = hp_damage
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
 							has_variable = pod_combat_target_char
-							var:pod_combat_target_char.POD_empty_damage_boxes <= 1
+							var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_1
 						}
 					}
 
-					# HP-finish bonus tier 2 — target hurt (2 boxes left)
+					# HP-finish bonus tier 2: target hurt (2 boxes left)
 					# AND move deals at least 2 damage so a finish is
 					# realistic.
 					modifier = {
-						add = 15
+						add = @ai_hp_finish_2box
 						has_variable = hp_damage
-						var:hp_damage >= 2
+						var:hp_damage >= @ai_thresh_finish_damage
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
 							has_variable = pod_combat_target_char
-							var:pod_combat_target_char.POD_empty_damage_boxes <= 2
+							var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
 						}
 					}
 
-					# Morale-finish bonus tier 1 — target almost broken
+					# Morale-finish bonus tier 1: target almost broken
 					# (morale 0-2), any morale-damage move finishes.
 					modifier = {
-						add = 25
+						add = @ai_mor_finish_low
 						has_variable = morale_damage
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
-							var:pod_combat_target_morale <= 2
+							var:pod_combat_target_morale <= @ai_thresh_mor_finish_low
 						}
 					}
 
-					# Morale-finish bonus tier 2 — target shaken (morale
+					# Morale-finish bonus tier 2: target shaken (morale
 					# 3-4) AND move deals at least 2 morale damage.
 					modifier = {
-						add = 15
+						add = @ai_mor_finish_mid
 						has_variable = morale_damage
-						var:morale_damage >= 2
+						var:morale_damage >= @ai_thresh_finish_morale
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
-							var:pod_combat_target_morale <= 4
+							var:pod_combat_target_morale <= @ai_thresh_mor_finish_mid
 						}
 					}
 
-					# Low-hit attack penalty — moves that actually roll a
+					# Low-hit attack penalty: moves that actually roll a
 					# hit chance and could miss. Auto-hit moves
 					# (supernatural / mental, plus any physical move
 					# with override_requires_hit_roll = no) skip this
@@ -552,29 +749,29 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# to live here — the proxy missed the
 					# physical+override_requires_hit_roll=no edge case.
 					modifier = {
-						add = -25
+						add = @ai_hit_penalty_low
 						has_variable = hp_damage
 						has_variable = requires_hit_roll
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
-							var:pod_combat_actor_hit_chance <= 30
+							var:pod_combat_actor_hit_chance <= @ai_thresh_hit_low
 						}
 					}
 
-					# Mid-hit attack — softer penalty in the 31-40%
+					# Mid-hit attack: softer penalty in the 31-40%
 					# band, same gate (only fires for moves that roll
 					# a hit chance).
 					modifier = {
-						add = -15
+						add = @ai_hit_penalty_mid
 						has_variable = hp_damage
 						has_variable = requires_hit_roll
 						var:targeting = flag:single_enemy
 						scope:combat_host = {
-							var:pod_combat_actor_hit_chance <= 40
+							var:pod_combat_actor_hit_chance <= @ai_thresh_hit_mid
 						}
 					}
 
-					# Energy attrition — gently deprioritise energy
+					# Energy attrition: gently deprioritise energy
 					# spends as the pool drains this combat. The four
 					# stacking add modifiers below are -8 / -10 / -12 / -14
 					# (NOT a flat -4 per step), so the cumulative penalty
@@ -584,10 +781,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# depletes than a flat curve would. Stacked add
 					# modifiers (rather than a single `subtract = { value
 					# = X multiply = 4 }`) because random_in_list weight
-					# modifiers don't accept inline script-value math —
+					# modifiers don't accept inline script-value math
 					# only flat numeric add / factor.
 					# NOTE: This is a SELECTION-BIAS penalty layered on
-					# top of the real energy spend — the AI actually
+					# top of the real energy spend — the AI should
 					# pays splat energy when it executes an energy-cost
 					# move (the move runs through the same
 					# POD_spend_splat_agnostic_energy path the PC uses).
@@ -596,30 +793,30 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# (per-combatant, persists for the whole combat;
 					# no per-turn reset). Named "actor" (not "player")
 					# because it counts spends by whoever is currently
-					# acting — PC or AI — so the "player_*" workspace
+					# acting, PC or AI, so the "player_*" workspace
 					# prefix would read as "PC-only" and mislead.
 					modifier = {
-						add = -8
+						add = @ai_energy_step1
 						has_variable = energy_cost
 						scope:combat_host = { var:pod_combat_actor_energy_used >= 1 }
 					}
 					modifier = {
-						add = -10
+						add = @ai_energy_step2
 						has_variable = energy_cost
 						scope:combat_host = { var:pod_combat_actor_energy_used >= 2 }
 					}
 					modifier = {
-						add = -12
+						add = @ai_energy_step3
 						has_variable = energy_cost
 						scope:combat_host = { var:pod_combat_actor_energy_used >= 3 }
 					}
 					modifier = {
-						add = -14
+						add = @ai_energy_step4
 						has_variable = energy_cost
 						scope:combat_host = { var:pod_combat_actor_energy_used >= 4 }
 					}
 
-					# Trait-gate bonus — moves with splat / perk /
+					# Trait-gate bonus: moves with splat / perk /
 					# trait requirements (disciplines, gifts, hekau,
 					# etc.) represent the character's actual class
 					# repertoire. Nudge them above generic physicals
@@ -628,7 +825,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# trait, so a missing is_starter_move flag is the
 					# proxy.
 					modifier = {
-						add = 10
+						add = @ai_trait_gated
 						NOT = { has_variable = is_starter_move }
 					}
 
@@ -638,9 +835,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 					# picked. random_in_list ignores items with
 					# weight <= 0, which would silently exclude moves
 					# the player has equipped but had a streak of bad
-					# context — keeping `min = 1` lets the AI
-					# eventually fall back to anything in the loadout.
-					min = 1
+					# context — keeping `min = @ai_weight_floor` lets
+					# the AI eventually fall back to anything in the
+					# loadout.
+					min = @ai_weight_floor
 				}
 
 				save_scope_as = chosen_move
@@ -727,8 +925,10 @@ pod_combat_ai_ensure_loadout_effect = {
 	# AI opponents aren't limited to the 4-per-category cap so they
 	# have their full trait-appropriate repertoire to pick from.
 	# (Trait gating happens at selection time via the limit clause's
-	# can_execute_decision check, not at seed time — an unqualified
-	# move simply never wins the weighted roll.)
+	# POD_can_execute_combat_move call, which itself uses
+	# can_execute_decision against the move's hidden decision, not
+	# at seed time. An unqualified move simply never wins the
+	# weighted roll.)
 	#
 	# PC loadouts are seeded by the configure decision with the 8
 	# starters and persist as equipment; the slot-init clear skips
@@ -754,9 +954,6 @@ POD_combat_ai_swap_for_story = {
 	# keeps the AI's turn-start enemy target (single_enemy default)
 	# or handles its own slot iteration (team_enemy / team_ally /
 	# self).
-	#
-	# Priority-driven swaps (wounded / healthy / round_robin / threat)
-	# are parked outside devpod — see POD-Integration/staging/ai_target_priority/.
 
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:single_ally } }
@@ -813,7 +1010,7 @@ pod_combat_ai_swap_to_ally_target_effect = {
 	# opponent workspace. Team membership is fixed by slot index: slots
 	# 0-4 are team 0 (player team), 5-9 are team 1 (enemy team), so
 	# "same team as actor" is the AND-of-(actor team, slot team) filter
-	# below. Replaced 10 hardcoded if/else_if branches.
+	# below.
 	save_scope_as = host
 	random_in_list = {
 		variable = pod_combat_active_slots
@@ -860,18 +1057,18 @@ pod_combat_ai_swap_to_pc_target_effect = {
 }
 
 pod_combat_ai_restore_enemy_target_effect = {
-	# Restore the enemy target saved by pod_combat_ai_swap_to_ally_target_effect
-	# and reload it into the opponent workspace. Called after each single-ally
-	# move fires so subsequent AI actions in the same turn continue to aim
-	# at the AI's original chosen enemy.
+	# Restore the enemy target saved by either
+	# pod_combat_ai_swap_to_ally_target_effect (single_ally moves) or
+	# pod_combat_ai_swap_to_pc_target_effect (single_pc moves) and reload
+	# it into the opponent workspace. Called from
+	# POD_combat_ai_restore_after_move whenever the move's targeting was
+	# single_ally or single_pc, so subsequent AI actions in the same turn
+	# continue to aim at the AI's original chosen enemy.
 	#
 	# CRITICAL: Save the ally slot first. The single-ally move effect wrote
 	# buffs into the opponent workspace, and the workspace currently holds
 	# the buffed ally. If we reload the enemy slot without saving first, the
 	# buff would be overwritten by the stale slot data and effectively erased.
-	#
-	# Replaced two parallel 10-block else_if dispatchers (save current target's
-	# slot, then load saved enemy target's slot) with two every_in_list passes.
 	if = {
 		limit = { has_variable = pod_combat_ai_saved_enemy_target }
 		save_scope_as = host

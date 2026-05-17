@@ -1,6 +1,5 @@
 ﻿##############################################################################################
 # GROUP COMBAT INFRASTRUCTURE EFFECTS
-# File: pod_combat_group_effects.txt
 # Handles slot-based workspace load/save, dispatch, initialization, assignment, and cleanup
 # for the group combat system (up to 10 combatants in slots 0-9).
 #
@@ -12,6 +11,21 @@
 #
 # Modes:
 #   0 = 1v1, 1 = 1vN, 2 = Nv1, 3 = NvN
+#
+# Terminology — two naming regimes coexist; they DIVERGE on enemy turns:
+#   actor / target   — workspace-relative. "actor" = whoever is ACTING
+#                      this action; "target" = whoever is being TARGETED.
+#                      Used by pod_combat_actor_* / pod_combat_target_*
+#                      workspace mirrors and by recalc helper names.
+#   player / opponent — positional. "player" = host's team (slots 0-4);
+#                      "opponent" = opposing team (slots 5-9). Used as
+#                      literal $ACTOR_SIDE$ / $TARGET_SIDE$ parameter
+#                      values and in pod_combat_player_* / _opponent_*
+#                      pointer vars on the slot stories.
+#   On PC turns: actor = player, target = opponent.
+#   On enemy turns: actor = opponent positionally but still occupies
+#   the "actor" workspace; the dispatch effects flip the parameter
+#   strings accordingly so workspace_load writes to the right side.
 ##############################################################################################
 
 ##############################################################################################
@@ -25,12 +39,15 @@
 # directly (current scope = slot story) and writes pod_combat_actor_*
 # on scope:host.
 #
-# Mirrors pod_combat_load_target_from_story_effect but writes the
-# actor side (pod_combat_actor_*). Used by
-# pod_combat_load_workspace_effect's iteration over pod_combat_active_slots
-# (finds the slot whose slot_index matches pod_combat_current_actor),
-# and by any future single-slot caller that needs to save scope:host
-# and flip into a slot story before delegating.
+# MIRROR of pod_combat_load_target_from_story_effect (below) — same
+# field-by-field copy, writes pod_combat_actor_* instead of
+# pod_combat_target_*. If you add a field to one, add it to both.
+#
+# Used by pod_combat_load_workspace_effect's iteration over
+# pod_combat_active_slots (finds the slot whose slot_index matches
+# pod_combat_current_actor), and by any future single-slot caller
+# that needs to save scope:host and flip into a slot story before
+# delegating.
 pod_combat_load_actor_from_story_effect = {
 	if = {
 		limit = { has_variable = slot_char }
@@ -69,7 +86,7 @@ pod_combat_load_actor_from_story_effect = {
 				remove_variable = pod_combat_actor_is_stealthed
 			}
 			# Spirit-damage capability (static per combat). The actor needs
-			# this flag to land attacks on incorporeal spirit targets —
+			# this flag to land attacks on incorporeal spirit targets 
 			# read by the spirit gate inside pod_combat_resolve_contact_effect
 			# (gated on the move's checks_spirit_gate capability flag) via
 			# pod_combat_$ACTOR_SIDE$_can_damage_spirit.
@@ -184,7 +201,7 @@ pod_combat_load_actor_from_story_effect = {
 # on scope:host.
 #
 # The save-then-re-enter dance lets us read slot fields via
-# scope:slot_story.var:slot_X from inside scope:host — without it,
+# scope:slot_story.var:slot_X from inside scope:host. Without it,
 # every read inside scope:host = { ... } would resolve against host
 # scope and the slot fields wouldn't be visible.
 #
@@ -193,6 +210,10 @@ pod_combat_load_actor_from_story_effect = {
 # body's current scope IS the slot story), and from
 # pod_combat_select_target / pod_combat_ai_swap_to_pc_target_effect for
 # their single-slot host→story flips.
+#
+# MIRROR of pod_combat_load_actor_from_story_effect (above) same
+# field-by-field copy, writes pod_combat_target_* instead of
+# pod_combat_actor_*. If you add a field to one, add it to both.
 pod_combat_load_target_from_story_effect = {
 	if = {
 		limit = { has_variable = slot_char }
@@ -204,11 +225,9 @@ pod_combat_load_target_from_story_effect = {
 			set_variable = { name = pod_combat_target_morale value = scope:slot_story.var:slot_morale }
 			set_variable = { name = pod_combat_target_prowess value = scope:slot_story.var:slot_prowess }
 			set_variable = { name = pod_combat_target_hit_chance value = scope:slot_story.var:slot_hit_chance }
-			# slot_energy_used is default-init'd to 0 at story creation, so
-			# always present — no has_variable gate needed. Named
-			# pod_combat_target_energy_used (not _opponent_) for symmetry
-			# with pod_combat_actor_energy_used on the actor side; see
-			# move_effects §3 for the convention rationale.
+			# slot_energy_used mirror — same default-init / naming
+			# convention as the actor side; see load_actor_from_story
+			# above.
 			set_variable = { name = pod_combat_target_energy_used value = scope:slot_story.var:slot_energy_used }
 			if = {
 				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
@@ -342,12 +361,13 @@ pod_combat_load_target_from_story_effect = {
 			# combat init in pod_combat_calculate_all_hit_chances_effect),
 			# so without this every AI swap, AoE per-target iteration, and
 			# workspace-load would push the wrong number into the damage
-			# roll. The pair recalc reads the workspace's player_prowess
+			# roll. The pair recalc reads the workspace's pod_combat_actor_prowess
 			# (set by the actor load that runs before this) and the
-			# opponent_prowess we just wrote above, then layers the active
-			# hit-tier modifiers via the per-side recalc effects. No slot
-			# writeback — that's intentional, see the comment on the recalc
-			# effect itself in pod_combat_tier_effects.txt.
+			# pod_combat_target_prowess we just wrote above, then layers
+			# the active hit-tier modifiers via the per-side recalc
+			# effects. No slot writeback — that's intentional, see the
+			# comment on the recalc effect itself in
+			# pod_combat_tier_effects.txt.
 			pod_combat_recalc_pair_hit_chance_effect = yes
 		}
 	}
@@ -688,11 +708,6 @@ pod_combat_load_workspace_effect = {
 	# pod_combat_selected_target. The iteration limit fires for at
 	# most one slot per pass — the load helper inside the body is the
 	# story-scoped variant, which writes to scope:host (this scope).
-	#
-	# Replaced two parallel 10-block if/else_if chains keyed on
-	# integer slot index; the story-scoped variants of the load
-	# helpers (added alongside their int-keyed wrappers) make the
-	# iteration body slot-index-agnostic.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
@@ -793,8 +808,7 @@ pod_combat_save_workspace_effect = {
 	# Mirror image of pod_combat_load_workspace_effect: iterate
 	# pod_combat_active_slots and write the actor / target workspace
 	# back to whichever slot's slot_index matches pod_combat_current_actor
-	# / pod_combat_selected_target. Replaced two parallel 10-block
-	# if/else_if chains keyed on integer slot index.
+	# / pod_combat_selected_target. 
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
@@ -815,10 +829,9 @@ pod_combat_save_workspace_effect = {
 
 	# KO check on the action's target. Same OR'd KO conditions across
 	# four sources (PoD is_alive, pod_combat_is_incapacitated_trigger,
-	# slot_morale ≤ 0, wound-track-full) — see comment block above for
+	# slot_morale ≤ 0, wound-track-full) see comment block above for
 	# rationale. Iterates pod_combat_active_slots and flips slot_alive=0
-	# only on the slot whose slot_index matches selected_target. Replaces
-	# a 10-block else_if dispatcher.
+	# only on the slot whose slot_index matches selected_target. 
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -834,7 +847,7 @@ pod_combat_save_workspace_effect = {
 		set_variable = { name = slot_alive value = 0 }
 	}
 
-	# KO check on the actor (counter-damage during their own action —
+	# KO check on the actor (counter-damage during their own action
 	# a retaliating target's morale damage / chip damage can finish them
 	# off). Same KO predicates as above; iterates the same list.
 	every_in_list = {
@@ -904,7 +917,7 @@ pod_combat_init_slot_from_character_effect = {
 	# Read soak and prowess from the character and snapshot them as
 	# saved scopes so the parametric pod_combat_set_slot_var_effect
 	# calls below can pass them as VALUE without re-resolving against
-	# the slot story scope. HP / wound state isn't snapshotted —
+	# the slot story scope. HP / wound state isn't snapshotted
 	# pod_combat_slot_max_hp_value / _total_damage_sv / _agg_damage_sv
 	# read live from the participant's PoD wound vars at GUI render
 	# time.
@@ -924,31 +937,31 @@ pod_combat_init_slot_from_character_effect = {
 	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = morale    VALUE = pod_combat_max_morale }
 	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = prowess   VALUE = scope:slot_prowess }
 	pod_combat_set_slot_alive_effect = { SLOT = $SLOT$ VALUE = 1 }
-	# AI energy-use counter — increments on every energy-cost skill this
+	# AI energy-use counter: increments on every energy-cost skill this
 	# combatant fires. The AI move picker layers stacking ADDITIVE weight
 	# penalties on top of this counter (-8 / -10 / -12 / -14 at thresholds
 	# 1 / 2 / 3 / 4+, cumulating to 0 / -8 / -18 / -30 / -44) to bias
-	# selection AWAY from energy spends as the pool depletes. This is
-	# additive selection-bias. The AI may actualy pays the splat energy 
-	# on top of this. Energy-cost moves route through the same
-	# POD_spend_splat_agnostic_energy path the PC uses.
+	# selection AWAY from energy spends as the pool depletes. The counter
+	# only drives selection bias; the AI still pays the actual splat
+	# energy on top, via the same POD_spend_splat_agnostic_energy path
+	# the PC uses.
 	pod_combat_set_slot_var_effect = { SLOT = $SLOT$ NAME = energy_used VALUE = 0 }
 	# ── Spirit / incorporeality capability flags ─────────────────
 	# Mirrors PoD's POD_damage_spirit_custom_trigger semantics for the
 	# minigame. Two per-slot flags are captured once at init and never
 	# change during combat:
-	#   incorporeal_spirit — target is an incorporeal spirit (ghost,
+	#   incorporeal_spirit: target is an incorporeal spirit (ghost,
 	#       Umbral entity, non-Risen wraith, etc.) that can't be harmed
 	#       by mundane physical attacks. Checked via PoD's own
 	#       POD_can_be_killed_physically_trigger = no.
-	#   can_damage_spirit  — actor has the supernatural means to strike
+	#   can_damage_spirit: actor has the supernatural means to strike
 	#       incorporeal spirits (fera/spirit/fae/wraith/true_faith, or
 	#       specific perks / artifacts). Checked via PoD's own
 	#       POD_can_damage_spirit_trigger = yes.
 	# These gate the four Physical damage pipelines at the top: if the
 	# target is incorporeal and the actor can't damage spirits, the
 	# attack auto-misses. Supernatural / Mental / Fire / Sunlight /
-	# Silver / Gold / Holy pipelines are unaffected — they connect
+	# Silver / Gold / Holy pipelines are unaffected. They connect
 	# through incorporeality normally.
 	pod_combat_remove_slot_var_effect = { SLOT = $SLOT$ NAME = incorporeal_spirit }
 	if = {
@@ -966,7 +979,7 @@ pod_combat_init_slot_from_character_effect = {
 	# AI loadouts and anti-repetition history (last / prev / prev2
 	# move) are per-fight scratch state. Clear them on slot init so
 	# every fight seeds from the current move catalogue and starts
-	# with empty history. PC slot (slot 0) is skipped — the player's
+	# with empty history. PC slot (slot 0) is skipped. The player's
 	# loadout is persistent equipment configured via the loadout
 	# decision, and the PC has no AI history vars to clear.
 	if = {
@@ -982,12 +995,13 @@ pod_combat_init_slot_from_character_effect = {
 	# Apply pod_combat_duel_active to every combatant so other
 	# systems (feeding, schemes, travel, activity events from
 	# other mods) can gate on `has_character_modifier` and defer
-	# firing mid-duel. Normal cleanup happens via the
-	# pod_on_combat_duel_end on_action; `days = 30` is a safety
-	# net for edge cases (crash, save corruption, mod conflict
-	# blocking the on_action). Combat minigames end in seconds of
-	# game time, so 30 days never clips a real duel and keeps
-	# stale state bounded if anything goes wrong with cleanup.
+	# firing mid-duel. Normal cleanup happens inside
+	# pod_combat_duel_end_effect (scripted effect called from
+	# pod_combat_end_combat_effect); `days = 30` is a safety net
+	# for edge cases (crash, save corruption, mod conflict blocking
+	# the inline cleanup). Combat minigames end in seconds of game
+	# time, so 30 days never clips a real duel and keeps stale state
+	# bounded if anything goes wrong with cleanup.
 	$CHARACTER$ = {
 		add_character_modifier = {
 			modifier = pod_combat_duel_active
@@ -1005,7 +1019,7 @@ pod_combat_init_slot_from_character_effect = {
 pod_combat_assign_ally_slot_effect = {
 	# $CHARACTER$ = character to add to next available ally slot (1-4)
 	# Team affiliation is derived from slot index — slots 0-4 = player
-	# team, 5-9 = enemy team — not stored as a per-slot variable. No
+	# team, 5-9 = enemy team; not stored as a per-slot variable. No
 	# pod_combat_actor_team_size counter is kept either; iterations
 	# over pod_combat_active_slots filtered by slot_index handle every
 	# reader that would have needed the count.
@@ -1033,7 +1047,7 @@ pod_combat_assign_ally_slot_effect = {
 
 pod_combat_assign_enemy_slot_effect = {
 	# $CHARACTER$ = character to add to next available enemy slot (6-9)
-	# pod_combat_enemy_team_size IS live — the assignment / fill-pass
+	# pod_combat_enemy_team_size IS live. The assignment / fill-pass
 	# logic in pod_combat_initialize_effect reads it to gate
 	# how many enemies still fit. Per-slot _team is dead (computed
 	# from slot index everywhere).
@@ -1076,6 +1090,29 @@ pod_combat_initialize_effect = {
 
 	$OPPONENT$ = { save_scope_as = pod_combat_target }
 
+	# Save-compat version check — mirrors the pod_combat_configure_skills
+	# decision's version reload. The configure decision was the only
+	# version-check site, so a player loading an older save and entering
+	# combat WITHOUT opening the configure window first would keep stale
+	# move-story references in their loadout (and AI loadouts in
+	# particular pull from the global catalogue, so AI selection would
+	# see the old stories too). Running the check here closes that gap.
+	# POD_reload_combat_moves clears the global list, rebuilds every
+	# story from the generator-emitted POD_initialize_combat_moves, and
+	# wipes every character's pod_combat_loadout — the empty-loadout
+	# fallback below then reseeds the PC with starter moves.
+	hidden_effect = {
+		if = {
+			limit = {
+				OR = {
+					NOT = { exists = global_var:POD_combat_version }
+					global_var:POD_combat_version != POD_current_combat_version
+				}
+			}
+			POD_reload_combat_moves = yes
+		}
+	}
+
 	# Default loadout if no moves equipped (list-based after the refactor;
 	# POD_apply_default_combat_loadout iterates POD_combat_moves and adds
 	# every story with is_starter_move set).
@@ -1087,8 +1124,28 @@ pod_combat_initialize_effect = {
 	# Close config window if open
 	remove_variable = pod_combat_config_open
 
-	# Defensive: clear is_over flag in case a previous combat left it stale
-	# (e.g. old save file, crash, or cleanup regression)
+	# Defensive cleanup for stale combat state: a prior combat that
+	# crashed, was force-quit, or left state via cleanup regression
+	# would leave pod_combat_active set with orphaned slot stories,
+	# old log entries, and stale workspace aliases. Without this
+	# preamble, the new fight inherits all of that: old log rows
+	# render in the new combat, slot stories on Charon leak (new
+	# ones are created without ending the old ones), and the
+	# workspace aliases (pod_combat_opponent, pod_combat_actor_char)
+	# point at characters from the prior fight until the new
+	# load_workspace overwrites them.
+	#
+	# pod_combat_cleanup_effect is the same teardown used at the
+	# normal end of combat; running it defensively here is
+	# idempotent when nothing's leftover.
+	if = {
+		limit = { has_variable = pod_combat_active }
+		pod_combat_cleanup_effect = yes
+	}
+
+	# Defensive: clear is_over flag in case the cleanup branch above
+	# didn't fire (no prior pod_combat_active) but a stale is_over
+	# somehow survived from earlier code paths.
 	remove_variable = pod_combat_is_over
 
 	set_variable = { name = pod_combat_mode value = $MODE$ }
@@ -1105,13 +1162,12 @@ pod_combat_initialize_effect = {
 	# iteration and the host-wide combat dispatchers (initiative,
 	# find_next_actor, AoE damage/heal, etc.) iterate at runtime. The
 	# stories are end_story-d in pod_combat_group_cleanup_effect at
-	# combat end — see pod_combat_slot_effects.txt for the lifecycle
+	# combat end. See pod_combat_slot_effects.txt for the lifecycle
 	# helpers.
 	pod_combat_create_slot_stories_effect = yes
 
-	# Save the PC scope early so the shapeshift pre-pass can exclude
-	# them explicitly. The PC also gets registered as slot 0's
-	# slot_char (via pod_combat_set_slot_char_effect) below.
+	# The PC also gets registered as slot 0's slot_char
+	# (via pod_combat_set_slot_char_effect) below.
 	save_scope_as = combat_pc
 
 	# -- Pre-pass: shapeshift all AI fera combatants BEFORE any slot init --
@@ -1126,9 +1182,7 @@ pod_combat_initialize_effect = {
 	# Shapeshifting upfront ensures every CASTER has its warform modifier
 	# before any delirium / discipline query runs.
 	#
-	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift. They may prefer
-	# to fight in human form (e.g., to preserve social options post-combat)
-	# or may have already shifted manually via an interaction.
+	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift.
 	scope:pod_combat_target = {
 		if = {
 			limit = {
@@ -1257,7 +1311,7 @@ pod_combat_initialize_effect = {
 	# "Primary opposing leader" = slot 5 (the enemy leader) for player-team combatants 0-4,
 	# and slot 0 (the PC) for enemy-team combatants 5-9. NOT an average across the enemy
 	# team — pair-specific recalculation kicks in later when an actor/target pair is
-	# loaded into the workspace via pod_combat_recalc_actor_hit_chance_effect, which
+	# loaded into the workspace via pod_combat_recalc_pc_hit_chance_effect, which
 	# re-derives hit_chance against the *currently selected* target instead of the leader.
 	pod_combat_calculate_all_hit_chances_effect = yes
 
@@ -1273,14 +1327,18 @@ pod_combat_initialize_effect = {
 		set_variable = { name = pod_combat_target_char value = var:pod_combat_slot_5.var:slot_char }
 	}
 	set_variable = { name = pod_combat_selected_target value = 5 }
-	# Initialize the unified PC target — defaults to the primary opponent
+	# Initialize the unified PC target: defaults to the primary opponent
 	# (slot 5). The player can switch targets mid-combat via the Target
 	# button on any combat card (allies 1-4 or enemies 5-9). A single
 	# variable covers both team-enemy and single-ally targeting; the
 	# can_use triggers enforce that each skill fires against a valid slot.
 	set_variable = { name = pod_combat_pc_target value = 5 }
-	set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
-	pod_combat_apply_ap_drain_effect = yes
+	# AP / drain setup moved down into the "PC goes first" branch (and
+	# AI turns set their own AP via pod_combat_execute_ai_turn_effect).
+	# The previous early-set order was harmless at init because no
+	# drain has accumulated, but it modeled the wrong contract: the
+	# drain reads pod_combat_actor_ap_drain from the workspace, which
+	# isn't populated until load_workspace runs.
 
 	# Initialize combat log
 	set_variable = { name = pod_combat_last_damage value = 0 }
@@ -1301,7 +1359,7 @@ pod_combat_initialize_effect = {
 	# stripped post-combat by pod_combat_end_combat_effect AFTER
 	# pod_combat_apply_nonfatal_effect has capped everyone to at
 	# least one empty box. Fatal duels deliberately don't gate the
-	# death check — combatants can die mid-fight; KO via wound-track-
+	# death check. Combatants can die mid-fight; KO via wound-track-
 	# full happens regardless via the slot alive-flip check below.
 	if = {
 		limit = {
@@ -1311,10 +1369,40 @@ pod_combat_initialize_effect = {
 		pod_combat_apply_nonfatal_flag_effect = yes
 	}
 
+	# -- Init-time KO check --
+	# pod_combat_init_slot_from_character_effect sets slot_alive = 1
+	# unconditionally for every populated slot. HP / morale / state are
+	# all read live from the character at runtime, so a character who
+	# walks into combat already KO'd (filled wound track from prior
+	# damage, scripted incapacitation, torpor, morale-broken from a
+	# prior scene) would be marked alive at init and could act / be
+	# targeted before the first save_workspace check flipped their
+	# flag. Apply the same 4-way KO predicate the action-boundary
+	# checks use (see lines ~841-872) and then run the victory check
+	# so a degenerate "everyone on one side is already KO'd" combat
+	# resolves immediately instead of running a phantom first round.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			OR = {
+				var:slot_char = { is_alive = no }
+				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
+				var:slot_morale <= 0
+				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
+			}
+		}
+		set_variable = { name = slot_alive value = 0 }
+	}
+	pod_combat_check_group_victory_effect = yes
+
 	# -- Determine round 1 turn order --
 	# Unified flow: every combat — including 1v1 — rolls initiative and
 	# processes any pre-PC turns so nobody gets a free first move. A 1v1
-	# is just a degenerate NvN with slots 0 and 5 populated.
+	# is just a degenerate NvN with slots 0 and 5 populated. Skipped
+	# when the init-time KO check already ended combat (everyone on
+	# one side started KO'd).
+	if = {
+		limit = { NOT = { has_variable = pod_combat_is_over } }
 	pod_combat_calculate_initiative_effect = yes
 	pod_combat_find_next_actor_effect = yes
 
@@ -1323,17 +1411,24 @@ pod_combat_initialize_effect = {
 			has_variable = pod_combat_current_actor
 			var:pod_combat_current_actor = 0
 		}
-		# PC goes first in initiative order — restore PC target, load workspace
+		# PC goes first in initiative order — restore PC target, load
+		# workspace, then set AP + apply drain (load must precede
+		# drain so the workspace mirror is populated).
 		set_variable = { name = pod_combat_current_turn_side value = 0 }
 		pod_combat_restore_pc_target_effect = yes
 		pod_combat_load_workspace_effect = yes
+		set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
+		pod_combat_apply_ap_drain_effect = yes
 	}
 	else = {
 		# An AI goes first — process AI turns until it's the PC's turn
 		# or combat ends. The PC is blocked from acting because the
 		# turn-side check fires against current_actor != 0.
+		# AI turn setup (load + set AP + drain) happens inside
+		# pod_combat_execute_ai_turn_effect.
 		pod_combat_process_pre_pc_turns_effect = yes
 	}
+	}  # end of NOT pod_combat_is_over guard (init-time KO check)
 }
 
 # Per-slot helper: compute one slot's base hit chance from prowess and
@@ -1412,8 +1507,8 @@ pod_combat_calculate_all_hit_chances_effect = {
 # pipeline).
 ##############################################################################################
 
-pod_combat_recalc_actor_hit_chance_effect = {
-	# Pair-specific hit-chance recalc: rebuilds the actor's base_hit_chance
+pod_combat_recalc_pc_hit_chance_effect = {
+	# PC-specific hit-chance recalc: rebuilds slot 0's base_hit_chance
 	# from the currently-loaded target's prowess, then calls the full
 	# tier recalc so any active hit buffs / debuffs reapply cleanly
 	# against the new base. Called when the PC interactively swaps
@@ -1421,6 +1516,12 @@ pod_combat_recalc_actor_hit_chance_effect = {
 	# right after loading the new enemy into pod_combat_target_*), and
 	# also from the tier-recalc path when stat changes invalidate the
 	# previously-computed hit chance.
+	#
+	# SLOT = 0 is hardcoded inside this effect. The function is
+	# PC-only by design (target swap is a PC interaction; AI selects
+	# moves and targets together each turn). Renamed from
+	# `_actor_` to `_pc_` to make the PC-only contract obvious; the
+	# old name suggested it might generalize to any acting slot.
 	#
 	# Round-duration tiers carry over (they expire at round end, not on
 	# target swap). Stealth's +30 is a separate mechanic outside the
@@ -1463,9 +1564,10 @@ pod_combat_group_cleanup_effect = {
 	#     Cleared so save data doesn't carry it between fights.
 	#   - pod_combat_ai_last_move / _prev_move / _prev2_move: the
 	#     three-deep anti-repetition history. Cleared so the same
-	#     NPC's next fight doesn't open with -30/-15/-8 penalties
-	#     against the moves they used last combat.
-	# Slot 0 (PC) is skipped — the player's loadout is persistent
+	#     NPC's next fight doesn't open with -35/-20/-12 penalties
+	#     against the moves they used last combat (penalty values
+	#     live in pod_combat_ai_effects.txt's selector weight block).
+	# Slot 0 (PC) is skipped. the player's loadout is persistent
 	# equipment, and the AI history vars are never written on the PC
 	# (the selector switches into var:pod_combat_actor_char before
 	# touching them, which is always an AI on AI turns).
@@ -1509,8 +1611,9 @@ pod_combat_group_cleanup_effect = {
 	# ── Workspace mirrors for the spirit capability flags ────────
 	# Per-slot slot_incorporeal_spirit / slot_can_damage_spirit are
 	# torn down with the rest of the slot story above; these are the
-	# host-scope workspace mirrors that load_actor_from_slot_effect /
-	# load_target_from_slot_effect populate.
+	# host-scope workspace mirrors that
+	# pod_combat_load_actor_from_story_effect /
+	# pod_combat_load_target_from_story_effect populate.
 	remove_variable = pod_combat_actor_incorporeal_spirit
 	remove_variable = pod_combat_actor_can_damage_spirit
 	remove_variable = pod_combat_target_incorporeal_spirit
@@ -1533,8 +1636,8 @@ pod_combat_group_cleanup_effect = {
 # + init_bonus. NOT a uniform random(1-30) — the seven buckets are
 # uniformly weighted (1 each in random_list) but the values are
 # discrete, which produces a coarser distribution than continuous 1-30
-# would. Store in pod_combat_c{i}_initiative. Clear
-# pod_combat_c{i}_has_acted flags.
+# would. Stored on each slot story as slot_initiative; slot_has_acted
+# is cleared on the same pass.
 ##############################################################################################
 
 # Per-slot helper: roll one slot's initiative for the round, fold in
@@ -1558,7 +1661,7 @@ pod_combat_calculate_initiative_effect = {
 	# bucket_pick is one of seven discrete values {1, 5, 10, 15, 20,
 	# 25, 30} chosen uniformly via random_list with weight 1 each.
 	# Tuning the variance means changing the bucket VALUES (not
-	# switching to a uniform range) — adding more buckets extends the
+	# switching to a uniform range), adding more buckets extends the
 	# curve, narrower spreads (e.g. {5, 10, 15}) make it more
 	# prowess-deterministic.
 	# init_bonus comes from buff/debuff moves applied previous round;
@@ -1567,12 +1670,7 @@ pod_combat_calculate_initiative_effect = {
 	#
 	# Iterates pod_combat_active_slots — the iteration body runs in
 	# slot-story scope so var:slot_X reads/writes target the slot
-	# story directly. Replaced an unrolled 10-call dispatcher
-	# (pod_combat_calc_one_initiative_effect × 10) with this single
-	# loop; the helper became redundant once the slot story is the
-	# iteration scope (set_variable = { name = slot_X ... } writes
-	# the same field that the parametric pod_combat_set_slot_var_effect
-	# wrapper would have).
+	# story directly.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
@@ -1790,7 +1888,7 @@ pod_combat_ai_select_player_target_effect = {
 # SECTION 10b: PC TARGET PERSISTENCE (UNIFIED)
 #
 # pod_combat_pc_target is a single slot index (1-9) representing whomever the PC has
-# currently selected via the Target button on any combat card — ally OR enemy. A skill's
+# currently selected via the Target button on any combat card: ally OR enemy. A skill's
 # target-type (single-enemy / single-ally / team-*) is enforced by the can_use trigger,
 # not by having separate target variables.
 #
@@ -1803,7 +1901,7 @@ pod_combat_ai_select_player_target_effect = {
 ##############################################################################################
 
 pod_combat_restore_pc_target_effect = {
-	# Detect dead/missing pc_target via any_in_list — if NO active
+	# Detect dead/missing pc_target via any_in_list, if NO active
 	# slot matches pc_target with slot_alive = 1, we need to retarget.
 	# The OR also covers the unset case (no pc_target var) and the
 	# self-targeting case (pc_target = 0 = PC). Replaced a 10-AND OR
@@ -2125,7 +2223,7 @@ pod_combat_check_group_victory_effect = {
 
 # Per-slot helper: reset one slot's live soak to its base_soak (round-
 # end revert for soak debuffs). Same shape as
-# pod_combat_calc_one_hit_chance_effect — body factored out so the
+# pod_combat_calc_one_hit_chance_effect, body factored out so the
 # round-tick dispatcher below is 10 parametric calls.
 pod_combat_reset_one_slot_soak_effect = {
 	# $SLOT$ = 0..9
@@ -2140,7 +2238,7 @@ pod_combat_clear_per_turn_slot_state_effect = {
 	# For each slot: reset live soak to base_soak. Only act on slots
 	# that exist (have a character assigned).
 	#
-	# NOTE: guard / dodge / stealth stances are NOT cleared here — they
+	# NOTE: guard / dodge / stealth stances are NOT cleared here. They
 	# persist across rounds and are only consumed by an enemy attack (in
 	# the damage pipeline) or wiped at combat end (pod_combat_cleanup_effect).
 	# Stealth's +30 hit bonus similarly stays until consumed, since it's
@@ -2159,9 +2257,17 @@ pod_combat_clear_per_turn_slot_state_effect = {
 }
 
 ##############################################################################################
-# SECTION 13: GROUP ROUND END + HEALTH WRITE-BACK
-# Apply health track damage for all alive combatants, increment round, calculate new
-# initiative, and set up the next round.
+# SECTION 13: GROUP ROUND END
+# Increment round, calculate new initiative, expire round-duration tier buffs,
+# and set up the next round.
+#
+# No health write-back happens here. Wounds are applied LIVE during each move
+# via POD_increase_wounds_hostile_effect, not deferred to round end. The
+# fatality-mode finalization (wound cap + nonfatal-flag strip) runs once at
+# combat END via pod_combat_apply_nonfatal_effect called from
+# pod_combat_end_combat_effect. Calling it from here would strip
+# pod_combat_nonfatal_active after round 1, silently breaking fatality = no
+# from round 2 onward.
 ##############################################################################################
 
 pod_combat_group_end_round_effect = {
@@ -2173,10 +2279,6 @@ pod_combat_group_end_round_effect = {
 		# Combat already cleaned up — nothing to do
 	}
 	else = {
-
-	# Apply health track damage for all alive combatants
-	# Routed through the wrapper so fatality mode (practice/no) is respected.
-	pod_combat_apply_nonfatal_effect = yes
 
 	change_variable = { name = pod_combat_round add = 1 }
 
@@ -2201,12 +2303,16 @@ pod_combat_group_end_round_effect = {
 	# If PC (slot 0) goes first, set up workspace and wait for player input
 	if = {
 		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 }
+		# Order matters: pod_combat_apply_ap_drain_effect reads
+		# pod_combat_actor_ap_drain from the workspace, which is
+		# populated by pod_combat_load_actor_from_story_effect inside
+		# load_workspace. Restoring the target first and loading
+		# before draining mirrors the AI turn-start ordering at the
+		# top of pod_combat_execute_ai_turn_effect.
+		pod_combat_restore_pc_target_effect = yes
+		pod_combat_load_workspace_effect = yes
 		set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
 		pod_combat_apply_ap_drain_effect = yes
-		# Restore the PC's chosen target (may have been clobbered by AI turns last round)
-		pod_combat_restore_pc_target_effect = yes
-		# Load workspace for PC acting against current selected target
-		pod_combat_load_workspace_effect = yes
 	}
 	else = {
 		# Non-PC goes first — process all AI turns until it's PC's turn or round ends
@@ -2278,17 +2384,21 @@ pod_combat_process_pre_pc_turns_effect = {
 	# If PC is next (or combat is over), set up workspace for PC
 	if = {
 		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor = 0 NOT = { has_variable = pod_combat_is_over } }
-		set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
-		pod_combat_apply_ap_drain_effect = yes
 		# Pull fresh HP / max / agg_damage for every slot from the
 		# characters' PoD wound state, so the combat window shows the
 		# right bars when the move bar becomes interactive. AI turns
 		# mutated char wounds directly (no slot refresh between AI
 		# actions), so the slot vars need a pre-render sync.
 
-		# Restore the PC's chosen target (AI turns just clobbered selected_target)
+		# Order matters: pod_combat_apply_ap_drain_effect reads
+		# pod_combat_actor_ap_drain from the workspace, which is
+		# populated by load_actor_from_story_effect inside
+		# load_workspace. Restore target + load workspace must happen
+		# BEFORE the AP / drain pair.
 		pod_combat_restore_pc_target_effect = yes
 		pod_combat_load_workspace_effect = yes
+		set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
+		pod_combat_apply_ap_drain_effect = yes
 		# DO NOT reset is_guarding / is_dodging / soak here. Stance
 		# state persists until consumed (see comments in damage
 		# pipeline), and pod_combat_load_workspace_effect already

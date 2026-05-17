@@ -7,7 +7,7 @@
 #
 # Result map (pod_combat_last_result), sentinel/priority semantics,
 # the self-damage snapshot/restore pattern, and the reaction-system
-# architecture all live in COMBAT_REFERENCE.md §4 and §6.
+# architecture all live in COMBAT_REFERENCE.info §4 and §6.
 
 pod_combat_set_result_code_effect = {
 	# $CODE$ = result flag name (hp_damage / guard_blocked / soaked /
@@ -35,9 +35,12 @@ pod_combat_promote_result_code_retaliation_effect = {
 	# Retaliation fires after the primary damage outcome resolves.
 	# Promote hp_damage → hp_damage_retal and soaked → soaked_retal.
 	# Other outcomes (missed / guard_blocked / etc.) shouldn't reach
-	# here because pod_combat_check_retaliation_effect gates retaliation
-	# on pod_combat_last_damage > 0 OR a miss outcome — but be
-	# defensive and only promote the two expected starting flags.
+	# here because pod_combat_check_retaliation_effect dispatches via
+	# the shared pod_combat_apply_reaction_if_triggered_effect helper,
+	# gated by the matching partition trigger
+	# (pod_combat_result_code_indicates_contact_trigger for the hit
+	# branch, _indicates_miss_trigger for the evasion branch) — but
+	# be defensive and only promote the two expected starting flags.
 	if = {
 		limit = {
 			has_variable = pod_combat_last_result
@@ -74,10 +77,7 @@ pod_combat_spend_ap_effect = {
 # pod_combat_$TARGET_SIDE$_retaliate_* slots and fires each one
 # whose §6 outcome matched its trigger condition. For the system
 # overview, the recipe to add a new reaction class, and the
-# damage_type inheritance rules see COMBAT_REFERENCE.md §6.
-#
-# Test note: retaliation has not been well tested. Treat it as
-# reference rather than hardened.
+# damage_type inheritance rules see COMBAT_REFERENCE.info §6.
 
 # Generic reaction-firing helper. Called once per reaction slot pair
 # from pod_combat_check_retaliation_effect. Encapsulates the limit-
@@ -113,15 +113,27 @@ pod_combat_apply_reaction_if_triggered_effect = {
 pod_combat_check_retaliation_effect = {
 	# Reaction phase — see the REACTION PHASE block comment above.
 	#
-	# Retaliation damage inherits the damage_source and damage_type
-	# from the skill that armed the stance:
-	#   - Superficial: goes through the actor's soak check (can be soaked)
-	#   - Aggravated: can not be soaked, tracked as aggravated damage
+	# Retaliation damage inherits the damage_type (aggravated vs
+	# superficial) from the skill that armed the stance, but NOT
+	# the damage_source. The retaliation payload helper hardcodes
+	# REASON = duel_aggravated when the _agg flag is set, else
+	# REASON = duel. Elemental flavor (fire / silver / etc.) is
+	# deliberately dropped on retaliation.
+	#   - Superficial (REASON = duel): runs through PoD's normal
+	#     soak roll like any other physical wound.
+	#   - Aggravated (REASON = duel_aggravated): aggravated death
+	#     reasons return POD_damage_type_is_soakable = no for most
+	#     targets.
 	# The _agg companion variable (presence = aggravated, absent =
 	# superficial) is set on the workspace alongside the amount in §13.
 	#
-	# $TARGET_SIDE$ = "opponent" — side that has the retaliation stance
-	# $ACTOR_SIDE$  = "player"   — side that takes retaliation damage
+	# $TARGET_SIDE$ = workspace side that has the retaliation stance.
+	#                 Almost always "target" — the AI / PC attacks
+	#                 and the workspace target retaliates. Passed
+	#                 by caller.
+	# $ACTOR_SIDE$  = workspace side that takes retaliation damage.
+	#                 The original attacker (= "actor" in the usual
+	#                 dispatch).
 	#
 	# Both reactions use the shared payload helper, which preserves
 	# the original attack's pod_combat_last_damage across the inner
@@ -131,11 +143,11 @@ pod_combat_check_retaliation_effect = {
 
 	# Retaliate on contact — fires whenever the original attack made
 	# physical contact with the target, regardless of whether wounds
-	# went through (codes 0 / 1 / 2 / 6 / 7: HP damage, guard-blocked,
-	# soaked, and the retaliation overlays). This matches the natural
+	# went through (flag:hp_damage / guard_blocked / soaked, plus the
+	# hp_damage_retal / soaked_retal overlays). This matches the natural
 	# semantics of thorns / spite stances: the razors / spines / spiteful
 	# aura punish anyone who reaches you, even if your armor or guard
-	# absorbed their blow. Evasion outcomes (miss / dodge / stealth)
+	# absorbed their blow. Evasion outcomes (missed / dodged / stealthed)
 	# stay excluded — there was no contact to retaliate against.
 	#
 	# Why _contact_trigger and not _hp_damage_trigger: a literal "fires
@@ -150,10 +162,9 @@ pod_combat_check_retaliation_effect = {
 		RETALIATOR_SIDE   = $TARGET_SIDE$
 	}
 
-	# Retaliate on evasion — fires on miss / dodge / stealth (codes
-	# 3 / 5 / 12). All three are semantically the same outcome (the
-	# attack didn't land), so a "lash out when evaded" stance fires
-	# for any of them.
+	# Retaliate on evasion — fires on missed / dodged / stealthed.
+	# All three are semantically the same outcome (the attack didn't
+	# land), so a "lash out when evaded" stance fires for any of them.
 	pod_combat_apply_reaction_if_triggered_effect = {
 		TRIGGER_VAR       = pod_combat_$TARGET_SIDE$_retaliate_miss
 		AGG_FLAG_VAR      = pod_combat_$TARGET_SIDE$_retaliate_miss_agg
@@ -164,21 +175,13 @@ pod_combat_check_retaliation_effect = {
 }
 
 pod_combat_apply_retaliation_helper = {
-	# $ACTOR_SIDE$      = "player" or "opponent" — side taking retaliation
-	#                     (the original attacker, who is now on the
-	#                     receiving end of the counter-strike).
-	# $RETALIATOR_SIDE$ = "player" or "opponent" — side dishing out the
-	#                     retaliation (the original attack's target).
-	#                     Gates the retaliation through the
-	#                     spirit-damage check: if the retaliation target
-	#                     is incorporeal, the retaliator must have
-	#                     pod_combat_$RETALIATOR_SIDE$_can_damage_spirit
-	#                     for the counter-hit to land.
-	# $AMOUNT_VAR$  = workspace variable name holding retaliation damage
-	#                 (e.g. pod_combat_target_retaliate_hit)
-	# $AGG_FLAG_VAR$ = workspace variable name whose presence means the
-	#                  retaliation is aggravated (absent = superficial)
+	# $ACTOR_SIDE$      = side taking retaliation (original attacker).
+	# $RETALIATOR_SIDE$ = side dishing out retaliation (original target).
+	# $AMOUNT_VAR$      = workspace var holding retaliation damage.
+	# $AGG_FLAG_VAR$    = workspace var whose presence marks aggravated.
 	#
+	# Spirit-damage gate below: incorporeal attackers only take the
+	# counter-strike if the retaliator has the spirit-damage capability.
 	# Saves the original attack's last_damage so the helper's overwrite
 	# doesn't clobber the main-attack log line. Uses the bypass_guard
 	# helper because retaliation ignores the actor's guard stance (by
@@ -215,7 +218,7 @@ pod_combat_apply_retaliation_helper = {
 		# misroutes: macro substitution is textual, so by the time the
 		# engine reaches `value = $COUNT$` inside PoD's
 		# POD_increase_wounds_effect, the text has become
-		# `value = var:pod_combat_target_retaliate_hit` — and that
+		# `value = var:pod_combat_target_retaliate_hit` and that
 		# wound effect runs inside `var:pod_combat_$TARGET_SIDE$_char =
 		# { ... }`, so the var lookup hits the TARGET character (who
 		# doesn't carry workspace state) and PoD logs "var not set" +
@@ -245,26 +248,26 @@ pod_combat_apply_retaliation_helper = {
 
 		# Stash the retaliation's actual landed damage (post-soak)
 		# BEFORE we restore last_damage. Without this, when the original
-		# attack was guard-blocked (rcode 1) or soaked (rcode 2), the
-		# log entry's `damage` field carries the original's value (= 0)
-		# and the rcode 6 dispatch falls through to the em-dash fallback
-		# (both rcode 6 branches gate on `var:damage > 0`). Retaliation
-		# fires regularly from those original outcomes (per the
-		# _contact_trigger gate above), so the missing field surfaces.
-		# push_log writes this onto entry.var:retal_damage; the loc
-		# dispatch consults it for a "Counter-attack -X HP" fallback
-		# row when entry.damage is 0.
+		# attack was guard_blocked or soaked, the log entry's `damage`
+		# field carries the original's value (= 0) and the hp_damage_retal
+		# dispatch falls through to the — fallback (both branches
+		# gate on `var:damage > 0`). Retaliation fires regularly from
+		# those original outcomes (per the _contact_trigger gate above),
+		# so the missing field surfaces. push_log writes this onto
+		# entry.var:retal_damage; the loc dispatch consults it for a
+		# "Counter-attack -X HP" fallback row when entry.damage is 0.
 		set_variable = {
 			name  = pod_combat_last_retal_damage
 			value = var:pod_combat_last_damage
 		}
 
-		# Promote the inner-call result_code to the retaliation
-		# variant: 0 (damage landed) → 6 (damage + retaliation
-		# triggered), 2 (soaked) → 7 (damage + retaliation soaked).
+		# Promote the inner-call result flag to the retaliation
+		# variant: flag:hp_damage → flag:hp_damage_retal (damage +
+		# retaliation triggered), flag:soaked → flag:soaked_retal
+		# (damage + retaliation soaked).
 		# pod_combat_promote_result_code_retaliation_effect is
-		# defensive — it only promotes 0/2, leaving anything else
-		# untouched.
+		# defensive — it only promotes hp_damage / soaked, leaving
+		# anything else untouched.
 		pod_combat_promote_result_code_retaliation_effect = yes
 
 		# Restore the original attack's last_damage so the log line for the
@@ -301,7 +304,7 @@ pod_combat_apply_ap_drain_effect = {
 ######################################################
 ###### POD WOUND-SYSTEM INTEGRATION HELPERS
 ######################################################
-# Shim tht route combat damage through PoD's wound pipeline
+# Shims that route combat damage through PoD's wound pipeline
 # (POD_increase_wounds_hostile_effect → POD_apply_wound_boxes →
 # POD_health_death_check_effect). Existing pipeline handles:
 #   - Soak roll (POD_soak_chance, single knob on the character)
@@ -329,18 +332,31 @@ pod_combat_apply_ap_drain_effect = {
 
 pod_combat_route_to_pod_damage = {
 	# $TARGET_SIDE$ = "player" or "opponent"
-	# $REASON$ = death reason suffix (without the "death_" prefix) — e.g.
-	#            duel, duel_aggravated, fire, sun, silver, gold, true_faith.
+	# $REASON$ = death reason suffix (without the "death_" prefix).
 	#            POD_increase_wounds_effect builds the flag internally.
+	#            Currently routed values (authoritative map lives in
+	#            POD_combat_dispatch_by_source in
+	#            pod_combat_move_effects.txt):
+	#              duel, duel_aggravated,
+	#              fire, cold, lightning, sun, silver, gold,
+	#              true_faith (holy), balefire.
 	# $COUNT$ = raw damage (PoD will multiply by splat weakness + soak-roll).
 	#
 	# Sets scope:damage_dealt for downstream logic (0 if fully soaked /
-	# immune, remaining-HP-worth if the blow killed). The result_code
+	# immune, remaining-HP-worth if the blow killed). The result flag
 	# write happens internally — the helper sets pod_combat_last_result
-	# directly (2 = soaked, 0 = damage, retained per-call) without
-	# requiring callers to pre-clear anything. The §2 reset at the top
-	# of POD_execute_combat_move is the only place that initialises the
-	# code per-move.
+	# directly (flag:soaked when the wound pipeline absorbs everything,
+	# flag:hp_damage when at least one box landed) without requiring
+	# callers to pre-clear anything. The §2 reset at the top of
+	# POD_execute_combat_move is the only place that initialises the
+	# result per-move.
+	#
+	# Formula: scope:damage_dealt = max(0, Δsuperficial_boxes) + max(0, Δaggravated_boxes)
+	#   Both deltas read off the target character's PoD wound vars
+	#   (POD_empty_damage_boxes, POD_health_aggravated_damage_num)
+	#   snapshotted before vs after the wound-pipeline call. The
+	#   max(0, ...) clamp prevents negative deltas if PoD's pipeline
+	#   somehow pushed boxes the wrong way (heal-on-overflow, etc.).
 
 	# Practice mode: sparring duel, no wounds actually inflicted. Skip
 	# the entire PoD wound-pipeline call so nothing hits the char's
@@ -373,7 +389,7 @@ pod_combat_route_to_pod_damage = {
 	# aggravated wounds (e.g. 5 sup + 0 agg → 2 sup + 3 agg on a 3-agg
 	# hit). Total boxes (POD_total_damage_boxes) stays at 5 both before
 	# and after, so a naive post_total - pre_total delta reads as 0
-	# and falsely classifies the hit as "soaked" (code 2). Tracking
+	# and falsely classifies the hit as flag:soaked. Tracking
 	# the per-track delta and clamping each at 0 mirrors PoD's own
 	# `total_wounds_gained` semantics (see POD_apply_wound_boxes).
 	var:pod_combat_$TARGET_SIDE$_char = {
@@ -385,7 +401,8 @@ pod_combat_route_to_pod_damage = {
 	}
 	# Combat host (PC) holds workspace; scope:combat_host must be
 	# saved upstream by POD_execute_combat_move (single point of
-	# truth — see line ~44 of pod_combat_move_effects.txt). 
+	# truth — see the `save_scope_as = combat_host` near the top of
+	# POD_execute_combat_move in pod_combat_move_effects.txt).
 	#
 	# The deeper call chain (configure_start_group_combat_effect →
 	# pod_combat_initialize_effect → process_pre_pc_turns →
@@ -464,7 +481,7 @@ pod_combat_route_to_pod_damage = {
 
 		if = {
 			limit = { scope:damage_dealt = 0 }
-			# Fully soaked or immune: treat as "soaked" (code 2) for log.
+			# Fully soaked or immune: write flag:soaked for the log dispatch.
 			pod_combat_set_result_code_effect = { CODE = soaked }
 			set_variable = { name = pod_combat_last_damage value = 0 }
 		}
@@ -490,8 +507,8 @@ pod_combat_route_to_pod_damage = {
 			if = {
 				limit = { scope:morale_spill > 0 }
 				# Cap the spillover at current morale so mental-strain
-				# stress doesn't over-count past a morale-broken target.
-				# See pod_combat_deal_morale_damage_effect for the
+				# stress doesn't over-count past a morale-broken target
+				# (same cap pattern as pod_combat_deal_morale_damage_effect).
 				save_scope_value_as = {
 					name = morale_actually_spilled
 					value = {
@@ -561,7 +578,7 @@ pod_combat_deal_hp_damage_bypass_guard_effect = {
 # hit bonus still applies to this attack, then gets reverted for future
 # actions.
 #
-# $ACTOR_SIDE$ = "player" or "opponent" — the side that just attacked.
+# $ACTOR_SIDE$ = "player" or "opponent" the side that just attacked.
 # Forward attacks pass ACTOR_SIDE=actor (workspace convention has
 # the actor on the player side). Retaliation calls have the
 # retaliator on the opponent side, so retaliation paths that route
@@ -569,21 +586,104 @@ pod_combat_deal_hp_damage_bypass_guard_effect = {
 # pod_combat_apply_retaliation_helper goes through the bare
 # pod_combat_deal_hp_damage_bypass_guard_effect (which doesn't call
 # this stealth-consume), so retaliation doesn't currently consume
-# the retaliator's stealth — by design (retaliation is a reflex,
+# the retaliator's stealth by design (retaliation is a reflex,
 # not a deliberate attack that breaks stealth).
 pod_combat_consume_actor_stealth_effect = {
+	# Delegates to the shared stealth breaker, see invariant docs on
+	# pod_combat_break_stealth_workspace_effect below. SYNC_CURRENT = yes
+	# because the damage pipeline may have already copied
+	# pod_combat_current_hit_chance earlier in the same turn.
+	pod_combat_break_stealth_workspace_effect = { SIDE = $ACTOR_SIDE$ SYNC_CURRENT = yes }
+}
+
+# ── Shared workspace-stealth breaker ──────────────────────────────
+# Single point that removes the *_is_stealthed flag AND reverts the
+# +30 hit-chance bonus on the same workspace side. Used by:
+#   - pod_combat_consume_actor_stealth_effect (actor consumed stealth
+#     by attacking)
+#   - pod_combat_consume_target_stance_effect (target's stealth
+#     absorbed the incoming attack — auto-miss path)
+#   - the bypass_stealth single-target dispatch in
+#     pod_combat_move_effects.txt §5 (workspace target)
+#   - any future caller that needs to strip stealth without an
+#     "outcome" log line
+#
+# Parameters:
+#   SIDE          — "actor" / "target" / "player" / "opponent". Picks
+#                   which workspace mirror to act on.
+#   SYNC_CURRENT  — "yes" to also write pod_combat_current_hit_chance.
+#                   The actor-side consume path needs this because the
+#                   damage pipeline may have already copied current_hit_chance
+#                   earlier in the same turn; the target-side / bypass
+#                   paths don't.
+#
+# Idempotent: no-op when the flag isn't present, so callers can
+# invoke unconditionally.
+pod_combat_break_stealth_workspace_effect = {
 	if = {
-		limit = { has_variable = pod_combat_$ACTOR_SIDE$_is_stealthed }
-		remove_variable = pod_combat_$ACTOR_SIDE$_is_stealthed
-		# Revert the +30 hit chance bonus stealth granted
+		limit = { has_variable = pod_combat_$SIDE$_is_stealthed }
+		remove_variable = pod_combat_$SIDE$_is_stealthed
 		save_scope_value_as = {
-			name = new_hit_after_actor_stealth
-			value = { value = var:pod_combat_$ACTOR_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
+			name = pod_combat_break_stealth_new_hit
+			value = { value = var:pod_combat_$SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
 		}
-		set_variable = { name = pod_combat_$ACTOR_SIDE$_hit_chance value = scope:new_hit_after_actor_stealth }
-		# Keep current_hit_chance in sync in case the damage pipeline
-		# already copied it elsewhere in the same turn.
-		set_variable = { name = pod_combat_current_hit_chance value = scope:new_hit_after_actor_stealth }
+		set_variable = { name = pod_combat_$SIDE$_hit_chance value = scope:pod_combat_break_stealth_new_hit }
+		if = {
+			limit = { always = $SYNC_CURRENT$ }
+			set_variable = { name = pod_combat_current_hit_chance value = scope:pod_combat_break_stealth_new_hit }
+		}
+	}
+}
+
+# ── Slot-scope stealth helpers ────────────────────────────────────
+# Slot-scope mirrors of the workspace stealth applicator/breaker
+# above — same flag+hit_chance invariant, applied to slot_X vars
+# instead of workspace pod_combat_$SIDE$_*. Used by AoE broadcasts
+# iterating pod_combat_slots; caller must be in slot-story scope.
+
+pod_combat_apply_stealth_slot_effect = {
+	if = {
+		limit = { NOT = { has_variable = slot_is_stealthed } }
+		set_variable = { name = slot_is_stealthed value = yes }
+		save_scope_value_as = {
+			name = pod_combat_apply_stealth_slot_new_hit
+			value = { value = var:slot_hit_chance add = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = slot_hit_chance value = scope:pod_combat_apply_stealth_slot_new_hit }
+	}
+}
+
+# Workspace-side stealth applicator. Sets pod_combat_$SIDE$_is_stealthed
+# AND adds +30 to pod_combat_$SIDE$_hit_chance, idempotent. Mirrors
+# pod_combat_apply_stealth_slot_effect for the workspace mirror used
+# by the single-target stealth dispatch in §12 of move_effects.txt.
+# SYNC_CURRENT = yes writes pod_combat_current_hit_chance too — needed
+# when the actor's own attack hit_chance is being read mid-turn.
+pod_combat_apply_stealth_workspace_effect = {
+	if = {
+		limit = { NOT = { has_variable = pod_combat_$SIDE$_is_stealthed } }
+		set_variable = { name = pod_combat_$SIDE$_is_stealthed value = yes }
+		save_scope_value_as = {
+			name = pod_combat_apply_stealth_workspace_new_hit
+			value = { value = var:pod_combat_$SIDE$_hit_chance add = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = pod_combat_$SIDE$_hit_chance value = scope:pod_combat_apply_stealth_workspace_new_hit }
+		if = {
+			limit = { always = $SYNC_CURRENT$ }
+			set_variable = { name = pod_combat_current_hit_chance value = scope:pod_combat_apply_stealth_workspace_new_hit }
+		}
+	}
+}
+
+pod_combat_break_stealth_slot_effect = {
+	if = {
+		limit = { has_variable = slot_is_stealthed }
+		remove_variable = slot_is_stealthed
+		save_scope_value_as = {
+			name = pod_combat_break_stealth_slot_new_hit
+			value = { value = var:slot_hit_chance subtract = 30 min = 20 max = 95 }
+		}
+		set_variable = { name = slot_hit_chance value = scope:pod_combat_break_stealth_slot_new_hit }
 	}
 }
 
@@ -611,17 +711,14 @@ pod_combat_consume_actor_stealth_effect = {
 pod_combat_consume_target_stance_effect = {
 	if = {
 		limit = { has_variable = pod_combat_$TARGET_SIDE$_is_stealthed }
-		remove_variable = pod_combat_$TARGET_SIDE$_is_stealthed
-		# Revert the +30 hit chance bonus stealth granted now that
-		# stealth is consumed.
-		save_scope_value_as = {
-			name = new_hit_after_stealth
-			value = { value = var:pod_combat_$TARGET_SIDE$_hit_chance subtract = 30 min = 20 max = 95 }
-		}
-		set_variable = { name = pod_combat_$TARGET_SIDE$_hit_chance value = scope:new_hit_after_stealth }
-		# Code 12 = stealth-triggered auto-miss. Distinct from dodge
-		# (code 5) so the log line links to the Stealth concept rather
-		# than the Dodge one. Same auto-miss mechanic, different cause.
+		# Centralised teardown of flag + +30 — same helper used by the
+		# actor-consume path and the bypass_stealth dispatch in §5 of
+		# pod_combat_move_effects.txt.
+		pod_combat_break_stealth_workspace_effect = { SIDE = $TARGET_SIDE$ SYNC_CURRENT = no }
+		# flag:stealthed marks a stealth-triggered auto-miss. Distinct
+		# from flag:dodged so the log line links to the Stealth concept
+		# rather than the Dodge one. Same auto-miss mechanic, different
+		# cause.
 		pod_combat_set_result_code_effect = { CODE = stealthed }
 		set_variable = { name = pod_combat_last_damage value = 0 }
 		save_scope_value_as = { name = stance_consumed value = 1 }
@@ -644,8 +741,7 @@ pod_combat_consume_target_stance_effect = {
 # from the executing move's story. One pipeline serves every move's
 # pre-damage steps; per-source damage application happens after.
 #
-# Capability flags (set on scope:current_move at move-init time, see
-# resolve_capability_flags in generate_combat_files.py):
+# Capability flags (set on scope:current_move at move-init time):
 #   checks_spirit_gate — physical attacks pass through incorporeal
 #                        spirits unless actor has can_damage_spirit.
 #   checks_stance      — stealth → dodge consumption gates damage.
@@ -657,17 +753,21 @@ pod_combat_consume_target_stance_effect = {
 #
 # Outputs:
 #   scope:contact_result enum (consumed by callers to decide whether
-#   to fire damage payload):
+#   to fire damage payload — note these integers are LOCAL to the
+#   contact resolver, distinct from the pod_combat_last_result flag
+#   values above):
 #     0 = hit            — proceed to pod_combat_apply_damage_payload_effect
 #     1 = blocked        — guard consumed, no damage
 #     2 = miss           — hit roll failed
 #     3 = dodged         — dodge stance consumed
 #     4 = stealthed      — stealth stance consumed
 #     6 = spirit_immune  — gate denied
-#   pod_combat_last_result — written for each non-hit outcome
-#                        (1 / 3 / 5 / 12; spirit-immune logs as miss).
-#                        Hit (contact_result = 0) leaves the code
-#                        for the payload to write (code 0).
+#   pod_combat_last_result — flag written for each non-hit outcome
+#                        (flag:guard_blocked / flag:missed / flag:dodged
+#                        / flag:stealthed; spirit-immune logs as
+#                        flag:missed). Hit (contact_result = 0) leaves
+#                        the result var for the payload to write
+#                        (flag:hp_damage).
 #   pod_combat_last_damage = 0 — set on every non-hit outcome so
 #                        push_log doesn't read stale damage.
 pod_combat_resolve_contact_effect = {
@@ -791,7 +891,10 @@ pod_combat_apply_damage_payload_effect = {
 pod_combat_deal_morale_damage_effect = {
 	# $TARGET_SIDE$ = "player" or "opponent"
 	# $AMOUNT$ = morale damage (bypasses HP entirely)
-	# Mental damage: auto-hit, no guard, no soak, but dodge still works.
+	# Morale damage: auto-hit, no guard, no soak. Stealth AND dodge
+	# both still block — pod_combat_consume_target_stance_effect
+	# returns stance_consumed = 1 for stealth, 2 for dodge, and the
+	# limit below gates damage on stance_consumed = 0.
 	# On top of reducing the workspace morale bar, it also applies
 	# Mental Strain to the target character at a configurable morale:stress
 	# ratio (pod_combat_morale_stress_multiplier). Keeps the combat
@@ -828,9 +931,10 @@ pod_combat_deal_morale_damage_effect = {
 		# don't clobber pod_combat_last_damage (which holds the HP
 		# damage amount on damage+morale-damage moves).
 		set_variable = { name = pod_combat_last_morale_damage_amount value = $AMOUNT$ }
-		# Code 9 = morale-only outcome. Only set if no primary HP-damage
-		# code has fired — a damage+morale move keeps the HP code as
-		# primary; the morale amount rides along as a separate field.
+		# flag:morale_damage marks a morale-only outcome. Only set if
+		# no primary HP-damage flag has fired — a damage+morale move
+		# keeps the HP flag as primary; the morale amount rides along
+		# as a separate field.
 		pod_combat_set_result_code_if_unset_effect = { CODE = morale_damage }
 
 		# Mirror the morale loss onto the target as Mental Strain.
@@ -873,8 +977,9 @@ pod_combat_restore_morale_effect = {
 	# Parallel-track in its own variable so it doesn't clobber the
 	# HP damage amount captured in pod_combat_last_damage.
 	set_variable = { name = pod_combat_last_morale_heal_amount value = $AMOUNT$ }
-	# Code 11 = morale heal. Only set if no primary code has fired —
-	# damage+morale-heal hybrids keep the damage code as primary.
+	# flag:morale_healed marks a morale heal. Only set if no primary
+	# flag has fired — damage+morale-heal hybrids keep the damage flag
+	# as primary.
 	pod_combat_set_result_code_if_unset_effect = { CODE = morale_healed }
 }
 
@@ -927,21 +1032,37 @@ pod_combat_auto_resolve_effect = {
 # story_cycles in the PC's pod_combat_log variable list. Each entry
 # captures a snapshot of one resolved move:
 #
-#   move        — story scope of the executed move. The GUI reads
-#                 the move's name, attack_type, damage_source,
-#                 targeting, and stance/buff/debuff flags directly
-#                 from this scope — no per-entry duplication needed.
-#   actor       — character ref of the combatant who acted
-#   target      — character ref of the targeted combatant (optional;
-#                 self-targeting and team_* moves may skip)
-#   damage      — int amount of HP / morale change resolved
-#   result      — flag value (hp_damage / guard_blocked / soaked / ...),
-#                 see PODCombatLogResultText custom_loc for the full
-#                 dispatch table and COMBAT_REFERENCE.md §4 for the map
+#   move                  — story scope of the executed move. The GUI
+#                            reads the move's name, emitted capability
+#                            flags (requires_hit_roll / checks_guard /
+#                            checks_stance / checks_spirit_gate),
+#                            damage_source, damage_type, targeting,
+#                            and stance/buff/debuff flags directly
+#                            from this scope — no per-entry duplication
+#                            needed. 
+#   actor                 — character ref of the combatant who acted
+#   target                — character ref of the targeted combatant
+#                            (optional; self-targeting and team_* moves
+#                            may skip)
+#   damage                — int HP damage resolved (HP only; morale
+#                            uses morale_damage_amount below)
+#   heal_amount           — int HP healed when the move heals
+#   morale_damage_amount  — int morale loss when the move drops morale
+#   morale_heal_amount    — int morale restored when the move heals it
+#   retal_damage          — int damage from a triggered retaliation
+#                            (captured pre-restore so the loc dispatch
+#                            can render the counter-attack even when
+#                            the original was guard-blocked / soaked)
+#   result                — flag value (hp_damage / guard_blocked /
+#                            soaked / ...), see PODCombatLogResultText
+#                            custom_loc for the full dispatch table
+#                            and COMBAT_REFERENCE.info §4 for the map
 #
-# The list is appended-to and never trimmed during combat; cleanup at
-# combat end (pod_combat_cleanup_effect) ends_story on every entry and
-# clears the list. Each combat starts fresh.
+# Entries are PREPENDED — push_log rebuilds the list to insert each new
+# row at the FRONT so the GUI datamodel renders newest-first without
+# any sort logic. Cleanup at combat end (pod_combat_cleanup_effect)
+# ends_story on every entry and clears the list. Each combat starts
+# fresh.
 #
 # Render path: a single datamodel template in pod_combat_window.gui
 # iterates pod_combat_log. There is no per-entry GUI block — every
@@ -976,27 +1097,26 @@ pod_combat_push_log_effect = {
 	#       helpers, retaliation, morale and heal pipelines all write
 	#       here directly; push_log reads it unconditionally and falls
 	#       back to flag:utility only when no helper wrote a value.
-	#       Mapping lives in COMBAT_REFERENCE.md §4.
+	#       Mapping lives in COMBAT_REFERENCE.info §4.
 	#
-	# Result code map (must stay in sync with PODCombatLogResultText
+	# Result flag map (must stay in sync with PODCombatLogResultText
 	# customizable_loc and pod_combat_log_result_text_* loc keys):
-	#   0  — HP damage (-X [wound-box])
-	#   1  — guard-blocked
-	#   2  — soaked
-	#   3  — missed
-	#   5  — dodged
-	#   6  — HP damage + retaliation triggered (-X [box] retaliated)
-	#   7  — HP damage + retaliation soaked (-X [box] counter soaked)
-	#   8  — utility move applied (no damage)
-	#   9  — morale damage only (-X Morale)
-	#  10  — HP healed (+X [box])
-	#  11  — morale healed (+X Morale)
-	#  12  — stealth-triggered auto-miss (separate from rcode 5 dodged
-	#         so the log line links to the Stealth concept, not Dodge)
-	#
-	# Code 4 is reserved (originally "countered") — never written,
-	# never dispatched, no loc. Kept reserved so a future use can
-	# claim the slot without renumbering the rest.
+	#   flag:hp_damage         — HP damage (-X [wound-box])
+	#   flag:guard_blocked     — guard absorbed the strike
+	#   flag:soaked            — soak roll succeeded
+	#   flag:missed            — hit roll failed
+	#   flag:dodged            — dodge stance consumed the strike
+	#   flag:stealthed         — stealth stance forced an auto-miss
+	#                            (separate from dodge so the log line
+	#                            links to the Stealth concept card)
+	#   flag:hp_damage_retal   — HP damage + retaliation triggered
+	#                            (-X [box] retaliated)
+	#   flag:soaked_retal      — original attack soaked but retaliation
+	#                            still fired
+	#   flag:utility           — utility move applied (no damage)
+	#   flag:morale_damage     — morale-only outcome (-X Morale)
+	#   flag:hp_healed         — HP healed (+X [box])
+	#   flag:morale_healed     — morale healed (+X Morale)
 	#
 	# Story is owned by Charon (POD_wraith_01) — the same off-map anchor
 	# used by combat-move stories. Owning all log entries on a guaranteed-
@@ -1020,7 +1140,7 @@ pod_combat_push_log_effect = {
 	}
 	scope:new_log_entry = {
 		# Move story comes through directly as the MOVE_STORY parameter
-		# — no host-var handoff. Caller-passes-explicit keeps the
+		# no host-var handoff. Caller-passes-explicit keeps the
 		# contract local and lets push_log fire from any path without
 		# requiring a host-var pre-stamp.
 		set_variable = { name = move value = $MOVE_STORY$ }
@@ -1039,7 +1159,7 @@ pod_combat_push_log_effect = {
 		else = {
 			set_variable = { name = damage value = 0 }
 		}
-		# Parallel amount fields — heal / morale damage / morale heal
+		# Parallel amount fields: heal / morale damage / morale heal
 		# now write to their own variables instead of clobbering
 		# pod_combat_last_damage, so damage+heal / damage+morale moves
 		# preserve the HP-damage value above while still carrying the
@@ -1056,7 +1176,7 @@ pod_combat_push_log_effect = {
 			limit = { scope:combat_host = { has_variable = pod_combat_last_morale_heal_amount } }
 			set_variable = { name = morale_heal_amount value = scope:combat_host.var:pod_combat_last_morale_heal_amount }
 		}
-		# Retaliation damage — captured by pod_combat_apply_retaliation_helper
+		# Retaliation damage: captured by pod_combat_apply_retaliation_helper
 		# right after the inner damage call but BEFORE the helper
 		# restores pod_combat_last_damage to the original attack's
 		# value. Lets the loc dispatch render the counter-attack's hit
@@ -1066,20 +1186,21 @@ pod_combat_push_log_effect = {
 			limit = { scope:combat_host = { has_variable = pod_combat_last_retal_damage } }
 			set_variable = { name = retal_damage value = scope:combat_host.var:pod_combat_last_retal_damage }
 		}
-		# Result code resolution. Damage helpers and heal pipelines
+		# Result flag resolution. Damage helpers and heal pipelines
 		# write pod_combat_last_result directly during move
-		# execution (see the result-code helpers at the top of this
+		# execution (see the result helpers at the top of this
 		# file); push_log just reads the final value here. The
 		# helpers handle priority via their write order:
-		#   - HP damage helpers SET the code unconditionally (one
+		#   - HP damage helpers SET the flag unconditionally (one
 		#     branch per outcome, mutually exclusive within a single
 		#     call).
-		#   - Retaliation PROMOTES 0→6 / 2→7 if it fires.
+		#   - Retaliation PROMOTES hp_damage→hp_damage_retal and
+		#     soaked→soaked_retal if it fires.
 		#   - Morale damage / heal / morale-heal use the
 		#     "set if unset" helper so they only become primary when
-		#     no HP-damage code has fired.
-		# The fallback to code 8 (utility) covers moves that didn't
-		# write any code — pure stance / buff / debuff / AP-mod moves.
+		#     no HP-damage flag has fired.
+		# The fallback to flag:utility covers moves that didn't write
+		# any flag — pure stance / buff / debuff / AP-mod moves.
 		if = {
 			limit = {
 				scope:combat_host = {
@@ -1133,7 +1254,7 @@ pod_combat_push_log_effect = {
 
 # ─── POST-COMBAT HEALTH FINALIZATION ─────────────────────────────
 # Despite the historical name, this effect does NOT apply combat damage
-# — wounds are written directly to each combatant's PoD wound track
+# wounds are written directly to each combatant's PoD wound track
 # during move execution (the damage helpers in pod_combat_effects.txt
 # call POD_increase_wounds_* immediately, not deferred to end-of-combat).
 # This effect runs once at combat end (BEFORE cleanup) and only handles
@@ -1148,10 +1269,12 @@ pod_combat_push_log_effect = {
 #                       want kills to land or skipped HP writes entirely).
 
 pod_combat_apply_nonfatal_effect = {
-	# Damage is applied to each combatant's PoD wound vars
-	# (POD_health_damage_num / POD_health_aggravated_damage_num) live
-	# during move execution — this effect does NOT apply combat damage.
-	# Its name is a fossil from an earlier deferred-writeback model
+	# Despite the name, this effect does NOT apply combat damage
+	# wounds are written live to each combatant's PoD wound vars
+	# (POD_health_damage_num / POD_health_aggravated_damage_num)
+	# during move execution. This effect handles fatality-mode
+	# postprocessing only: the wound-cap pass for fatality = no
+	# plus stripping the pod_combat_nonfatal_active gate flag.
 	#
 	# Fatality modes:
 	#   practice — no HP writes at all during combat (the damage +
@@ -1213,58 +1336,12 @@ pod_combat_apply_nonfatal_effect = {
 	}
 }
 
-# ─── AGGRAVATED DAMAGE EFFECTS ───────────────────────────────────
-# Aggravated wounds route to PoD's POD_health_aggravated_damage_num
-# via the same live-application path the superficial pipeline uses
-# (POD_increase_wounds_hostile_effect → POD_apply_wound_boxes →
-# the agg/sup split inside that helper).
-#
-# Soakability: aggravated damage IS soakable, but only by characters
-# with the specific modifiers PoD's POD_can_soak_aggravated_damage
-# trigger lists (Mokole undying body, Demon infernal fortitude,
-# Dragon's ichor temp, Autumn's armor). For unflagged targets, the
-# soak roll is skipped because POD_damage_type_is_soakable returns
-# no for aggravated death reasons. Combat rcode 2 ("soaked") will
-# fire for those modifier-equipped targets when the soak roll wins,
-# matching the superficial soaked semantics.
-#
-# Push-out interaction: aggravated damage on an already-wounded target
-# converts existing superficial wounds to aggravated rather than
-# adding to total boxes. POD_total_damage_boxes can stay flat across
-# the call, so pod_combat_route_to_pod_damage tracks superficial and
-# aggravated deltas separately to avoid mistakenly classifying a
-# push-out as "soaked" — see the snapshot block in that effect for
-# the canonical writeup.
-
-# ─── ELEMENTAL / SOURCE DISPATCH (lives in pod_combat_move_effects.txt) ──
-# POD_combat_dispatch_by_source is a flat flag → REASON map; PoD's
-# wound system handles splat-weakness multipliers, aggravated
-# classification, and immunity off the REASON suffix. The combat layer
-# just supplies the flag.
-#
-# To trace the live path: pod_combat_move_effects.txt's
-# POD_combat_apply_single_hp_damage → POD_combat_dispatch_by_source
-# → POD_combat_dispatch_damage_pipeline → pod_combat_resolve_contact_effect
-# → pod_combat_apply_damage_payload_effect → pod_combat_deal_hp_damage_bypass_guard_effect
-# → pod_combat_route_to_pod_damage → POD_increase_wounds_hostile_effect.
-
 # ─── HEALING EFFECTS ────────────────────────────────────────────────
-# Two variants the move dispatcher (pod_combat_move_effects.txt's
-# hp_heal block) routes to based on the move's heal_type variable:
-#   Superficial — mundane/quick healing (bandages, Regeneration, feeding).
-#                 Cannot heal through aggravated wounds; HP is capped at
-#                 (max_hp - agg_damage) so aggravated damage remains a
-#                 lasting wound until it is specifically cured. Default
-#                 when heal_type is blank or unset.
-#   Aggravated  — rare / potent healing. Restores HP AND reduces the agg_damage 
-#                 counter by the amount healed, so aggravated wounds are properly
-#                 cleared for write-back to the real PoD health track.
-#                 Routed when heal_type = flag:aggravated.
-
-# Heal effects route through PoD's heal API so superficial / aggravated
-# box counts stay coherent with the wound system. The new helper mirrors
-# the damage-side pattern: scope-switch to the target, call PoD, re-
-# derive workspace HP from the updated state.
+# Mirror the damage-side pattern: scope-switch to the target, call
+# PoD's heal API (POD_heal_superficial_wound_effect /
+# POD_heal_aggravated_wound_effect), re-derive workspace HP from the
+# updated wound state. See per-effect comments below for the
+# superficial-vs-aggravated branching contract.
 
 pod_combat_route_to_pod_heal = {
 	# $SIDE$ = "player" or "opponent"
@@ -1293,9 +1370,9 @@ pod_combat_route_to_pod_heal = {
 		# mode heals nothing — last_heal_amount = 0 lets push_log /
 		# the result-text dispatcher render "—" instead of "+0 HP".
 		set_variable = { name = pod_combat_last_heal_amount value = 0 }
-		# Code 10 = HP heal. Only set if no primary code has fired —
-		# damage+heal moves keep the damage code; the heal amount
-		# rides along as the heal_amount field.
+		# flag:hp_healed marks an HP heal. Only set if no primary flag
+		# has fired — damage+heal moves keep the damage flag; the heal
+		# amount rides along as the heal_amount field.
 		pod_combat_set_result_code_if_unset_effect = { CODE = hp_healed }
 	}
 	else = {
@@ -1324,9 +1401,9 @@ pod_combat_route_to_pod_heal = {
 		# damage+heal moves preserve the HP-damage value in
 		# pod_combat_last_damage for the log line.
 		set_variable = { name = pod_combat_last_heal_amount value = scope:heal_applied }
-		# Code 10 = HP heal. Only set if no primary code has fired —
-		# damage+heal moves keep the damage code; the heal amount
-		# rides along as the heal_amount field.
+		# flag:hp_healed marks an HP heal. Only set if no primary flag
+		# has fired — damage+heal moves keep the damage flag; the heal
+		# amount rides along as the heal_amount field.
 		pod_combat_set_result_code_if_unset_effect = { CODE = hp_healed }
 	}
 }
@@ -1452,7 +1529,7 @@ pod_combat_end_combat_effect = {
 }
 
 # ─── DUEL-END EFFECT ────────────────────────────────────────────────
-# Scripted-effect equivalent of an on_action handler — runs once at
+# Scripted-effect equivalent of an on_action handler, runs once at
 # combat end (called by pod_combat_end_combat_effect BEFORE
 # pod_combat_cleanup_effect strips the slot vars). Two jobs per
 # combatant slot:
@@ -1474,7 +1551,7 @@ pod_combat_duel_end_effect = {
 	# `var:slot_char` switches into the participant's character scope
 	# without the host's per-slot pointer var. The list is populated by
 	# pod_combat_create_one_slot_story_effect and cleared by
-	# pod_combat_clear_slot_stories_effect — empty during tooltip-build,
+	# pod_combat_clear_slot_stories_effect, empty during tooltip-build,
 	# so this iteration is automatically a no-op there.
 	every_in_list = {
 		variable = pod_combat_slots
@@ -1485,12 +1562,16 @@ pod_combat_duel_end_effect = {
 		}
 	}
 
-	# Also remove the nonfatal-mode flag from every combatant. This is
-	# the gate on POD's death pipeline during combat; it needs to come
-	# off so future fatal damage (outside the minigame) resolves
-	# normally. Extends to all slots even if they never took damage —
-	# the per-slot remove is cheap and idempotent.
-	pod_combat_clear_nonfatal_flag_effect = yes
+	# pod_combat_nonfatal_active flag: deliberately NOT stripped here.
+	# Single-owner contract: pod_combat_apply_nonfatal_effect (called
+	# by pod_combat_end_combat_effect just before this effect) owns
+	# the nonfatal flag's lifecycle, stripping it AFTER the wound cap
+	# runs. The cap-then-strip ordering is load-bearing; stripping
+	# the flag before the cap would let PoD's inline death check fire
+	# during the cap pass and silently break the non-fatal contract.
+	# Earlier versions stripped here as a belt-and-braces no-op, which
+	# left the lifecycle ambiguous between two owners; removed in
+	# favour of the explicit single-owner contract.
 }
 
 # ─── CLEANUP ───────────────────────────────────────────────────────
@@ -1504,10 +1585,8 @@ pod_combat_cleanup_effect = {
 	# Discipline battle modifiers and the duel-active marker are
 	# cleared upstream by pod_combat_duel_end_effect, called inline
 	# from pod_combat_end_combat_effect BEFORE this cleanup runs.
-	# (We had wanted fire_on_action for built-in extensibility, but
-	# the targeted engine version doesn't recognize that effect — see
-	# the comment on the inline call site above. Submods that want to
-	# extend can override pod_combat_duel_end_effect via load order.)
+	# Submods that want to extend the duel-end teardown can override
+	# pod_combat_duel_end_effect via load order.
 
 	# Remove all combat variables from the player character
 	remove_variable = pod_combat_active

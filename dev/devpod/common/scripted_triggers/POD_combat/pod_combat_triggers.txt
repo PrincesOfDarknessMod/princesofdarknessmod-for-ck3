@@ -10,14 +10,23 @@ pod_combat_is_active_trigger = {
 
 pod_combat_is_over_trigger = {
 	# The pod_combat_is_over flag is set by pod_combat_check_group_victory_effect
-	# when an entire team is wiped. All combats (including 1v1) go through the
-	# same victory check, so this single flag is authoritative.
+	# whenever any of its three conditions trips: all enemies KO'd
+	# (player wins), PC KO'd (player loses even with surviving allies,
+	# the player has no way to continue the fight), or all allies KO'd
+	# (player loses). All combats (including 1v1) go through the same
+	# victory check, so this single flag is authoritative.
 	has_variable = pod_combat_is_over
 }
 
 pod_combat_is_player_turn_trigger = {
-	has_variable = pod_combat_current_turn_side
-	var:pod_combat_current_turn_side = 0
+	# Returns yes ONLY when the PC themselves are the current actor
+	# NOT just when it's the player team's turn. Every caller
+	# semantically wants "PC is acting", and the older
+	# `current_turn_side = 0` check incorrectly fired on ally AI turns
+	# (slots 1-4 also share player_turn_side = 0), which let ally AI
+	# move selection inherit PC-only targeting / resource gates.
+	has_variable = pod_combat_current_actor
+	var:pod_combat_current_actor = 0
 }
 
 ###### AP AFFORDABILITY TRIGGER ######
@@ -28,15 +37,15 @@ pod_combat_can_afford_ap_trigger = {
 
 ###### INCAPACITATED CHECK ######
 # Matches any character in a state that takes them out of tactical
-# combat entirely — severe wounds, vampire torpor, wight withering,
+# combat entirely; severe wounds, vampire torpor, wight withering,
 # wraith Shadow domination, kuei-jin pre-dharma, or zombified state.
 # Used by the alive-check OR blocks alongside is_alive = no and
 # morale <= 0 to flag a combatant as KO.
 #
-# Hardcoded list of the incapacitating traits. As is, it can be replaced
-# with is_incapable. Hard coded currently since we might actually
-# want to allow wight, dharma0, shadow, & zombu partipate but that is 
-# left for a future decision.
+# Hardcoded list of the incapacitating traits, kept separate from
+# is_incapable so a future design pass can decide whether
+# wight / dharma0 / shadow / zombu states should be fightable in the
+# minigame without changing PoD's is_incapable contract.
 
 pod_combat_is_incapacitated_trigger = {
 	OR = {
@@ -62,70 +71,30 @@ pod_combat_no_moves_equipped_trigger = {
 
 pod_combat_ai_has_available_ally_trigger = {
 	# True if the current actor has at least one alive non-self
-	# same-team ally available as a single-ally target. Slot story
-	# read pattern: outer has_variable on the pointer var, then
-	# chained `var:pod_combat_slot_$N$ = { has_variable = slot_char
-	# var:slot_alive = 1 }` for the filled-and-alive gate.
-	OR = {
-		AND = {
-			has_variable = pod_combat_slot_0
-			var:pod_combat_slot_0 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 0 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_1
-			var:pod_combat_slot_1 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 1 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_2
-			var:pod_combat_slot_2 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 2 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_3
-			var:pod_combat_slot_3 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 3 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_4
-			var:pod_combat_slot_4 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor <= 4
-			NOT = { var:pod_combat_current_actor = 4 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_5
-			var:pod_combat_slot_5 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 5 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_6
-			var:pod_combat_slot_6 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 6 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_7
-			var:pod_combat_slot_7 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 7 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_8
-			var:pod_combat_slot_8 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 8 }
-		}
-		AND = {
-			has_variable = pod_combat_slot_9
-			var:pod_combat_slot_9 = { has_variable = slot_char var:slot_alive = 1 }
-			var:pod_combat_current_actor >= 5
-			NOT = { var:pod_combat_current_actor = 9 }
+	# same-team ally. Used by POD_can_execute_combat_move's AI gate to
+	# filter single_ally moves out of the selector pool when no ally is
+	# available.
+	#
+	# Implementation: walk pod_combat_active_slots (only filled-and-alive
+	# slots are in the list — pod_combat_set_slot_char_effect adds on
+	# create, pod_combat_clear_slot_stories_effect removes at combat
+	# end) and check whether any entry is same-team and not the actor.
+	# Team membership is fixed by slot index (0-4 = player team,
+	# 5-9 = enemy team), matching the filter in
+	# pod_combat_ai_swap_to_ally_target_effect.
+	#
+	# save_temporary_scope_as captures the caller scope (the combat
+	# host) BEFORE any_in_list flips into per-slot iteration. Inside
+	# the loop body, scope:host reaches back to read pod_combat_current_actor.
+	# Same pattern as PoD's POD_has_coterie_members_present_trigger.
+	save_temporary_scope_as = host
+	any_in_list = {
+		variable = pod_combat_active_slots
+		var:slot_alive = 1
+		NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
+		OR = {
+			AND = { scope:host = { var:pod_combat_current_actor <= 4 }  var:slot_index <= 4 }
+			AND = { scope:host = { var:pod_combat_current_actor >= 5 }  var:slot_index >= 5 }
 		}
 	}
 }
