@@ -170,7 +170,7 @@ POD_execute_combat_move = {
 	# workspace copy, which each AoE iteration overwrites when it
 	# loads a new slot). Tier debuffs (soak_debuff / hit_debuff)
 	# broadcast here persist on every enemy slot, not just the
-	# pre-AoE target's workspace. Section 11/12's opponent-side
+	# pre-AoE target's workspace. Section 11/12's target-side
 	# writes still run post-damage but are redundant for
 	# team_enemy — the authoritative debuff state is on slot vars
 	# set here.
@@ -592,9 +592,23 @@ POD_execute_combat_move = {
 		limit = { $STORY$ = { has_variable = ap_gain } }
 		change_variable = { name = pod_combat_current_ap add = $STORY$.var:ap_gain }
 	}
+	# AP-drain and initiative-debuff target writes bypass the workspace
+	# target mirror and land on the target slot directly. Workspace's
+	# pod_combat_target_ap_drain / _init_bonus were write-only mirrors
+	# with no readers — the consumers (pod_combat_apply_ap_drain_effect
+	# and the round-end initiative recalc) read slot_ap_drain /
+	# slot_init_bonus directly, not the workspace — so the mirrors were
+	# removed and the writes route through active_slots instead.
+	# scope:combat_host is saved in §0; the active_slots iterator
+	# filtered on slot_index = selected_target matches at most one slot
+	# — the same slot save_target_to_story would have written to.
 	if = {
 		limit = { $STORY$ = { has_variable = ap_drain } }
-		set_variable = { name = pod_combat_target_ap_drain value = $STORY$.var:ap_drain }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_index = scope:combat_host.var:pod_combat_selected_target }
+			set_variable = { name = slot_ap_drain value = $STORY$.var:ap_drain }
+		}
 	}
 	if = {
 		limit = { $STORY$ = { has_variable = initiative_debuff } }
@@ -605,7 +619,11 @@ POD_execute_combat_move = {
 				multiply = -1
 			}
 		}
-		set_variable = { name = pod_combat_target_init_bonus value = scope:init_debuff_neg }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_index = scope:combat_host.var:pod_combat_selected_target }
+			set_variable = { name = slot_init_bonus value = scope:init_debuff_neg }
+		}
 	}
 
 	# ── 15. Retaliation check ────────────────────────────────────
@@ -614,7 +632,7 @@ POD_execute_combat_move = {
 	#
 	# Gated on single-target damage: team_enemy AoE moves don't
 	# trigger retaliation. The retaliation effect can only fire on
-	# ONE target at a time (the workspace opponent, which the AoE
+	# ONE target at a time (the workspace target, which the AoE
 	# path restores to the pre-AoE designated target). Firing it
 	# there would unfairly single out the designated target out of
 	# all 5 AoE victims. Skipping retaliation for AoE is the
@@ -653,7 +671,7 @@ POD_execute_combat_move = {
 
 POD_combat_apply_single_hp_damage = {
 	# $STORY$ = move story
-	# $TARGET_SIDE$ = "opponent" (the workspace side that takes the damage)
+	# $TARGET_SIDE$ = "target" (the workspace side that takes the damage)
 	#
 	# attack_type (physical / supernatural / mental) and damage_source
 	# (fire / silver / sun / ...) are independent dimensions:
@@ -718,7 +736,7 @@ POD_combat_apply_single_hp_damage = {
 # (POD_combat_apply_single_hp_damage) is no longer cluttered with it.
 POD_combat_dispatch_by_source = {
 	# $STORY$ = move story
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	if = { limit = { $STORY$ = { has_variable = damage_source var:damage_source = flag:fire } }
 		POD_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = fire }
 	}
@@ -753,7 +771,7 @@ POD_combat_dispatch_by_source = {
 
 POD_combat_dispatch_damage_pipeline = {
 	# $STORY$ = move story
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	# $REASON$ = PoD death_reason suffix (passed through to the payload)
 	#
 	# Unified contact-resolver + damage-payload flow. Capability flags
@@ -789,11 +807,11 @@ POD_combat_dispatch_damage_pipeline = {
 ###### AOE DISPATCH (team_enemy + team_ally)
 ######################################################
 # Apply the move's effects across a whole team. "Enemy" vs "ally"
-# resolves RELATIVE to the current actor — slots 0-4 are the PC team,
-# 5-9 the opponent team, so an NPC actor in slot 7 treats 0-4 as its
-# enemies and 5-9 as its allies.
+# resolves RELATIVE to the current actor — slots 0-4 are the player
+# team, 5-9 the enemy team, so an NPC actor in slot 7 treats 0-4 as
+# its enemies and 5-9 as its allies.
 #
-# All six AoE dispatchers iterate pod_combat_slots filtered by
+# All six AoE dispatchers iterate pod_combat_active_slots filtered by
 # slot_index against the actor's team:
 #
 #   team_enemy: actor on player team (current_actor < 5) → hit slots 5-9.
@@ -846,7 +864,7 @@ POD_combat_dispatch_damage_pipeline = {
 #     bridge between the host's workspace and the iterated slot story.
 #
 # Damage / heal AoEs go through the workspace pattern: load each
-# target into the OPPONENT workspace slot, run the existing single-
+# target into the TARGET workspace slot, run the existing single-
 # target pipeline (which reads / writes the workspace), save the
 # result back, then restore the pre-AoE workspace at the end.
 # Buff / debuff AoEs skip the workspace and write the slot story's
@@ -866,9 +884,8 @@ POD_combat_apply_team_enemy_hp_damage = {
 	# $STORY$ = move story
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}
@@ -890,9 +907,8 @@ POD_combat_apply_team_enemy_morale_damage = {
 	# $STORY$ = move story
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}
@@ -913,7 +929,7 @@ POD_combat_apply_team_enemy_morale_damage = {
 ###### AOE HEAL DISPATCH (team_ally)
 ######################################################
 # Apply HP / morale healing across the actor's entire team. Loads
-# each ally into the OPPONENT workspace slot (not actor) so
+# each ally into the TARGET workspace slot (not actor) so
 # pod_combat_restore_hp_*_effect / pod_combat_restore_morale_effect
 # can run with SIDE=target without clobbering the actor's own
 # buffs, morale, hit chance, etc. pod_combat_load_workspace_effect
@@ -925,9 +941,8 @@ POD_combat_apply_team_ally_hp_heal = {
 	# the char is inaccessible once is_alive = no anyway.
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_ally_filter_trigger = yes
 		}
@@ -950,9 +965,8 @@ POD_combat_apply_team_ally_morale_heal = {
 	# $STORY$ = move story
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_ally_filter_trigger = yes
 		}
@@ -994,9 +1008,8 @@ POD_combat_apply_team_ally_buffs = {
 	# participant character for the soak-tier bridge var write.
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_ally_filter_trigger = yes
 		}
@@ -1083,9 +1096,8 @@ POD_combat_apply_team_enemy_debuffs = {
 	# side: debuff tier vars + bypass/remove flag clearances.
 	save_scope_as = host
 	every_in_list = {
-		variable = pod_combat_slots
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = slot_char
 			var:slot_alive = 1
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}

@@ -331,7 +331,7 @@ pod_combat_apply_ap_drain_effect = {
 # variables after each hit so mid-combat queries stay consistent.
 
 pod_combat_route_to_pod_damage = {
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	# $REASON$ = death reason suffix (without the "death_" prefix).
 	#            POD_increase_wounds_effect builds the flag internally.
 	#            Currently routed values (authoritative map lives in
@@ -547,7 +547,7 @@ pod_combat_route_to_pod_damage = {
 
 
 pod_combat_deal_hp_damage_bypass_guard_effect = {
-	# $TARGET_SIDE$ = "player" or "opponent" (who takes damage)
+	# $TARGET_SIDE$ = "actor" or "target" — who takes damage.
 	# $AMOUNT$ = damage amount (raw, pre-soak, pre-multiplier)
 	# $REASON$ = death reason suffix — see pod_combat_route_to_pod_damage.
 	#
@@ -578,10 +578,10 @@ pod_combat_deal_hp_damage_bypass_guard_effect = {
 # hit bonus still applies to this attack, then gets reverted for future
 # actions.
 #
-# $ACTOR_SIDE$ = "player" or "opponent" the side that just attacked.
+# $ACTOR_SIDE$ = "actor" or "target" — the workspace side that just attacked.
 # Forward attacks pass ACTOR_SIDE=actor (workspace convention has
-# the actor on the player side). Retaliation calls have the
-# retaliator on the opponent side, so retaliation paths that route
+# the acting character on the actor side). Retaliation calls have the
+# retaliator on the target side, so retaliation paths that route
 # through this helper would pass ACTOR_SIDE=target. Today
 # pod_combat_apply_retaliation_helper goes through the bare
 # pod_combat_deal_hp_damage_bypass_guard_effect (which doesn't call
@@ -609,8 +609,8 @@ pod_combat_consume_actor_stealth_effect = {
 #     "outcome" log line
 #
 # Parameters:
-#   SIDE          — "actor" / "target" / "player" / "opponent". Picks
-#                   which workspace mirror to act on.
+#   SIDE          — "actor" or "target". Picks which workspace mirror
+#                   to act on.
 #   SYNC_CURRENT  — "yes" to also write pod_combat_current_hit_chance.
 #                   The actor-side consume path needs this because the
 #                   damage pipeline may have already copied current_hit_chance
@@ -693,7 +693,7 @@ pod_combat_break_stealth_slot_effect = {
 # is consumed FIRST so a stealthed-and-dodging target keeps their
 # dodge for the next attack (they "used" stealth for this one).
 #
-# $TARGET_SIDE$ = "player" or "opponent" — the side being attacked.
+# $TARGET_SIDE$ = "actor" or "target" — the workspace side being attacked.
 #
 # Saves scope:stance_consumed for callers to branch on:
 #   0 = no stance fired (caller proceeds to hit roll / damage)
@@ -771,8 +771,8 @@ pod_combat_consume_target_stance_effect = {
 #   pod_combat_last_damage = 0 — set on every non-hit outcome so
 #                        push_log doesn't read stale damage.
 pod_combat_resolve_contact_effect = {
-	# $TARGET_SIDE$ = "player" or "opponent" — who takes the attack.
-	# $ACTOR_SIDE$  = "player" or "opponent" — who is attacking.
+	# $TARGET_SIDE$ = "actor" or "target" — who takes the attack.
+	# $ACTOR_SIDE$  = "actor" or "target" — who is attacking.
 	# Caller must have saved the move story as scope:current_move so
 	# the capability-flag reads resolve.
 
@@ -851,7 +851,7 @@ pod_combat_resolve_contact_effect = {
 # branch in pod_combat_resolve_contact_effect can share the same
 # guard-handling code without duplication.
 pod_combat_check_guard_effect = {
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	# Reads scope:current_move.var:checks_guard. Writes scope:contact_result
 	# (0 = hit, 1 = blocked) and sets pod_combat_last_result to
 	# flag:guard_blocked on block (hit branch is set elsewhere by the
@@ -877,7 +877,7 @@ pod_combat_check_guard_effect = {
 # payload is just the PoD damage call. Routes through bypass-guard
 # helper since the resolver explicitly handles guard above.
 pod_combat_apply_damage_payload_effect = {
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	# $AMOUNT$      = damage amount (raw, pre-soak)
 	# $REASON$      = PoD death_reason suffix
 	pod_combat_deal_hp_damage_bypass_guard_effect = {
@@ -889,7 +889,7 @@ pod_combat_apply_damage_payload_effect = {
 
 
 pod_combat_deal_morale_damage_effect = {
-	# $TARGET_SIDE$ = "player" or "opponent"
+	# $TARGET_SIDE$ = "actor" or "target"
 	# $AMOUNT$ = morale damage (bypasses HP entirely)
 	# Morale damage: auto-hit, no guard, no soak. Stealth AND dodge
 	# both still block — pod_combat_consume_target_stance_effect
@@ -963,7 +963,7 @@ pod_combat_deal_morale_damage_effect = {
 }
 
 pod_combat_restore_morale_effect = {
-	# $SIDE$ = "player" or "opponent"
+	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = morale to restore
 	save_scope_value_as = {
 		name = new_morale
@@ -986,45 +986,122 @@ pod_combat_restore_morale_effect = {
 # ─── AUTO-RESOLVE ──────────────────────────────────────────────────
 
 pod_combat_auto_resolve_effect = {
-	# Save PC scope alias to avoid bare `root` references in set_variable
+	# Save PC scope alias to avoid bare `root` references in set_variable.
 	save_scope_as = combat_pc
 
-	# Simple prowess comparison with random factor
-	save_scope_value_as = {
-		name = player_score
-		value = {
-			value = prowess
-			add = {
-				integer_range = { min = 0 max = prowess }
-			}
+	# Constraint: do NOT simplify this back to a single-character
+	# prowess compare against the workspace's current target. The
+	# workspace target rotates mid-combat (AI swaps, single_ally heal
+	# targeting an ally, single_pc protect moves, secondary-enemy
+	# selection), so a 1v1 compare against "the current workspace
+	# target" can pit the PC against an ally or arbitrary slot —
+	# silently nonsensical in group combat. Team-vs-team prowess sum
+	# + per-team random jitter handles all four modes uniformly.
+	#
+	# slot_prowess is captured at slot init (which runs AFTER discipline
+	# battle modifiers apply), so it already reflects the in-combat
+	# prowess for each combatant. Reading the slot var avoids a per-
+	# iteration scope flip into var:slot_char.
+	#
+	# Winner / loser are the TEAM LEADERS (slot 0 / slot 5), matching
+	# the contract pod_combat_check_group_victory_effect already uses.
+	# The post-combat dispatcher routes off these two character refs.
+
+	# Player team prowess sum (slots 0-4, alive only). The per-iteration
+	# accumulator pattern stashes the iterated slot's prowess as a temp
+	# scope value (resolved against the slot-story scope where
+	# var:slot_prowess lives), then `PREV` walks back to the host scope
+	# to update the running total — same shape as PoD's crafting
+	# `effect_list` accumulator in POD_crafting_core_effects.txt (inside
+	# the potion_sweetener handler).
+	save_scope_value_as = { name = player_prowess_sum value = 0 }
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_index <= 4
+			var:slot_alive = 1
 		}
-	}
-	var:pod_combat_opponent = {
-		save_scope_value_as = {
-			name = opponent_score
-			value = {
-				value = prowess
-				add = {
-					integer_range = { min = 0 max = prowess }
+		save_temporary_scope_value_as = { name = slot_prowess_tmp value = var:slot_prowess }
+		PREV = {
+			save_scope_value_as = {
+				name = player_prowess_sum
+				value = {
+					value = scope:player_prowess_sum
+					add = scope:slot_prowess_tmp
 				}
 			}
 		}
 	}
 
+	# Enemy team prowess sum (slots 5-9, alive only)
+	save_scope_value_as = { name = enemy_prowess_sum value = 0 }
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_index >= 5
+			var:slot_alive = 1
+		}
+		save_temporary_scope_value_as = { name = slot_prowess_tmp value = var:slot_prowess }
+		PREV = {
+			save_scope_value_as = {
+				name = enemy_prowess_sum
+				value = {
+					value = scope:enemy_prowess_sum
+					add = scope:slot_prowess_tmp
+				}
+			}
+		}
+	}
+
+	# Apply per-team random jitter — score = sum + rand(0..sum).
+	# Same shape as the original 1v1 jitter (prowess + rand(0..prowess)),
+	# just scaled to the whole team. integer_range accepts a dynamic
+	# max (proven by the original code's use of `max = prowess`).
+	save_scope_value_as = {
+		name = player_score
+		value = {
+			value = scope:player_prowess_sum
+			add = { integer_range = { min = 0 max = scope:player_prowess_sum } }
+		}
+	}
+	save_scope_value_as = {
+		name = enemy_score
+		value = {
+			value = scope:enemy_prowess_sum
+			add = { integer_range = { min = 0 max = scope:enemy_prowess_sum } }
+		}
+	}
+
+	# Resolve. Winner/loser are the team leaders so the post-combat
+	# dispatcher can route off pod_combat_winner / pod_combat_loser
+	# the same way a normal-completion victory does. The slot 5
+	# existence guards are defensive — slot 5 (primary opponent) is
+	# always populated at combat init, but the guard keeps a corrupt
+	# state from crashing the resolve.
 	if = {
-		limit = { scope:player_score >= scope:opponent_score }
+		limit = { scope:player_score >= scope:enemy_score }
 		set_variable = { name = pod_combat_winner value = scope:combat_pc }
-		set_variable = { name = pod_combat_loser value = var:pod_combat_opponent }
+		if = {
+			limit = { has_variable = pod_combat_slot_5  var:pod_combat_slot_5 = { has_variable = slot_char } }
+			set_variable = { name = pod_combat_loser value = var:pod_combat_slot_5.var:slot_char }
+		}
 	}
 	else = {
-		set_variable = { name = pod_combat_winner value = var:pod_combat_opponent }
+		if = {
+			limit = { has_variable = pod_combat_slot_5  var:pod_combat_slot_5 = { has_variable = slot_char } }
+			set_variable = { name = pod_combat_winner value = var:pod_combat_slot_5.var:slot_char }
+		}
 		set_variable = { name = pod_combat_loser value = scope:combat_pc }
 	}
 
-	# Set final HP/Morale for display
+	# Zero the currently-displayed target's morale so the combat
+	# window's loser portrait reads visually-defeated. Preserves the
+	# original effect's GUI side-effect; only ever touches whichever
+	# slot the workspace's selected_target points at, which is what
+	# the GUI is rendering anyway.
 	set_variable = { name = pod_combat_target_morale value = 0 }
 	set_variable = { name = pod_combat_is_over value = yes }
-	# Combat window stays open — player clicks "End Combat" to dismiss
+	# Combat window stays open — player clicks "End Combat" to dismiss.
 }
 
 # ─── COMBAT LOG ────────────────────────────────────────────────────
@@ -1056,7 +1133,7 @@ pod_combat_auto_resolve_effect = {
 #   result                — flag value (hp_damage / guard_blocked /
 #                            soaked / ...), see PODCombatLogResultText
 #                            custom_loc for the full dispatch table
-#                            and COMBAT_REFERENCE.info §4 for the map
+#                            and COMBAT_REFERENCE.md §4 for the map
 #
 # Entries are PREPENDED — push_log rebuilds the list to insert each new
 # row at the FRONT so the GUI datamodel renders newest-first without
@@ -1097,7 +1174,7 @@ pod_combat_push_log_effect = {
 	#       helpers, retaliation, morale and heal pipelines all write
 	#       here directly; push_log reads it unconditionally and falls
 	#       back to flag:utility only when no helper wrote a value.
-	#       Mapping lives in COMBAT_REFERENCE.info §4.
+	#       Mapping lives in COMBAT_REFERENCE.md §4.
 	#
 	# Result flag map (must stay in sync with PODCombatLogResultText
 	# customizable_loc and pod_combat_log_result_text_* loc keys):
@@ -1296,16 +1373,16 @@ pod_combat_apply_nonfatal_effect = {
 			has_variable = pod_combat_sc_context
 			var:pod_combat_sc_context.var:fatality = flag:no
 		}
-		# Iterate every slot story on the host. Inside the iteration body
-		# the current scope is the slot story, so `has_variable = slot_char`
-		# checks the slot story's vars and `var:slot_char` switches into
-		# the participant. Ensures combatant in each filled slot keeps at
+		# Iterate every filled slot story on the host (via the active list,
+		# so the has_variable=slot_char guard the broader pod_combat_slots
+		# walk used to need is implicit). Inside the iteration body the
+		# current scope is the slot story; var:slot_char switches into the
+		# participant. Ensures the combatant in each filled slot keeps at
 		# least one empty health box; if their track is full, peel one
 		# superficial (preferred) or aggravated wound. Damage was applied
 		# live during the fight; this is just the nonfatal cap pass.
 		every_in_list = {
-			variable = pod_combat_slots
-			limit = { has_variable = slot_char }
+			variable = pod_combat_active_slots
 			var:slot_char = {
 				save_scope_value_as = {
 					name  = nf_empty
@@ -1344,7 +1421,7 @@ pod_combat_apply_nonfatal_effect = {
 # superficial-vs-aggravated branching contract.
 
 pod_combat_route_to_pod_heal = {
-	# $SIDE$ = "player" or "opponent"
+	# $SIDE$ = "actor" or "target"
 	# $AGGRAVATED$ = yes / no — yes calls POD_heal_aggravated_wound_effect
 	#                (heals aggravated boxes; superficial overflow can
 	#                convert into superficial per PoD rules), no calls
@@ -1409,7 +1486,7 @@ pod_combat_route_to_pod_heal = {
 }
 
 pod_combat_restore_hp_superficial_effect = {
-	# $SIDE$ = "player" or "opponent"
+	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = superficial HP to restore
 	# Heals only superficial wound boxes — aggravated damage is untouched.
 	# PoD's POD_heal_damage clamps to current superficial count, so
@@ -1422,7 +1499,7 @@ pod_combat_restore_hp_superficial_effect = {
 }
 
 pod_combat_restore_hp_aggravated_effect = {
-	# $SIDE$ = "player" or "opponent"
+	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = aggravated HP to restore
 	# Heals aggravated wound boxes first (rare/potent healing — Obeah
 	# Mend, Fortitude high-tier, soul-drain). PoD's heal logic lets
@@ -1545,17 +1622,15 @@ pod_combat_end_combat_effect = {
 # load order, or wrap it with their own pre/post effects.
 
 pod_combat_duel_end_effect = {
-	# Iterate every slot story registered to the host's pod_combat_slots
-	# list. Inside the iteration body, current scope IS the slot story,
-	# so `has_variable = slot_char` checks the slot story's vars and
-	# `var:slot_char` switches into the participant's character scope
-	# without the host's per-slot pointer var. The list is populated by
-	# pod_combat_create_one_slot_story_effect and cleared by
-	# pod_combat_clear_slot_stories_effect, empty during tooltip-build,
+	# Iterate the host's pod_combat_active_slots list (filled-only).
+	# Inside the body, current scope IS the slot story; var:slot_char
+	# switches into the participant's character scope without going
+	# through the host's per-slot pointer var. The list is populated
+	# by pod_combat_set_slot_char_effect at slot-fill time and cleared
+	# by pod_combat_clear_slot_stories_effect, empty during tooltip-build,
 	# so this iteration is automatically a no-op there.
 	every_in_list = {
-		variable = pod_combat_slots
-		limit = { has_variable = slot_char }
+		variable = pod_combat_active_slots
 		var:slot_char = {
 			POD_clear_discipline_battle_effect = yes
 			remove_character_modifier = pod_combat_duel_active
@@ -1569,9 +1644,9 @@ pod_combat_duel_end_effect = {
 	# runs. The cap-then-strip ordering is load-bearing; stripping
 	# the flag before the cap would let PoD's inline death check fire
 	# during the cap pass and silently break the non-fatal contract.
-	# Earlier versions stripped here as a belt-and-braces no-op, which
-	# left the lifecycle ambiguous between two owners; removed in
-	# favour of the explicit single-owner contract.
+	# Do NOT add a belt-and-braces nonfatal-flag strip here.
+	# It would split the lifecycle across two owners. The strip 
+	# lives exclusively in pod_combat_apply_nonfatal_effect.
 }
 
 # ─── CLEANUP ───────────────────────────────────────────────────────
@@ -1608,12 +1683,10 @@ pod_combat_cleanup_effect = {
 		var:pod_combat_sc_context = { end_story = yes }
 	}
 	remove_variable = pod_combat_sc_context
-	remove_variable = pod_combat_opponent
 	remove_variable = pod_combat_actor_char
 	remove_variable = pod_combat_target_char
 	remove_variable = pod_combat_round
 	remove_variable = pod_combat_current_ap
-	remove_variable = pod_combat_current_turn_side
 	remove_variable = pod_combat_actor_soak
 	remove_variable = pod_combat_actor_morale
 	remove_variable = pod_combat_target_soak
@@ -1629,7 +1702,6 @@ pod_combat_cleanup_effect = {
 	# pod_combat_group_cleanup_effect (combat exit) and
 	# pod_combat_init_slot_from_character_effect (combat entry).
 	remove_variable = pod_combat_ai_saved_enemy_target
-	remove_variable = pod_combat_ai_last_swap_target
 	remove_variable = pod_combat_last_result
 	remove_variable = pod_combat_last_heal_amount
 	remove_variable = pod_combat_last_morale_damage_amount
@@ -1641,7 +1713,8 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_actor_base_hit_chance
 	remove_variable = pod_combat_target_base_hit_chance
 	remove_variable = pod_combat_actor_energy_used
-	remove_variable = pod_combat_target_energy_used
+	# pod_combat_target_energy_used isn't mirrored — no writers or
+	# readers, the workspace mirror would be pure load/save overhead.
 	remove_variable = pod_combat_actor_is_dodging
 	remove_variable = pod_combat_target_is_dodging
 	remove_variable = pod_combat_actor_is_stealthed
@@ -1650,10 +1723,11 @@ pod_combat_cleanup_effect = {
 	# the slot stories; pod_combat_clear_slot_stories_effect end_story-s
 	# every slot story at combat end, taking those vars with them. We
 	# only need to wipe the workspace mirrors here.
-	remove_variable = pod_combat_actor_init_bonus
-	remove_variable = pod_combat_target_init_bonus
+	# init_bonus / target-side ap_drain aren't mirrored on the
+	# workspace — both would be write-only / unused, and the slot
+	# stories themselves get end_story'd a few effects later in this
+	# cleanup chain, so there's nothing left to wipe here.
 	remove_variable = pod_combat_actor_ap_drain
-	remove_variable = pod_combat_target_ap_drain
 	remove_variable = pod_combat_actor_retaliate_hit
 	remove_variable = pod_combat_target_retaliate_hit
 	remove_variable = pod_combat_actor_retaliate_miss
