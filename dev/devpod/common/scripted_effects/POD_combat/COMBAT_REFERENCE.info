@@ -24,7 +24,7 @@ whichever one is the current target. It is **not a persistence
 layer** — it is a per-action execution adapter, loaded from / saved
 back to the appropriate slot story at each action boundary by
 `pod_combat_{load,save}_workspace_effect`. Skill effects read and
-write only the workspace, so the same code runs for the
+write only the workspace, so the same generated code runs for the
 PC, AI coterie, the primary opponent, and knights. Outside the
 load/save window, the workspace contents are stale by definition —
 canonical per-combatant state lives on the slot story. See
@@ -55,7 +55,7 @@ groups them by *owner* for the "where does this live?" lookup.
 
 | Owner | Scope it lives on | Lifetime | Variables |
 |---|---|---|---|
-| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_mode`, `pod_combat_round`, `pod_combat_current_actor`, `pod_combat_current_ap`, `pod_combat_enemy_team_size`, `pod_combat_pc_target`, `pod_combat_selected_target`, `pod_combat_slot_0..9` (pointer vars — only set for slot indices the current mode actually filled), `pod_combat_active_slots` (variable list of every filled slot story, lazily populated as slots fill), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_result`, `pod_combat_nonfatal_active` |
+| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_mode`, `pod_combat_round`, `pod_combat_current_actor`, `pod_combat_current_ap`, `pod_combat_enemy_team_size`, `pod_combat_pc_target`, `pod_combat_selected_target`, `pod_combat_slot_0..9` (pointer vars), `pod_combat_slots` (full 10-slot list — used only by combat-end cleanup to `end_story` every created slot), `pod_combat_active_slots` (filled-only list — default for every other walk), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_result`, `pod_combat_nonfatal_active` |
 | **Slot** | `POD_combat_slot` story (one per slot, on Charon) | slot creation → slot cleanup | `slot_index`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_base_soak`, `slot_hit_chance`, `slot_base_hit_chance`, `slot_initiative`, `slot_init_bonus`, `slot_ap_drain`, `slot_energy_used`, `slot_turn_order`, `slot_has_acted`, `slot_is_guarding`, `slot_is_dodging`, `slot_is_stealthed`, `slot_retaliate_*`, `slot_incorporeal_spirit`, `slot_can_damage_spirit`, all `slot_{stat}_{direction}_{duration}_tier` vars |
 | **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` (mirrors of the slot fields above) |
 | **Character (AI)** | the acting AI character | persists per-character across combats until `pod_combat_group_cleanup_effect` clears them | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` (variable list) |
@@ -289,20 +289,13 @@ and update the result-flag reset block (§2) and the cleanup block in
 is the sole data container for per-combatant state. Lifecycle helpers
 live in `pod_combat_slot_effects.txt`:
 
-- **Lazy creation.** `pod_combat_set_slot_char_effect` (the universal
-  fill helper) creates the slot story on its first call for a given
-  slot index — there is no separate upfront create pass. Indices the
-  current mode never fills get no story_cycle scope on Charon and no
-  pointer var on the host. `pod_combat_initialize_effect` drives the
-  fill order: slot 0 (PC), slot 5 (primary opponent), then ally
-  knights 1-4 and enemy knights 6-9 if the mode includes them.
+- `pod_combat_create_slot_stories_effect` runs once at combat start
+  from `pod_combat_initialize_effect`, BEFORE any per-slot init runs
+  (so `pod_combat_init_slot_from_character_effect` can read/write
+  the slot story for the slot it's populating).
 - `pod_combat_clear_slot_stories_effect` runs once at combat end
-  from `pod_combat_group_cleanup_effect`. It iterates
-  `pod_combat_active_slots` (the only slot list), calls `end_story`
-  on each, clears the list, then unconditionally removes
-  `pod_combat_slot_0..9` pointer vars (no-op for the indices that
-  were never filled). `end_story` takes every slot var with it, so
-  no per-field cleanup pass is needed.
+  from `pod_combat_group_cleanup_effect`. `end_story` takes every
+  slot var with it, so no per-field cleanup pass is needed.
 
 **Caller scope:** the combat host (the PC). All saves / list adds
 happen on the host; the actual stories live on Charon
@@ -316,30 +309,38 @@ leads to either spurious work, missed slots, or stale-story leaks.
 The rule:
 
 - **`every_in_list = { variable = pod_combat_active_slots ... }`** —
-  the canonical slot iteration. `pod_combat_active_slots` is the only
-  slot list. Stories are LAZILY created on first
-  `pod_combat_set_slot_char_effect` call and added to this list
-  atomically; unfilled slot indices have no story_cycle scope on
-  Charon and no pointer var on the host. KO'd-but-once-filled slots
-  stay in the list with `slot_alive = 0`, so add `var:slot_alive = 1`
-  to the limit if you only want living combatants. Examples:
-  round-end soak revert, victory-check team counts, dispatching to
-  the slot whose `slot_index = pod_combat_current_actor`, AoE damage
-  / heal / buff / debuff iteration, post-combat duel teardown,
-  post-combat nonfatal wound cap, tier var cleanup, combat-end
-  story teardown. Inside the body the iterator's scope IS the slot
-  story, so `var:slot_X` reads and `set_variable = { name = slot_X ... }`
-  writes work directly. To reach back to host vars, save the host
-  first (`save_scope_as = host` or `save_temporary_scope_as = host`
-  for trigger contexts) and reference `scope:host.var:Y`.
+  the default for nearly every "operate on slots" pass. Filled-only
+  (populated by `pod_combat_set_slot_char_effect` at fill time,
+  cleared at combat end). KO'd-but-once-filled slots stay in the
+  list with `slot_alive = 0`, so add `var:slot_alive = 1` to the
+  limit if you only want active combatants. Examples: round-end
+  soak revert, victory-check team counts, dispatching to the slot
+  whose `slot_index = pod_combat_current_actor`, AoE damage / heal
+  / buff / debuff iteration, post-combat duel teardown, post-combat
+  nonfatal wound cap, tier var cleanup. Inside the body the
+  iterator's scope IS the slot story, so `var:slot_X` reads and
+  `set_variable = { name = slot_X ... }` writes work directly. To
+  reach back to host vars, save the host first (`save_scope_as = host`
+  or `save_temporary_scope_as = host` for trigger contexts) and
+  reference `scope:host.var:Y`.
 
-- **Unrolled `SLOT = 0..9` parametric calls** — for the slot fill
-  passes in `pod_combat_initialize_effect` (each
-  `pod_combat_set_slot_char_effect = { SLOT = N CHARACTER = X }`
-  call lazy-creates the slot story on first use) and for single-slot
-  operations where a specific slot index is intentional (slot 0 =
-  PC, slot 5 = primary opponent). The per-team hit-chance pair-up
-  walk is another example (slot N vs leader, where N is enumerated).
+- **`every_in_list = { variable = pod_combat_slots ... }`** —
+  reserved for combat-end teardown. Contains all 10 created slot
+  stories regardless of fill. The only legitimate use is
+  `pod_combat_clear_slot_stories_effect`'s `end_story` walk, which
+  must end every story (filled or not) to prevent leaking unfilled
+  stories on Charon. Do NOT pick this list for any other walk —
+  it forces a `has_variable = slot_char` filter that
+  `pod_combat_active_slots` makes redundant, and walks 10 stories
+  when typically only 2–6 are filled.
+
+- **Unrolled `SLOT = 0..9` parametric calls** — ONLY for the slot
+  creation / fill passes that run BEFORE `pod_combat_active_slots`
+  has been populated, or for single-slot operations where a specific
+  slot index is intentional (slot 0 = PC, slot 5 = primary opponent).
+  The init walks in `pod_combat_initialize_effect` are the canonical
+  examples; the per-team hit-chance pair-up walk is another (slot N
+  vs leader, where N is enumerated).
 
 The `any_in_list` trigger is the read-only counterpart over
 `pod_combat_active_slots`: use it for "does any slot satisfy X?"
@@ -350,15 +351,14 @@ replaced them with `any_in_list` predicates.
 
 ### Slot creation field defaults
 
-`pod_combat_set_slot_char_effect`'s lazy-create branch initialises
-each freshly created slot story with the following defaults, then
-proceeds to write `slot_char` and add the story to `pod_combat_active_slots`:
+`pod_combat_create_one_slot_story_effect` initializes each slot
+story with:
 
 | Field | Default | Purpose |
 |---|---|---|
 | `slot_index` | the slot's integer position (0-9) | baked at creation |
-| `slot_alive` | 1 | the slot is "occupied" until KO'd |
-| `slot_morale` | 0 | overwritten from character by `pod_combat_init_slot_from_character_effect` |
+| `slot_alive` | 1 | the slot is "occupied" until KO'd; init effect for individual fields will overwrite if the slot is unfilled |
+| `slot_morale` | 0 | overwritten from character if filled |
 | `slot_prowess` | 0 | same |
 | `slot_soak` | 0 | same |
 | `slot_energy_used` | 0 | same |
@@ -601,7 +601,7 @@ skips the new-object-dependent block.
 Skill effects read and write only the workspace
 (`pod_combat_actor_*` / `pod_combat_target_*`), not the slot story
 directly. Load/save effects walk slot stories at action boundaries.
-This single-shape contract lets one `POD_execute_combat_move`
+This single-shape contract lets one generated `POD_execute_combat_move`
 body run for the PC, AI coterie, primary opponent, and knights
 without per-actor branching.
 
@@ -638,7 +638,7 @@ to be invoked with `scope:actor_char` or against the live character.
 Walking from a slot scope back to the character every callee is
 expensive and error-prone; the workspace mirror makes the actor
 character directly available as `pod_combat_actor_char`. The
-mirror's *single-shape contract* is also what lets one
+mirror's *single-shape contract* is also what lets one generated
 `POD_execute_combat_move` body run for the PC, AI coterie, primary
 opponent, and knights without per-actor branching (see
 *Workspace mirror, not slot rewrite* above).
@@ -746,6 +746,16 @@ of "contact" or "miss" becomes a single edit point; adding a new
 result flag (or moving one between the contact and miss buckets)
 doesn't have to ripple through every gate site.
 
+### Capability flags, not `attack_type` reads
+
+The runtime gates damage routing on capability flag presence
+(`requires_hit_roll`, `checks_guard`, `checks_stance`,
+`checks_spirit_gate`) — never on `var:attack_type`. The CSV
+`attack_type` column drives the capability-flag DEFAULTS at
+generator time, but no `var:attack_type` is written at runtime. An
+earlier `NOT has_variable = attack_type` proxy missed the
+`physical + override_requires_hit_roll = no` edge case; the migration
+to capability flags closed that hole.
 
 ### `bypass_dodge` / `bypass_stealth` consume the stance
 
@@ -759,8 +769,8 @@ capability flag).
 ### Result-flag model (not result-int)
 
 `pod_combat_last_result` holds a flag value (`flag:hp_damage`,
-`flag:guard_blocked`, etc.), not an integer code. B1 originally
-introduced the consolidation as an int (codes 0..12 with a reserved
+`flag:guard_blocked`, etc.), not an integer code. 
+Originally developed as an int (codes 0..12 with a reserved
 slot at 4); the flag-value migration replaced that with
 self-documenting names. The benefits over the int form:
 
@@ -831,7 +841,7 @@ Code-side entry points and where they live.
 
 | File | Purpose |
 |---|---|
-| `POD_combat/pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Read by the move list. |
+| `POD_combat/pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Read by the generator-emitted move list. |
 | `POD_combat/pod_combat_move_list_effects.txt` | One `POD_init_combat_move` block per CSV row, plus analyzer-suppression blocks. |
 | `POD_combat/pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§16 phase contract above. |
 | `POD_combat/pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
