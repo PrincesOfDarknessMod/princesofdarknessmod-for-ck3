@@ -63,15 +63,31 @@ pod_combat_execute_move = {
 	}
 }
 
-# Forfeit button (top-right X). Surrenders the current combat
-# the PC concedes, the opposing team wins. Sets winner/loser the
-# same way pod_combat_auto_resolve_effect does (PC = loser by
-# unconditional decision rather than by prowess compare), flips
-# is_over so the combat window's End Combat button takes over.
-# The standard combat-end pipeline (pod_combat_end_combat_effect)
-# runs when the player dismisses, firing the SC follow-up event
-# and cleaning up.
-pod_combat_forfeit = {
+# Close-window dispatcher — bound to the X button in the combat
+# window's header. Wraps two semantically-distinct behaviours
+# behind one click target so the X behaves intuitively across the
+# combat lifecycle:
+#
+#   * Combat in progress (NOT pod_combat_is_over): concede the
+#     fight. The PC loses, opposing primary wins, system log
+#     captures a defeat bookend. pod_combat_end_combat_effect
+#     doesn't fire here — the X just marks the outcome; player
+#     still has to click End Combat afterward to dismiss.
+#
+#   * Combat already resolved (pod_combat_is_over set by a victory
+#     check, auto-resolve, or a prior X-click concede): the X
+#     closes the window via pod_combat_end_combat_effect — same
+#     codepath the End Combat bottom-bar button runs. Without
+#     this branch the X just no-ops once combat ends, which read
+#     as "stuck window" to players who expect close-buttons to
+#     close things.
+#
+# is_valid stays loose (just pod_combat_active) so the button is
+# always clickable while the window is open — the inner branch
+# picks the right behaviour. The visible tooltip
+# (pod_combat_close_window_tooltip) covers both states with a
+# combined phrasing.
+pod_combat_close_window = {
 	scope = character
 
 	is_shown = {
@@ -79,28 +95,40 @@ pod_combat_forfeit = {
 	}
 
 	is_valid = {
-		pod_combat_is_active_trigger = yes
-		NOT = { has_variable = pod_combat_is_over }
+		has_variable = pod_combat_active
 	}
 
 	effect = {
-		save_scope_as = combat_pc
-		# PC concedes — opposing primary (slot 5's char) wins.
 		if = {
-			limit = {
-				has_variable = pod_combat_slot_5
-				var:pod_combat_slot_5 = { has_variable = slot_char }
-			}
-			set_variable = {
-				name  = pod_combat_winner
-				value = var:pod_combat_slot_5.var:slot_char
-			}
+			limit = { has_variable = pod_combat_is_over }
+			# Combat resolved — dismiss the window the same way the
+			# End Combat bottom-bar button does. Runs the SC
+			# follow-up event, applies non-fatal wound caps, fires
+			# cleanup.
+			pod_combat_end_combat_effect = yes
 		}
-		set_variable = { name = pod_combat_loser value = scope:combat_pc }
-		# Mark combat over; the window's End Combat button calls
-		# pod_combat_end_combat_effect to fire the SC follow-up
-		# and clean up.
-		set_variable = { name = pod_combat_is_over value = yes }
+		else = {
+			# Combat still active — concede inline. PC = loser by
+			# unconditional decision (rather than by prowess
+			# compare); opposing primary (slot 5's char) wins.
+			# Flips is_over so the bottom-bar End Combat takes
+			# over and the player can dismiss the window through
+			# the standard cleanup path.
+			save_scope_as = combat_pc
+			if = {
+				limit = {
+					has_variable = pod_combat_slot_5
+					var:pod_combat_slot_5 = { has_variable = slot_char }
+				}
+				set_variable = {
+					name  = pod_combat_winner
+					value = var:pod_combat_slot_5.var:slot_char
+				}
+			}
+			set_variable = { name = pod_combat_loser value = scope:combat_pc }
+			set_variable = { name = pod_combat_is_over value = yes }
+			pod_combat_push_system_log_effect = { MESSAGE_KEY = combat_ended_defeat }
+		}
 	}
 }
 
@@ -1028,14 +1056,66 @@ pod_combat_move_desc = {
 		# actively REMOVE the target's dodge/stealth pre-damage rather
 		# than just making the move auto-hit.
 
-		# Retaliation stances
+		# Retaliation stances. Tooltip variant picks the right loc key
+		# based on the runtime fallback chain (explicit retaliate_damage
+		# > reuse move's hp_damage > default 1) and the retaliate_agg
+		# flag (aggravated vs superficial damage type). Bare
+		# pod_combat_desc_retaliate_if_hit/_missed are the no-amount
+		# fallback for the rare designer-error case where neither
+		# retaliate_damage nor hp_damage was set on the move.
 		if = {
 			limit = { scope:story = { has_variable = retaliate_if_hit } }
-			custom_tooltip = pod_combat_desc_retaliate_if_hit
+			if = {
+				# Explicit retaliate_damage on the move — use it.
+				limit = { scope:story = { has_variable = retaliate_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_sup
+				}
+			}
+			else_if = {
+				# Reuse the move's main hp_damage.
+				limit = { scope:story = { has_variable = hp_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_reuse_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_reuse_sup
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_retaliate_if_hit
+			}
 		}
 		if = {
 			limit = { scope:story = { has_variable = retaliate_if_missed } }
-			custom_tooltip = pod_combat_desc_retaliate_if_missed
+			if = {
+				limit = { scope:story = { has_variable = retaliate_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_sup
+				}
+			}
+			else_if = {
+				limit = { scope:story = { has_variable = hp_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_reuse_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_reuse_sup
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_retaliate_if_missed
+			}
 		}
 
 		# AP / initiative parametric

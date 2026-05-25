@@ -61,8 +61,15 @@ widget = {
 					}
 
 					blockoverride "button_close" {
-						onclick = "[GetScriptedGui('pod_combat_forfeit').Execute(GuiScope.SetRoot(GetPlayer.MakeScope).End)]"
-						tooltip = "pod_combat_forfeit_tooltip"
+						# Dispatches through pod_combat_close_window so the
+						# X behaves intuitively across the combat lifecycle:
+						# forfeits while combat is in progress, dismisses
+						# the window once combat is resolved (same as the
+						# End Combat bottom-bar button). is_valid stays
+						# loose so the button is always clickable while
+						# the window is open.
+						onclick = "[GetScriptedGui('pod_combat_close_window').Execute(GuiScope.SetRoot(GetPlayer.MakeScope).End)]"
+						tooltip = "pod_combat_close_window_tooltip"
 					}
 				}
 
@@ -175,6 +182,31 @@ widget = {
 					text_single = {
 						raw_text = "[Localize('pod_combat_round')]"
 						default_format = "#bold"
+					}
+
+					# PC target / hit readout. Per-slot cards show net
+					# buff/debuff modifiers uniformly via
+					# PODCombatSlotHitDisplay, so this widget carries the
+					# absolute PC-vs-current-target percentage in the
+					# header where the player sees it without hovering a
+					# slot. Sits left-adjacent to the round counter with
+					# a middle-dot separator (mirroring the combat-log
+					# grammar) so the two header pieces read as a single
+					# "round + current focus" block; the trailing expand
+					# on this row pushes the whole left cluster away from
+					# the AP pip strip on the right edge.
+					#
+					# Gated on PC having a target AND being in active
+					# combat — the inner Var('pod_combat_pc_target') read
+					# would also resolve when combat ended (the var
+					# lingers briefly until cleanup), and slot 0's
+					# slot_hit_chance is a stale post-combat value at
+					# that point. Hiding rather than showing "0%" avoids
+					# misinformation during the brief End-Combat-to-cleanup
+					# window.
+					text_single = {
+						visible = "[And(GetPlayer.MakeScope.Var('pod_combat_active').IsSet, GetPlayer.MakeScope.Var('pod_combat_pc_target').IsSet)]"
+						raw_text = "#weak ·#!  [Localize('pod_combat_pc_target_display')]"
 					}
 
 					expand = {}
@@ -543,8 +575,31 @@ widget = {
 				##############################
 
 				hbox = {
-					margin = { 10 4 }
+					# Margin matches the skill rows above (margin = { 0 1 })
+					# so this row's left edge sits flush with the ATK/DEF/
+					# CTL/PWR label column. Combined with the 42px
+					# placeholder widget below, End Turn lines up under
+					# the first move button.
+					margin = { 0 4 }
 					spacing = 20
+					# Stretch to fill the parent's full width so the
+					# expand below has leftover space to push the
+					# Auto-Resolve+Help group flush right.
+					layoutpolicy_horizontal = expanding
+					# Hidden children (End Turn / Auto-Resolve during
+					# post-combat, End Combat during active combat) drop
+					# out of layout so the visible group stays packed
+					# together instead of leaving gaps from collapsed
+					# siblings.
+					ignoreinvisible = yes
+
+					# Left-inset placeholder — mirrors the 42px label
+					# widget (ATK / DEF / CTL / PWR) on the skill rows
+					# above so End Turn's left edge aligns with the
+					# first move button in those rows.
+					widget = {
+						size = { 42 33 }
+					}
 
 					button_standard = {
 						visible = "[Not(GetPlayer.MakeScope.Var('pod_combat_is_over').IsSet)]"
@@ -554,6 +609,14 @@ widget = {
 						enabled = "[GetScriptedGui('pod_combat_end_turn').IsValid(GuiScope.SetRoot(GetPlayer.MakeScope).End)]"
 						tooltip = "pod_combat_end_turn_desc"
 					}
+
+					# Single flexible spacer pushes the Auto-Resolve+Help
+					# group to the right edge. The group itself stays
+					# packed via the hbox's standard 20px spacing —
+					# Auto-Resolve and Help read as a related pair
+					# ("alternate-resolve" and "look up help"), distinct
+					# from End Turn's "commit your turn" semantic on the left.
+					expand = {}
 
 					button_standard = {
 						visible = "[Not(GetPlayer.MakeScope.Var('pod_combat_is_over').IsSet)]"
@@ -605,6 +668,21 @@ widget = {
 						align = center
 					}
 
+					# No column headers — structural information is encoded
+					# directly in each row's visual signal:
+					#   * 3px gold / red side-bar on the left edge marks
+					#     ally vs enemy actions at a glance
+					#   * actor name carries the same gold / red tint as
+					#     a redundant fallback while scrolling
+					#   * inline "→ <target>" via PODCombatLogTargetText
+					#     replaces the standalone Target column ("Self" /
+					#     "AoE Allies" etc. collapse to empty or merge
+					#     into the actor segment)
+					#   * action name flows as #weak;italic context, no
+					#     longer competes for focus
+					#   * result column right-anchors with bold weight,
+					#     making outcome the most prominent text on each
+					#     row — where attention should land
 					scrollbox = {
 						layoutpolicy_horizontal = expanding
 						layoutpolicy_vertical = expanding
@@ -650,6 +728,87 @@ widget = {
 							datamodel = "[GetPlayer.MakeScope.GetList('pod_combat_log')]"
 
 							item = {
+								# Outer wrapper — CK3 datamodel item blocks accept
+								# exactly one child widget. We need two row variants
+								# (system divider vs standard action row) gated on
+								# entry.var:system_message, so they live inside a
+								# single vbox here with ignoreinvisible = yes
+								# collapsing the hidden one to zero height. Without
+								# the wrapper the parser rejects the item with
+								# "Malformed item desc — single child only."
+								vbox = {
+									layoutpolicy_horizontal = expanding
+									spacing = 0
+									ignoreinvisible = yes
+
+								# ── System bookend divider row ─────────────────
+								# Combat-lifecycle markers pushed by
+								# pod_combat_push_system_log_effect (combat begins
+								# / round N begins / combat ends) render as a
+								# distinct visual divider instead of the
+								# action-row frame: thin top + bottom rule with
+								# the message centered in italic between them.
+								# Reads as "this isn't an actor action," matching
+								# the HTML mockup's chapter-break treatment so a
+								# scroll back through a long combat finds round
+								# transitions easily.
+								#
+								# Identification: system rows carry
+								# entry.var:system_message (push_system_log_effect's
+								# only required write); action rows leave it unset.
+								# Single IsSet check rather than reaching into the
+								# message-flag value because the divider styling
+								# is uniform across system-message types — only
+								# the inner text differs by flag.
+								vbox = {
+									visible = "[Scope.Var('system_message').IsSet]"
+									layoutpolicy_horizontal = expanding
+									margin = { 0 6 }
+									spacing = 0
+
+									# Top rule. 1px tall, dim grey, full-width.
+									# Uses the vanilla pure-white texture tinted
+									# down — CK3 backgrounds without a texture
+									# render nothing, so just specifying `color`
+									# would leave the line invisible.
+									widget = {
+										layoutpolicy_horizontal = expanding
+										size = { -1 1 }
+										background = {
+											texture = "gfx/interface/colors/white.dds"
+											color = { 0.5 0.55 0.6 0.5 }
+										}
+									}
+
+									# Centered system-message text. Padded with
+									# 4px top/bottom so the text doesn't crowd
+									# the rules. Renders via the same
+									# PODCombatLogSystemMessageText dispatcher
+									# the move-less result-column branch also
+									# calls — single source of truth for the
+									# bookend loc keys.
+									hbox = {
+										layoutpolicy_horizontal = expanding
+										margin = { 0 4 }
+										expand = {}
+										pod_combat_log_text = {
+											raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).Custom('PODCombatLogSystemMessageText')]"
+										}
+										expand = {}
+									}
+
+									# Bottom rule — mirror of the top.
+									widget = {
+										layoutpolicy_horizontal = expanding
+										size = { -1 1 }
+										background = {
+											texture = "gfx/interface/colors/white.dds"
+											color = { 0.5 0.55 0.6 0.5 }
+										}
+									}
+								}
+
+								# ── Standard action row ────────────────────────
 								# Per-row outline. Background_Frame is the vanilla
 								# subtle-gray frame mask (#e6e6e6 @ 15% alpha over
 								# the mask_frame.dds texture) — same template the
@@ -667,8 +826,43 @@ widget = {
 								# transitions. Outlining every row gives a
 								# uniform "firm" separator, which is the closest
 								# approximation.
+								#
+								# Gated on the absence of system_message so the
+								# divider branch above takes system rows.
 								vbox = {
+									visible = "[Not(Scope.Var('system_message').IsSet)]"
 									layoutpolicy_horizontal = expanding
+									# Team-tint wash. Two mutually-exclusive backgrounds
+									# branch on entry.var:actor_side (0..4 = ally team,
+									# 5..9 = enemy team) using the same palette as the
+									# slot-card side bars — the per-row tint reinforces
+									# team affiliation at a glance when scanning a long
+									# log, so the player doesn't have to read the actor
+									# name to know which side just acted.
+									#
+									# Declared BEFORE the Background_Frame so the frame's
+									# subtle grey border + mask render on top of the wash
+									# (CK3 backgrounds layer in document order, first =
+									# bottom). Alpha is kept very low (0.10) so the
+									# actor-name and side-bar colours still pop and the
+									# frame's outline remains the dominant separator
+									# between rows; raise the alpha to make team tinting
+									# more emphatic, drop it to make it subtler.
+									#
+									# Both wash widgets need an explicit white.dds texture
+									# because backgrounds with only `color` set don't
+									# render any pixels — same constraint the side-bar
+									# backgrounds work around.
+									background = {
+										visible = "[And(GreaterThanOrEqualTo_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)0'), LessThan_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5'))]"
+										texture = "gfx/interface/colors/white.dds"
+										color = { 0.83 0.72 0.47 0.05 }
+									}
+									background = {
+										visible = "[GreaterThanOrEqualTo_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5')]"
+										texture = "gfx/interface/colors/white.dds"
+										color = { 0.76 0.33 0.31 0.05 }
+									}
 									background = { using = Background_Frame }
 
 									hbox = {
@@ -686,10 +880,14 @@ widget = {
 										spacing = 0
 
 									# ── Side-bar (3 × full row) ────────────────────
-									# Two stacked backgrounds, mutually exclusive on
-									# entry.var:actor_side (< 5 ally / >= 5 enemy).
-									#   ally  — gold
-									#   enemy — red
+									# Three-state visibility on entry.var:actor_side:
+									#   0..4 = ally team (gold bar)
+									#   5..9 = enemy team (red bar)
+									#   -1   = system entry, no acting slot — no bar
+									#
+									# Colours match the mockup palette:
+									#   ally  ≈ (0.83, 0.72, 0.47)
+									#   enemy ≈ (0.76, 0.33, 0.31)
 									#
 									# Each background pairs `color` with the vanilla
 									# pure-white texture — CK3 backgrounds without a
@@ -697,22 +895,18 @@ widget = {
 									# tint, so the bar would be invisible if we only
 									# specified `color`.
 									#
-									# push_log defaults actor_side to 0 when the host
-									# doesn't have pod_combat_current_actor (system
-									# entries / off-turn pushes), so every entry
-									# carries the var and the comparison is
-									# deterministic — no IsSet guard needed.
+									# push_log always sets actor_side; system entries
+									# (no acting slot at push time) get the -1 sentinel
+									# and fall into neither bar branch (the ally branch
+									# now gates on `>= 0` in addition to `< 5`).
 									#
 									# `layoutpolicy_vertical = expanding` makes the
-									# bar stretch to the row's full height — so as
-									# the row content padding grows, the bar
-									# keeps reaching from the top frame edge to the
-									# bottom frame edge.
+									# bar stretch to the row's full height.
 									widget = {
 										size = { 4 -1 }
 										layoutpolicy_vertical = expanding
 										background = {
-											visible = "[LessThan_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5')]"
+											visible = "[And(GreaterThanOrEqualTo_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)0'), LessThan_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5'))]"
 											texture = "gfx/interface/colors/white.dds"
 											color = { 0.83 0.72 0.47 1 }
 										}
@@ -740,15 +934,23 @@ widget = {
 										ignoreinvisible = yes
 
 										# Actor — ally tint. Vanilla named format
-										# `color_yellow` = (0.82, 0.77, 0.5)
-										text_single = {
-											visible = "[And(Scope.Var('actor').IsSet, LessThan_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5'))]"
+										# `color_yellow` = (0.82, 0.77, 0.5), the
+										# closest named gold to the mockup's
+										# (0.83, 0.72, 0.47) bar. Inline RGB in
+										# raw_text format tags isn't a vanilla
+										# pattern, so we accept the small mismatch
+										# in exchange for staying with named formats.
+										# push_log always sets actor_side now, so
+										# the comparison can be unguarded.
+										pod_combat_log_text = {
+											visible = "[And(Scope.Var('actor').IsSet, And(GreaterThanOrEqualTo_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)0'), LessThan_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5')))]"
 											parentanchor = vcenter
 											raw_text = "#color_yellow;bold [Scope.Var('actor').GetCharacter.GetFirstNameNoTooltip]#!"
 										}
 										# Actor — enemy tint. `color_red` =
-										# (0.80, 0.3, 0.3)
-										text_single = {
+										# (0.80, 0.3, 0.3), matches the enemy bar
+										# (0.76, 0.33, 0.31) closely enough.
+										pod_combat_log_text = {
 											visible = "[And(Scope.Var('actor').IsSet, GreaterThanOrEqualTo_CFixedPoint(Scope.Var('actor_side').GetValue, '(CFixedPoint)5'))]"
 											parentanchor = vcenter
 											raw_text = "#color_red;bold [Scope.Var('actor').GetCharacter.GetFirstNameNoTooltip]#!"
@@ -758,7 +960,7 @@ widget = {
 										# returns "  → <name>" (or "  → All Enemies"
 										# / "  → All Allies" for AoE) and resolves to
 										# empty for self-targeted / move-less rows.
-										text_single = {
+										pod_combat_log_text = {
 											parentanchor = vcenter
 											raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).Custom('PODCombatLogTargetText')]"
 										}
@@ -783,7 +985,7 @@ widget = {
 													}
 												}
 											}
-											text_single = {
+											pod_combat_log_text = {
 												visible = "[Scope.Var('move').IsSet]"
 												parentanchor = left|vcenter
 												margin_left = 8
@@ -820,17 +1022,27 @@ widget = {
 									# leaving gaps).
 									#
 									# Render order (left-to-right inside the column):
-									#   1. main result text (rolled amount + label
-									#      + AoE intercept). Ends with the wound-box
-									#      icon for damage outcomes.
+									#   1. main result text (rolled amount + label).
+									#      Ends with the wound-box icon for damage
+									#      outcomes. AoE moves push one row per
+									#      target, so each row carries its own
+									#      per-target amount and label directly —
+									#      no intent-fallback intercept needed.
 									#   2. damage-source icon (fire / silver / holy
 									#      / etc.) — trailing tag after the amount.
 									#   3. heal rider — ", +X ▢" for life-drain /
 									#      combined moves
 									#   4. morale-damage rider — ", -X Morale"
 									#   5. morale-heal rider — ", +X Morale"
+									#   5b. retal rider — "+ Counter -X HP" overlay
+									#      for any main outcome where a counter-
+									#      strike resolved
 									#   6. buff / debuff / status rider — stance /
-									#      tier buff / utility flag the move applied
+									#      tier buff / utility flag the move applied.
+									#      Gated on aoe_burst_index = 0 OR unset
+									#      so move-level buffs render once per move
+									#      instead of repeating across every per-
+									#      target AoE row.
 									hbox = {
 										spacing = 0
 										ignoreinvisible = yes
@@ -844,9 +1056,9 @@ widget = {
 											# by the side bar + actor-name tint upstream,
 											# not by the result text — they're
 											# independent signals.
-											text_single = {
+											pod_combat_log_text = {
 												visible = "[Scope.Var('move').IsSet]"
-												raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).AddScope('rcode', MakeScopeFlag(Scope.Story.MakeScope.Var('result').GetFlagKey)).Custom('PODCombatLogResultText')]"
+												raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogResultText')]"
 											}
 												# 2. Damage-source icon — only shown when the move has an
 												# elemental damage_source (fire / cold / lightning / sun /
@@ -862,47 +1074,133 @@ widget = {
 												# flavor adds noise on those rows since no damage of any
 												# element actually landed. Damage / heal / utility rows
 												# still surface the icon when present.
-												text_single = {
+												pod_combat_log_text = {
 													visible = "[And(And(Scope.Var('move').IsSet, Scope.Var('move').Story.MakeScope.Var('damage_source').IsSet), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_show_damage_source_value'), '(CFixedPoint)0'))]"
 													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatDamageSourceMarker')]"
 												}
-												# 3. Heal rider — gated on entry.heal_amount (the actual
-												# rolled heal amount captured by push_log). Collapses for
-												# moves that didn't trigger a heal AND for capped heals
-												# (target near full HP — heal_amount stays 0).
-												text_single = {
-													visible = "[Scope.Var('heal_amount').IsSet]"
-													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).AddScope('rcode', MakeScopeFlag(Scope.Story.MakeScope.Var('result').GetFlagKey)).Custom('PODCombatLogHealRider')]"
+												# ── Per-rider separators + riders ──
+												# Each rider's visibility (BOTH the rider widget
+												# AND the separator before it) goes through a
+												# dedicated script value
+												# pod_combat_log_<rider>_rider_visible_value that
+												# returns 1 only when the rider's dispatcher
+												# would actually render visible content. The SV
+												# bakes in the outcome-suppression rules
+												# (heal / morale damage / morale heal riders
+												# suppress themselves when outcome equals their
+												# primary, since the main line already shows the
+												# same amount) AND the AoE burst gate for the
+												# buff rider. With both gates collapsed into one
+												# SV per rider, the widget and the separator can
+												# never disagree — the separator can't fire
+												# around an empty rider widget the way the older
+												# amount-IsSet gate could.
+												#
+												# The preceding-effect chain in each separator's
+												# `Or(...)` uses the same SVs, so a suppressed
+												# upstream rider doesn't count as "preceding
+												# visible content" to a downstream separator.
+
+												# 3a. Separator before heal rider.
+												pod_combat_log_text = {
+													visible = "[And(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0'), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_main_has_content_value'), '(CFixedPoint)0'))]"
+													raw_text = " #bold ·#! "
 												}
-												# 4. Morale-damage rider — gated on entry.morale_damage_amount
-												text_single = {
-													visible = "[Scope.Var('morale_damage_amount').IsSet]"
-													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).AddScope('rcode', MakeScopeFlag(Scope.Story.MakeScope.Var('result').GetFlagKey)).Custom('PODCombatLogMoraleDamageRider')]"
+												# 3. Heal rider — renders only when heal_amount > 0 AND
+												# outcome != flag:heal (otherwise the heal primary
+												# line already shows the same amount).
+												pod_combat_log_text = {
+													visible = "[GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0')]"
+													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogHealRider')]"
 												}
-												# 5. Morale-heal rider — gated on entry.morale_heal_amount
-												text_single = {
-													visible = "[Scope.Var('morale_heal_amount').IsSet]"
-													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).AddScope('rcode', MakeScopeFlag(Scope.Story.MakeScope.Var('result').GetFlagKey)).Custom('PODCombatLogMoraleHealRider')]"
+												# 4a. Separator before morale-damage rider.
+												pod_combat_log_text = {
+													visible = "[And(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_damage_rider_visible_value'), '(CFixedPoint)0'), Or(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_main_has_content_value'), '(CFixedPoint)0'), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0')))]"
+													raw_text = " #bold ·#! "
 												}
-												# 6. Buff / debuff / status rider — collapse only if NONE of
-												# the buff/stance/utility vars are present on the move.
-												text_single = {
-													visible = "[And(Scope.Var('move').IsSet, Or(Or(Or(Scope.Var('move').Story.MakeScope.Var('set_guard').IsSet, Scope.Var('move').Story.MakeScope.Var('dodge').IsSet), Or(Scope.Var('move').Story.MakeScope.Var('stealth').IsSet, Scope.Var('move').Story.MakeScope.Var('remove_guard').IsSet)), Or(Or(Or(Scope.Var('move').Story.MakeScope.Var('soak_buff_round_tier').IsSet, Scope.Var('move').Story.MakeScope.Var('soak_buff_combat_tier').IsSet), Or(Scope.Var('move').Story.MakeScope.Var('soak_debuff_round_tier').IsSet, Scope.Var('move').Story.MakeScope.Var('soak_debuff_combat_tier').IsSet)), Or(Or(Or(Scope.Var('move').Story.MakeScope.Var('hit_buff_round_tier').IsSet, Scope.Var('move').Story.MakeScope.Var('hit_buff_combat_tier').IsSet), Or(Scope.Var('move').Story.MakeScope.Var('hit_debuff_round_tier').IsSet, Scope.Var('move').Story.MakeScope.Var('hit_debuff_combat_tier').IsSet)), Or(Or(Scope.Var('move').Story.MakeScope.Var('ap_gain').IsSet, Scope.Var('move').Story.MakeScope.Var('ap_drain').IsSet), Or(Or(Scope.Var('move').Story.MakeScope.Var('retaliate_if_hit').IsSet, Scope.Var('move').Story.MakeScope.Var('retaliate_if_missed').IsSet), Scope.Var('move').Story.MakeScope.Var('initiative_debuff').IsSet))))))]"
+												# 4. Morale-damage rider — same suppression pattern as
+												# heal rider, gated on the visible SV.
+												pod_combat_log_text = {
+													visible = "[GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_damage_rider_visible_value'), '(CFixedPoint)0')]"
+													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogMoraleDamageRider')]"
+												}
+												# 5a. Separator before morale-heal rider.
+												pod_combat_log_text = {
+													visible = "[And(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_heal_rider_visible_value'), '(CFixedPoint)0'), Or(Or(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_main_has_content_value'), '(CFixedPoint)0'), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_damage_rider_visible_value'), '(CFixedPoint)0')))]"
+													raw_text = " #bold ·#! "
+												}
+												# 5. Morale-heal rider.
+												pod_combat_log_text = {
+													visible = "[GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_heal_rider_visible_value'), '(CFixedPoint)0')]"
+													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogMoraleHealRider')]"
+												}
+												# 5ba. Separator before retal rider.
+												pod_combat_log_text = {
+													visible = "[And(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_retal_rider_visible_value'), '(CFixedPoint)0'), Or(Or(Or(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_main_has_content_value'), '(CFixedPoint)0'), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_damage_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_heal_rider_visible_value'), '(CFixedPoint)0')))]"
+													raw_text = " #bold ·#! "
+												}
+												# 5b. Retal rider — renders the "+ Counter -X HP" /
+												# "+ Counter Soaked" rider line independent of the
+												# main outcome line; works for ANY main attack outcome
+												# (hp_damage / soaked / guard_blocked / missed / dodged
+												# / stealthed). Not suppressed by any outcome.
+												pod_combat_log_text = {
+													visible = "[GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_retal_rider_visible_value'), '(CFixedPoint)0')]"
+													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogRetalRider')]"
+												}
+												# 6a. Separator before buff rider. The buff rider is the
+												# last in the chain and chains after ALL earlier effects,
+												# so the precede-clause OR is the longest — main result,
+												# heal, morale damage, morale heal, and retal all qualify
+												# as preceding visible content. All five preceding
+												# checks go through their respective visible SVs so the
+												# separator can never fire when a suppressed upstream
+												# rider didn't actually render.
+												pod_combat_log_text = {
+													visible = "[And(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_buff_rider_visible_value'), '(CFixedPoint)0'), Or(Or(Or(Or(GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_main_has_content_value'), '(CFixedPoint)0'), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_heal_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_damage_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_morale_heal_rider_visible_value'), '(CFixedPoint)0')), GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_retal_rider_visible_value'), '(CFixedPoint)0')))]"
+													raw_text = " #bold ·#! "
+												}
+												# 6. Buff / debuff / status rider — visibility delegates
+												# to pod_combat_log_buff_rider_visible_value, which
+												# bakes in: (a) the move has at least one rider-eligible
+												# var (delegated to the move-side pod_combat_move_has_buff_rider_value),
+												# and (b) the row isn't a subsequent AoE per-target row
+												# (move-level buffs apply ONCE per move so the rider
+												# renders only on the first row of the burst). The SV
+												# evaluates on entry scope so the aoe_burst_index check
+												# resolves against the row's captured value reliably —
+												# the old inline Equal_CFixedPoint check hit edge cases
+												# where the gate wouldn't reliably hide on subsequent
+												# rows, leaving trailing dots / orphan widgets behind.
+												pod_combat_log_text = {
+													visible = "[GreaterThan_CFixedPoint(Scope.ScriptValue('pod_combat_log_buff_rider_visible_value'), '(CFixedPoint)0')]"
 													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('move', Scope.Var('move').Story.MakeScope).Custom('PODCombatLogBuffRider')]"
 												}
-												# Move-less fallback (system entries with no move captured)
-												text_single = {
-													visible = "[Not(Scope.Var('move').IsSet)]"
+												# Move-less rows — system-message bookends pushed by
+												# pod_combat_push_system_log_effect (combat start /
+												# victory / defeat). The dispatcher reads
+												# entry.var:system_message and resolves to the matching
+												# loc key. For move-less entries WITHOUT a system_message
+												# (shouldn't happen in normal play but possible if a
+												# debug tool pushes one), the dispatcher's unknown
+												# fallback returns a muted "—" placeholder.
+												pod_combat_log_text = {
+													visible = "[And(Not(Scope.Var('move').IsSet), Scope.Var('system_message').IsSet)]"
+													raw_text = "[GuiScope.SetRoot(GetPlayer.MakeScope).AddScope('entry', Scope.Story.MakeScope).Custom('PODCombatLogSystemMessageText')]"
+												}
+												pod_combat_log_text = {
+													visible = "[And(Not(Scope.Var('move').IsSet), Not(Scope.Var('system_message').IsSet))]"
 													raw_text = "#weak —#!"
 												}
 											}
 										}
 									}
 								}
+								}
 							}
-						
+
 						# Empty state placeholder — shows when the log list is empty.
-						text_single = {
+						pod_combat_log_text = {
 							visible = "[IsDataModelEmpty(GetPlayer.MakeScope.GetList('pod_combat_log'))]"
 							text = "pod_combat_log_empty"
 							margin = { 5 4 }
@@ -988,6 +1286,20 @@ widget = {
 }
 
 types PODCombatTypes {
+
+	# Combat-log text style. Every prose / amount / rider widget in the
+	# log datamodel uses this type instead of bare text_single so the log
+	# font size is tunable from a single knob here. Inherits all other
+	# text_single behaviour (raw_text, parentanchor, default_format,
+	# visible) — only the default font size changes. Per-widget override
+	# remains available (`fontsize = N` inside any usage still wins),
+	# but the established log convention is "leave fontsize alone, let
+	# the type drive it." Separator dot widgets use the same type so the
+	# middle-dot character lines up with the surrounding rider text
+	# instead of riding the smaller default baseline.
+	type pod_combat_log_text = text_single {
+		fontsize = 16
+	}
 
 	# One Health Track wound box. Three icon variants (aggravated /
 	# superficial / empty) layered with three transparent concept-link
@@ -1415,8 +1727,15 @@ types PODCombatTypes {
 					default_format = "#weak"
 				}
 				expand = {}
+				# Hit cell. Every slot renders the SIGNED net tier
+				# modifier ("+20%" green / "-10%" red / "—" muted) via
+				# PODCombatSlotHitDisplay — uniform across PC and NPC
+				# slots so each card's "Hit:" line means the same thing.
+				# The absolute PC-vs-current-target percentage lives in
+				# the combat window's top-row "Target / Hit" readout
+				# instead of on the slot 0 card.
 				text_single = {
-					raw_text = "[Concept('pod_combat_hit_chance','#E Hit#!')]: [Scope.ScriptValue('pod_combat_slot_hit_chance_value')|0]%"
+					raw_text = "[Concept('pod_combat_hit_chance','#E Hit#!')]: [GuiScope.SetRoot(Scope.Story.MakeScope).Custom('PODCombatSlotHitDisplay')]"
 					default_format = "#weak"
 				}
 				expand = {}
@@ -1489,8 +1808,15 @@ types PODCombatTypes {
 			spacer = { size = { 0 4 } }
 
 			# ── HIT CHANCE ─────────────────────────────
+			# Headline routed through PODCombatSlotHitDisplay so PC shows
+			# the absolute hit chance and NPC slots show the signed net
+			# tier modifier — same rationale as the card-line stat row,
+			# see the GUI comment there. The buff/debuff breakdown
+			# flowcontainer below still itemises the contributing axes
+			# (round / combat × buff / debuff) for both PC and NPCs,
+			# so the tooltip remains diagnostic for either side.
 			text_single = {
-				raw_text = "[Concept('pod_combat_hit_chance','Hit Chance')|E]: #bold [Scope.ScriptValue('pod_combat_slot_hit_chance_value')|0]%#!"
+				raw_text = "[Concept('pod_combat_hit_chance','Hit Chance')|E]: #bold [GuiScope.SetRoot(Scope.Story.MakeScope).Custom('PODCombatSlotHitDisplay')]#!"
 				alwaystransparent = yes
 			}
 			flowcontainer = {
@@ -1570,13 +1896,22 @@ types PODCombatTypes {
 	#
 	# Four `button_standard` derivatives, one per combat category, that
 	# blockoverride the parent's `background_color` slot to bake in a
-	# dark category-tinted background.  —
-	#   ATK #2e1818 (dark red)  / DEF #15202e (dark blue)
-	#   CTL #1f1828 (dark plum) / PWR #2e2614 (dark gold)
-	# Rounded to 0–1 RGB. Alpha = 1 keeps the tint solid; the parent
-	# button's overlay texture (`button_standard_overlay.dds`,
-	# blend_mode = overlay, alpha = 0.3 from the vanilla template)
-	# automatically softens edges and adds the bevel/highlight.
+	# category-tinted background. The colour palette is brightened from
+	# the original mockup swatches (~70% lift on each channel) so the
+	# enabled state reads as visibly saturated against vanilla
+	# button_standard's disabled treatment — `disableframe = 7` swaps
+	# to the darker face frame and `block "disabled"` adds the diagonal
+	# stripes overlay at 0.4 alpha. With the original near-black tints,
+	# disabled vs enabled looked like "dark" vs "dark-with-stripes,"
+	# which doesn't communicate affordability strongly enough for the
+	# combat-loop pace. The brighter tints widen that gap to "vibrant"
+	# vs "muted-with-stripes," matching the read the slot card colors
+	# carry.
+	#
+	# Alpha = 1 keeps the tint solid; the parent button's overlay
+	# texture (`button_standard_overlay.dds`, blend_mode = overlay,
+	# alpha = 0.3 from the vanilla template) automatically softens
+	# edges and adds the bevel/highlight.
 	#
 	# Used by the four move-button rows in the move grid (ATK / DEF /
 	# CTL / PWR). Each row swaps `button_standard` for its tinted
@@ -1587,46 +1922,120 @@ types PODCombatTypes {
 	# mask vanilla uses for the `Status_Suggestion_*` button-background
 	# helpers. It carries the visual grain of the rest of the UI rather
 	# than reading as a flat slab, and supports `color` tinting cleanly.
+	#
+	# Tuning: each color tuple is `{ R G B A }` in 0–1 floats. Brighter
+	# = enabled pops more; darker = closer to the original muted mockup.
+	# If you need to pull the saturation back, divide the RGB channels
+	# by 1.5–1.7 to recover the pre-brightening palette.
 	###################################################################
 
-	type button_combat_atk = button_standard {
+	# Shared disabled-state darken. The vanilla `block "disabled"` slot
+	# is NOT itself state-gated — the name is descriptive. Its vanilla
+	# content (line 228 of CK3 Reference/gui/shared/buttons.gui) renders
+	# only in disabled state because the `highlight_icon` inside uses
+	# frame-based texture switching: `button_disabled_stripes.dds` has
+	# frame 1 transparent + frame 2 striped, and the highlight_icon's
+	# disableframe = 2 / upframe = 1 / etc. mapping picks the right
+	# frame per button state. Plain `background` widgets dropped into
+	# the slot have no frame awareness and render in EVERY state —
+	# dimming enabled buttons identically to disabled ones, which was
+	# the first iteration's bug.
+	#
+	# Fix: reuse the vanilla stripes texture (preserving its frame-1-
+	# transparent / frame-2-content guarantee) but tint it BLACK at
+	# HIGH alpha to convert the diagonal-stripe motif into a much
+	# darker, more readable "unavailable" wash. The stripe pattern
+	# stays — that's a vanilla-consistent disabled signal players
+	# already recognise — but the cell value drops far enough that the
+	# brightened category tint underneath reads as muted instead of
+	# active. Result: enabled buttons keep their full vibrant tint;
+	# disabled buttons get the original brushed tint + darker face
+	# frame (disableframe = 7) + heavy black stripes overlay.
+	#
+	# `alwaystransparent = yes` on the inner block lets the parent
+	# button still receive hover events so the move tooltip surfaces
+	# on unaffordable moves.
+	#
+	# Tuning:
+	#   - alpha = 0.4  (vanilla default)  — subtle stripes
+	#   - alpha = 0.75 (current)          — heavy dark stripes
+	#   - alpha = 0.95                    — near-solid black stripes
+	# Or shift the color tuple — { 0.2 0 0 1 } gives a dark-red wash,
+	# { 0 0 0.2 1 } a dark-blue wash, etc.
+	type button_combat_base = button_standard {
+		blockoverride "disabled" {
+			highlight_icon = {
+				size = { 100% 100% }
+				gfxtype = togglepushbuttongfx
+				effectname = "NoHighlight"
+				texture = "gfx/interface/buttons/button_disabled_stripes.dds"
+				spriteType = Corneredtiled
+				spriteborder = { 2 2 }
+				framesize  = { 238 63 }
+
+				upframe = 1
+				uphoverframe = 1
+				uppressedframe = 1
+				downframe = 1
+				downhoverframe = 1
+				downpressedframe = 1
+				disableframe = 2
+
+				alpha = 0.75
+				color = { 0 0 0 1 }
+				alwaystransparent = yes
+
+				modify_texture = {
+					name = "overlay"
+					texture = "gfx/interface/buttons/button_standard_overlay.dds"
+					spriteType = Corneredstretched
+					spriteborder = { 3 3 }
+					blend_mode = overlay
+				}
+
+				block "button_standard_mouseover" {}
+			}
+		}
+	}
+
+	type button_combat_atk = button_combat_base {
 		blockoverride "background_color" {
 			background = {
 				texture = "gfx/interface/component_masks/mask_brushed.dds"
-				color = { 0.18 0.094 0.094 1 }
+				color = { 0.31 0.16 0.16 1 }
 				spriteType = Corneredtiled
 				spriteborder = { 4 4 }
 			}
 		}
 	}
 
-	type button_combat_def = button_standard {
+	type button_combat_def = button_combat_base {
 		blockoverride "background_color" {
 			background = {
 				texture = "gfx/interface/component_masks/mask_brushed.dds"
-				color = { 0.082 0.125 0.18 1 }
+				color = { 0.14 0.21 0.31 1 }
 				spriteType = Corneredtiled
 				spriteborder = { 4 4 }
 			}
 		}
 	}
 
-	type button_combat_ctl = button_standard {
+	type button_combat_ctl = button_combat_base {
 		blockoverride "background_color" {
 			background = {
 				texture = "gfx/interface/component_masks/mask_brushed.dds"
-				color = { 0.122 0.094 0.157 1 }
+				color = { 0.21 0.16 0.27 1 }
 				spriteType = Corneredtiled
 				spriteborder = { 4 4 }
 			}
 		}
 	}
 
-	type button_combat_pwr = button_standard {
+	type button_combat_pwr = button_combat_base {
 		blockoverride "background_color" {
 			background = {
 				texture = "gfx/interface/component_masks/mask_brushed.dds"
-				color = { 0.25 0.13 0.05 1 }
+				color = { 0.42 0.22 0.09 1 }
 				spriteType = Corneredtiled
 				spriteborder = { 4 4 }
 			}

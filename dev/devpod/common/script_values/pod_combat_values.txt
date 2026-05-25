@@ -13,8 +13,24 @@
 @combat_tier_medium_mag = 20
 @combat_tier_large_mag  = 30
 
-# Hit chance bounds — every per-slot _hit_chance_value clamps to this
-# window. Mirrors the bounds documented in the header comment.
+# Hit chance bounds — kept as named constants for documentation
+# clarity even though they no longer have an in-file consumer
+# (pod_combat_slot_hit_chance_value, the previous example, was
+# removed when the per-slot display moved to PODCombatSlotHitDisplay
+# / pod_combat_slot_hit_net_mod_value). Future top-level script
+# values clamping to the duel-system hit-chance window can reference
+# these instead of repeating the literals.
+#
+# Caveat: these `@` constants work in TOP-LEVEL script_value `min` /
+# `max` slots but NOT inside `min` / `max` of a script value nested
+# INSIDE a scripted_effect that uses `$PARAM$` substitution. There,
+# the parser tries to resolve `@combat_hit_chance_min` as an
+# event-target link and errors out ("Failed to find a valid event
+# target link"). For those sites the literal `min = 20 max = 95`
+# has to stay. Reproducer: previously attempted
+# `min = @combat_hit_chance_min` inside
+# pod_combat_calc_one_hit_chance_effect and the various
+# pod_combat_recalc_hit_* effects — all rejected at load.
 @combat_hit_chance_min = 20
 @combat_hit_chance_max = 95
 
@@ -44,10 +60,23 @@ pod_combat_max_equipped = 16
 # Mental-strain scaling for morale damage in the combat minigame.
 # Combat morale is 0-20, each point of morale damage
 # translates to 5 stress applied as Mental Strain (static
-# stress: unaffected by stress-gain modifiers). A full 
+# stress: unaffected by stress-gain modifiers). A full
 # morale-broken character (20 morale damage) takes 100 stress.
 # Adjust this knob to rebalance stress attrition.
 pod_combat_morale_stress_multiplier = 5
+
+# Maximum number of log entries kept in pod_combat_log. Each push
+# rebuilds the list (CK3 lists are append-only and we need newest-
+# first ordering). At 50 entries that bounds the per-push cost
+# around 50 list-ops; for very long combats (NvN with 10+ actors
+# and 12+ rounds) it prevents the list from growing unbounded too.
+# Entries dropped beyond the cap get end_story'd so the underlying
+# POD_combat_log_entry story_cycle doesn't leak on Charon for the
+# rest of the session.
+#
+# Tune higher if players ask for more scroll-back history; tune
+# lower if combat-log rendering ever becomes a perf bottleneck.
+pod_combat_log_max_entries = 50
 
 ###### CURRENT VALUE ACCESSORS ######
 # Used by GUI and triggers to read combat state.
@@ -214,32 +243,14 @@ pod_combat_slot_soak_value = {
 	min = 0
 	max = 100
 }
-pod_combat_slot_hit_chance_value = {
-	# Two paths:
-	#   1. slot_hit_chance is set → return it (post calculate_all_hit_chances).
-	#   2. slot_hit_chance NOT set but slot_char is → synthesize a
-	#      neutral baseline (the brief mid-init window before
-	#      pod_combat_calculate_all_hit_chances_effect populates per-
-	#      slot hit_chance).
-	if = {
-		limit = { has_variable = slot_hit_chance }
-		value = var:slot_hit_chance
-	}
-	if = {
-		limit = {
-			NOT = { has_variable = slot_hit_chance }
-			has_variable = slot_char
-		}
-		value = pod_combat_hit_chance_base
-		# No prowess-delta synthesis here because the slot story doesn't
-		# have a back-reference to the host (and thus no access to the
-		# opposing slot's prowess). The current actor / target dance in
-		# the workspace already handles correct hit chance during
-		# combat — this fallback is for the brief init window only.
-		min = @combat_hit_chance_min
-		max = @combat_hit_chance_max
-	}
-}
+# pod_combat_slot_hit_chance_value was removed after the per-slot
+# display redesigned around PODCombatSlotHitDisplay (renders the
+# signed net tier modifier via pod_combat_slot_hit_net_mod_value)
+# and the PC target header reads slot 0's slot_hit_chance directly.
+# The synthesis-fallback for the pre-calculate_all_hit_chances init
+# window no longer has a consumer either, since neither display
+# path goes through this SV. If a future feature needs an absolute
+# per-slot hit-chance readout, restore from git history.
 pod_combat_slot_prowess_value = {
 	value = var:slot_prowess
 }
@@ -319,6 +330,27 @@ pod_combat_slot_hit_debuff_combat_mag_sv = {
 	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = @combat_tier_large_mag  }
 }
 
+# Signed net hit-chance modifier (buffs − debuffs). Sums the four
+# hit-tier magnitude SVs above, adding buffs and subtracting debuffs,
+# so a slot with a tier-2 round buff (+20) AND a tier-1 combat debuff
+# (-10) reports +10. Returns 0 when no hit-tier mods are active. Used
+# by NPC slot cards (slots 1-9) to display "this combatant is currently
+# X% above/below their baseline hit chance" instead of the largely
+# meaningless slot_hit_chance absolute value (which rotates between
+# leader-baseline, last-attack-target, and last-attacker-retaliation
+# depending on what happened most recently — see PODCombatSlotHitDisplay
+# in 00_POD_combat_custom_loc.txt for the display dispatch). The PC slot
+# (slot 0) ignores this SV and keeps the absolute readout because the
+# load_workspace writeback explicitly refreshes slot 0's slot_hit_chance
+# against the PC's currently-selected target every turn.
+pod_combat_slot_hit_net_mod_value = {
+	value = 0
+	add      = pod_combat_slot_hit_buff_round_mag_sv
+	add      = pod_combat_slot_hit_buff_combat_mag_sv
+	subtract = pod_combat_slot_hit_debuff_round_mag_sv
+	subtract = pod_combat_slot_hit_debuff_combat_mag_sv
+}
+
 # ────────────────────────────────────────────────────────────────────
 # Move-story tier magnitudes for combat-log riders.
 #
@@ -390,22 +422,201 @@ pod_combat_move_hit_debuff_mag_value = {
 # retaliation variants), morale damage, heals, and utility moves
 # keep the icon if their move declared one.
 #
-# Caller scope must be a combat-log entry story (the var:result
+# Caller scope must be a combat-log entry story (the var:attack_result
 # read below resolves against entry.var). Returns 1 to show, 0 to
 # hide; the consumer gates with GreaterThan_CFixedPoint > 0.
+#
+# Reads entry.var:attack_result (set by push_log from the host's
+# pod_combat_last_attack_result) since the icon suppress logic only
+# applies to the attack axis — heal / morale / utility rows don't
+# have an attack_result var at all, so the trigger returns false for
+# them and the icon stays visible.
 
 pod_combat_log_show_damage_source_value = {
+	# Single trigger call instead of an inline enum that has to stay
+	# parallel to the partition trigger of the same set. Adding a
+	# new no-damage attack_result flag is now a one-line edit in
+	# pod_combat_result_indicates_no_damage_dealt_trigger; this SV
+	# inherits the change automatically.
 	value = 1
 	if = {
 		limit = {
-			OR = {
-				var:result = flag:guard_blocked
-				var:result = flag:missed
-				var:result = flag:dodged
-				var:result = flag:stealthed
-			}
+			pod_combat_result_indicates_no_damage_dealt_trigger = { RESULT_VAR = attack_result }
 		}
 		value = 0
+	}
+}
+
+# Buff-rider visibility for the combat-log GUI. Returns 1 when the
+# move story carries ANY of the buff / stance / tier / utility /
+# retaliation / init-mod variables that PODCombatLogBuffRider knows
+# how to render — 0 otherwise.
+#
+# Previously the GUI's text_single `visible` binding inlined a
+# 17-IsSet `Or(Or(Or(...)))` chain enumerating exactly these vars,
+# kept manually in parallel with the rider dispatcher's branches.
+# Adding a new buff attribute meant editing both lists; missing one
+# side caused either rider visibility to lag or empty rider rows to
+# render. This SV consolidates the enum into one place — the rider
+# dispatcher still defines the per-branch loc keys, but the gate
+# is a single ScriptValue read.
+#
+# Called on the move story scope (the GUI passes
+# `Scope.Var('move').Story.MakeScope` as the call scope). All
+# `has_variable` reads resolve against the move story's vars.
+pod_combat_move_has_buff_rider_value = {
+	value = 0
+	if = {
+		limit = {
+			OR = {
+				# Stance flags (set_guard / dodge / stealth /
+				# remove_guard) — single-effect rider lines.
+				has_variable = set_guard
+				has_variable = dodge
+				has_variable = stealth
+				has_variable = remove_guard
+				# Tier buffs / debuffs (soak / hit, round / combat
+				# duration) — magnitude-driven rider lines.
+				has_variable = soak_buff_round_tier
+				has_variable = soak_buff_combat_tier
+				has_variable = soak_debuff_round_tier
+				has_variable = soak_debuff_combat_tier
+				has_variable = hit_buff_round_tier
+				has_variable = hit_buff_combat_tier
+				has_variable = hit_debuff_round_tier
+				has_variable = hit_debuff_combat_tier
+				# Resource / timing modifiers — AP gain / drain,
+				# retaliation arm flags, next-round init debuff.
+				has_variable = ap_gain
+				has_variable = ap_drain
+				has_variable = retaliate_if_hit
+				has_variable = retaliate_if_missed
+				has_variable = initiative_debuff
+			}
+		}
+		value = 1
+	}
+}
+
+# ─── Combat-log result-column visibility probes ────────────────────
+# Each "rider" in the result column (heal / morale damage / morale
+# heal / retal / buff) has its own customizable_loc dispatcher AND
+# a separator widget that renders " · " before it. The SVs below
+# return 1 if a given segment would actually render visible content,
+# 0 otherwise — used uniformly by both the rider widget's `visible`
+# binding AND the preceding separator's `visible` binding so the
+# two stay in lockstep.
+#
+# Without these, the rider WIDGET's visibility (which gated only on
+# `amount.IsSet`) could stay true while the rider's DISPATCHER
+# returned blank (the heal / morale-damage / morale-heal dispatchers
+# suppress themselves when outcome equals their primary, since the
+# main result line already shows the same amount). That orphaned
+# the surrounding separators around an empty widget — symptoms like
+# "-5 Morale · · → Guard broken" with two dots.
+
+# Main result has visible text. Returns 0 only when outcome=utility
+# (loc literally returns ""); every other outcome renders something.
+pod_combat_log_main_has_content_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = outcome
+			NOT = { var:outcome = flag:utility }
+		}
+		value = 1
+	}
+}
+
+# Heal rider would render content. Mirrors the dispatcher gate in
+# PODCombatLogHealRider: heal_amount > 0 AND outcome != flag:heal
+# (the heal outcome's primary already shows the same amount, so
+# the rider suppresses itself).
+pod_combat_log_heal_rider_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = heal_amount
+			var:heal_amount > 0
+			NOT = {
+				has_variable = outcome
+				var:outcome = flag:heal
+			}
+		}
+		value = 1
+	}
+}
+
+# Morale-damage rider would render content. Same suppression
+# pattern when outcome=morale_damage.
+pod_combat_log_morale_damage_rider_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = morale_damage_amount
+			var:morale_damage_amount > 0
+			NOT = {
+				has_variable = outcome
+				var:outcome = flag:morale_damage
+			}
+		}
+		value = 1
+	}
+}
+
+# Morale-heal rider would render content. Suppressed when
+# outcome=morale_healed.
+pod_combat_log_morale_heal_rider_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = morale_heal_amount
+			var:morale_heal_amount > 0
+			NOT = {
+				has_variable = outcome
+				var:outcome = flag:morale_healed
+			}
+		}
+		value = 1
+	}
+}
+
+# Retal rider would render content. retal_fired is a presence flag
+# set by pod_combat_apply_retaliation_helper whenever a counter-
+# strike resolved; not suppressed by any outcome (the retal is an
+# independent overlay that fires regardless of the main attack's
+# result).
+pod_combat_log_retal_rider_visible_value = {
+	value = 0
+	if = {
+		limit = { has_variable = retal_fired }
+		value = 1
+	}
+}
+
+# Buff rider would render content. Requires:
+#   - The row's move has at least one rider-eligible buff/stance/
+#     debuff/AP/retal-arm var (delegated to the move-side SV
+#     pod_combat_move_has_buff_rider_value).
+#   - This row isn't a subsequent AoE per-target row — move-level
+#     buffs apply ONCE per move, so the rider renders only on the
+#     first row of the burst (aoe_burst_index = 0) or on rows that
+#     aren't part of any burst (single-target moves have the var
+#     unset).
+pod_combat_log_buff_rider_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				pod_combat_move_has_buff_rider_value > 0
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+		value = 1
 	}
 }
 

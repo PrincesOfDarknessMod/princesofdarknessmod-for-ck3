@@ -215,6 +215,80 @@ POD_can_execute_combat_move = {
 		var:pod_combat_target_hit_debuff_combat_tier < $STORY$.var:hit_debuff_combat_tier
 	}
 
+	# Heal-utility gate — block heal-only moves (hp_heal/morale_heal
+	# with no hp_damage / morale_damage rider) that would no-op because
+	# the actor is already at the cap the heal can't exceed. Mirrors the
+	# AI selector's matching trigger_if in pod_combat_ai_effects.txt
+	# (~line 364) so PC move buttons follow the same "would this do
+	# anything useful?" gate the AI's pick already enforces. Without
+	# this the PC could spend a full turn casting Mend on themselves
+	# at maxed HP, getting back zero wounds and the same blank "—" log
+	# row a poorly-chosen AI move used to produce.
+	#
+	# Scoped to var:targeting = flag:self (and heal moves with no
+	# targeting var, generator-defaulted to actor-self). Single_ally
+	# and team_ally heals stay clickable — the actor's HP isn't the
+	# heal's intended target, and the player may intentionally cast
+	# on a wounded ally even when the actor is full. The AI's
+	# corresponding gate has a known limitation here (it blocks
+	# single_ally heals on a full-HP actor regardless of the ally's
+	# wound state); revisit that selector-side if combat_healing
+	# usage by AI characters becomes a balance concern.
+	#
+	# custom_description wraps the inner trigger so the disabled-
+	# button tooltip surfaces a player-friendly "already at full HP /
+	# Morale — no benefit from this heal" instead of the raw trigger
+	# expression — same UX pattern as the targeting-validity gates
+	# directly below this block.
+	trigger_if = {
+		limit = {
+			$STORY$ = {
+				OR = {
+					has_variable = hp_heal
+					has_variable = morale_heal
+				}
+				NOT = { has_variable = hp_damage }
+				NOT = { has_variable = morale_damage }
+				OR = {
+					NOT = { has_variable = targeting }
+					var:targeting = flag:self
+				}
+			}
+		}
+		custom_description = {
+			text = pod_combat_cant_heal_already_full_desc
+			OR = {
+				# Superficial hp_heal — useful while live HP is below
+				# the cap aggravated wounds impose (max_hp − agg_boxes).
+				# Aggravated wounds pin the top of the track so a
+				# superficial heal can't fill past sup_ceiling even
+				# when hp < max_hp.
+				AND = {
+					$STORY$ = {
+						has_variable = hp_heal
+						var:heal_type = flag:superficial
+					}
+					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
+				}
+				# Aggravated hp_heal — useful for any wound (heals
+				# aggravated first, spills into superficial if no
+				# aggravated remain), capped at max_hp.
+				AND = {
+					$STORY$ = {
+						has_variable = hp_heal
+						var:heal_type = flag:aggravated
+					}
+					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+				}
+				# Morale heal — useful below the morale cap.
+				AND = {
+					$STORY$ = { has_variable = morale_heal }
+					var:pod_combat_actor_morale < pod_combat_max_morale
+				}
+			}
+		}
+	}
+
 	# Targeting validity during the player's turn. The PC has explicitly
 	# picked a slot via pod_combat_pc_target; the move's targeting flag
 	# dictates which range is acceptable. Outside of the player turn
@@ -332,44 +406,43 @@ POD_can_execute_combat_move = {
 ######################################################
 ###### RESULT-CODE CONDITION TRIGGERS
 ######################################################
-# Three primitive triggers that read pod_combat_last_result on the host
-# scope and partition the result flag values by outcome class. Both
-# the rider condition gate and the retaliation gate compose against
-# these so the result → outcome mapping lives in one place.
+# Three primitive triggers that read pod_combat_last_outcome and
+# pod_combat_last_attack_result on the host scope and partition the
+# attack_result flag values by outcome class. Both the rider
+# condition gate and the retaliation gate compose against these so
+# the outcome → partition mapping lives in one place.
 #
 # Partition membership (see COMBAT_REFERENCE.info §4 for the full map):
-#   "hp_damage" — flag:hp_damage / hp_damage_retal / soaked_retal
-#   "contact"   — hp_damage partition + flag:guard_blocked / soaked
-#   "miss"      — flag:missed / dodged / stealthed
-# Outcomes outside the three partitions: flag:utility, flag:morale_damage,
-# flag:hp_healed, flag:morale_healed.
+#   "hp_damage" — outcome=attack + attack_result=hp_damage
+#   "contact"   — outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked)
+#   "miss"      — outcome=attack + attack_result ∈ (missed, dodged, stealthed)
+# Outcomes outside the attack axis (outcome=heal / morale_damage /
+# morale_healed / utility) fail every attack-axis partition by
+# design — the attack_result var is only meaningful when outcome=attack.
+#
+# Each partition gates on `outcome = flag:attack` first to ensure
+# attack_result is meaningful before checking specific flag values.
 
-# The original attack landed real wound boxes on the target. The
-# retaliation overlay flags (hp_damage_retal, soaked_retal) won't
-# appear at rider/retaliation gate time on the SAME move (retaliation
-# hasn't fired yet) but listing them keeps the partition complete and
-# future-safe for any downstream code that calls this trigger after §15.
+# The attack landed real wound boxes on the target.
 pod_combat_result_code_indicates_hp_damage_trigger = {
-	has_variable = pod_combat_last_result
-	OR = {
-		var:pod_combat_last_result = flag:hp_damage
-		var:pod_combat_last_result = flag:hp_damage_retal
-		var:pod_combat_last_result = flag:soaked_retal
-	}
+	has_variable = pod_combat_last_outcome
+	var:pod_combat_last_outcome = flag:attack
+	has_variable = pod_combat_last_attack_result
+	var:pod_combat_last_attack_result = flag:hp_damage
 }
 
-# Anything that made physical contact: hp_damage flags plus blocked /
+# Anything that made physical contact: hp_damage plus blocked /
 # soaked. Lets designers author "fires on touch even if absorbed"
 # riders (e.g. a poison that delivers on the strike whether or not
 # wounds were inflicted).
 pod_combat_result_code_indicates_contact_trigger = {
-	has_variable = pod_combat_last_result
+	has_variable = pod_combat_last_outcome
+	var:pod_combat_last_outcome = flag:attack
+	has_variable = pod_combat_last_attack_result
 	OR = {
-		var:pod_combat_last_result = flag:hp_damage
-		var:pod_combat_last_result = flag:guard_blocked
-		var:pod_combat_last_result = flag:soaked
-		var:pod_combat_last_result = flag:hp_damage_retal
-		var:pod_combat_last_result = flag:soaked_retal
+		var:pod_combat_last_attack_result = flag:hp_damage
+		var:pod_combat_last_attack_result = flag:guard_blocked
+		var:pod_combat_last_attack_result = flag:soaked
 	}
 }
 
@@ -378,11 +451,42 @@ pod_combat_result_code_indicates_contact_trigger = {
 # rider_condition = on_miss (e.g. a clumsy whiff that wounds the
 # actor on the overswing).
 pod_combat_result_code_indicates_miss_trigger = {
-	has_variable = pod_combat_last_result
+	has_variable = pod_combat_last_outcome
+	var:pod_combat_last_outcome = flag:attack
+	has_variable = pod_combat_last_attack_result
 	OR = {
-		var:pod_combat_last_result = flag:missed
-		var:pod_combat_last_result = flag:dodged
-		var:pod_combat_last_result = flag:stealthed
+		var:pod_combat_last_attack_result = flag:missed
+		var:pod_combat_last_attack_result = flag:dodged
+		var:pod_combat_last_attack_result = flag:stealthed
+	}
+}
+
+# Superset of the miss partition plus guard_blocked: every outcome
+# where the attack delivered ZERO damage. Used by the combat-log
+# damage-source icon visibility (suppress the elemental marker on
+# rows where no elemental damage actually landed — fire icon next
+# to a "Blocked" row is noise, not flavour).
+#
+# Excludes `soaked` deliberately. Soak typically reduces damage but
+# doesn't always zero it (and even on full-soak rows we want the
+# source flavour because something WAS rolled and survived as
+# residue / aura interaction). If a future attack_result flag joins
+# the zero-damage set (e.g. "incorporeal_no_effect"), update this
+# trigger and every consumer picks it up automatically.
+#
+# Parametric on $RESULT_VAR$ because two call sites read the same
+# attack_result enum on different vars:
+#   - host scope (during move execution) — RESULT_VAR = pod_combat_last_attack_result
+#   - log-entry scope (post-action GUI)  — RESULT_VAR = attack_result
+# Without the parameter the enum would have to be duplicated across
+# the two scopes.
+pod_combat_result_indicates_no_damage_dealt_trigger = {
+	has_variable = $RESULT_VAR$
+	OR = {
+		var:$RESULT_VAR$ = flag:missed
+		var:$RESULT_VAR$ = flag:dodged
+		var:$RESULT_VAR$ = flag:stealthed
+		var:$RESULT_VAR$ = flag:guard_blocked
 	}
 }
 
@@ -396,17 +500,18 @@ pod_combat_result_code_indicates_miss_trigger = {
 # that damages morale alongside HP, or a reckless charge that wounds
 # the actor only on miss. Each rider lives behind its own condition var
 # on the move story (heal_condition / morale_damage_condition /
-# self_damage_condition). The §6 HP-damage outcome (read off
-# pod_combat_last_result on the host) decides whether the rider
-# fires.
+# self_damage_condition). The §6 attack outcome (read off
+# pod_combat_last_outcome / pod_combat_last_attack_result on the host)
+# decides whether the rider fires.
 #
-# Recognized condition flags:
+# Recognized condition flags (must match RIDER_CONDITIONS in the
+# generator):
 #   always       — fire unconditionally (default when var unset)
-#   on_hp_damage — flag:hp_damage / hp_damage_retal / soaked_retal
-#   on_contact   — hp_damage partition + flag:guard_blocked / soaked
-#   on_miss      — flag:missed / dodged / stealthed
+#   on_hp_damage — outcome=attack + attack_result=hp_damage
+#   on_contact   — outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked)
+#   on_miss      — outcome=attack + attack_result ∈ (missed, dodged, stealthed)
 #
-# Caller scope: the combat host (where pod_combat_last_result lives).
+# Caller scope: the combat host (where pod_combat_last_outcome lives).
 # $STORY$ is the move story; $RIDER_VAR$ is the variable name on the
 # story that holds the condition flag.
 #

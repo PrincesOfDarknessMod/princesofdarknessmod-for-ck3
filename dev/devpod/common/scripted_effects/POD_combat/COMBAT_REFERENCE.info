@@ -55,11 +55,11 @@ groups them by *owner* for the "where does this live?" lookup.
 
 | Owner | Scope it lives on | Lifetime | Variables |
 |---|---|---|---|
-| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_mode`, `pod_combat_round`, `pod_combat_current_actor`, `pod_combat_current_ap`, `pod_combat_enemy_team_size`, `pod_combat_pc_target`, `pod_combat_selected_target`, `pod_combat_slot_0..9` (pointer vars — only set for slot indices the current mode actually filled), `pod_combat_active_slots` (variable list of every filled slot story, lazily populated as slots fill), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_result`, `pod_combat_nonfatal_active` |
+| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_mode`, `pod_combat_round`, `pod_combat_current_actor`, `pod_combat_current_ap`, `pod_combat_enemy_team_size`, `pod_combat_pc_target`, `pod_combat_selected_target`, `pod_combat_slot_0..9` (pointer vars — only set for slot indices the current mode actually filled), `pod_combat_active_slots` (variable list of every filled slot story, lazily populated as slots fill), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_outcome`, `pod_combat_last_attack_result`, `pod_combat_last_retal_fired`, `pod_combat_last_retal_damage`, `pod_combat_last_retal_agg`, `pod_combat_nonfatal_active` |
 | **Slot** | `POD_combat_slot` story (one per slot, on Charon) | slot creation → slot cleanup | `slot_index`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_base_soak`, `slot_hit_chance`, `slot_base_hit_chance`, `slot_initiative`, `slot_init_bonus`, `slot_ap_drain`, `slot_energy_used`, `slot_turn_order`, `slot_has_acted`, `slot_is_guarding`, `slot_is_dodging`, `slot_is_stealthed`, `slot_retaliate_*`, `slot_incorporeal_spirit`, `slot_can_damage_spirit`, all `slot_{stat}_{direction}_{duration}_tier` vars |
 | **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` (mirrors of the slot fields above) |
 | **Character (AI)** | the acting AI character | persists per-character across combats until `pod_combat_group_cleanup_effect` clears them | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` (variable list) |
-| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:result`, `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, plus the move-context fields the customizable_loc dispatcher reads |
+| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:retal_fired` (three-axis result snapshot — see §4), `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, `entry.var:retal_damage`, `entry.var:retal_agg`, `entry.var:actor_side` (slot index of the acting slot — `0..4` ally / `5..9` enemy / `-1` system entry; the combat-log GUI keys the ally-gold / enemy-red side bar + actor-name tint off this), `entry.var:aoe_burst_index` (set by AoE iterations so the buff rider renders once per move; absent on non-AoE rows), `entry.var:system_message` (only on bookend rows pushed by `pod_combat_push_system_log_effect`), `entry.var:round`, plus the move-context fields the customizable_loc dispatcher reads |
 
 HP is derived live from each slot character's PoD wound vars
 (`POD_empty_damage_boxes` etc.); it is **not** owned by any of the
@@ -198,7 +198,10 @@ the full statement and enforcement strategy.
 | `pod_combat_last_heal_amount` | last HP heal amount applied |
 | `pod_combat_last_morale_damage_amount` | last morale damage amount |
 | `pod_combat_last_morale_heal_amount` | last morale heal amount |
-| `pod_combat_last_result` | last action's resolved outcome as a flag value (see **Result codes** section) |
+| `pod_combat_last_retal_damage` | last retaliation damage amount |
+| `pod_combat_last_outcome` | top-level outcome flag (`flag:attack` / `heal` / `morale_damage` / `morale_healed` / `utility`) — see §4 |
+| `pod_combat_last_attack_result` | inner attack resolution (`flag:hp_damage` / `soaked` / `missed` / `dodged` / `stealthed` / `guard_blocked`); only meaningful when outcome=attack |
+| `pod_combat_last_retal_fired` | overlay flag — 1 when retaliation fired on this row, absent otherwise |
 
 The move story is no longer host-side; `push_log` receives it as an
 explicit `MOVE_STORY` parameter from `POD_execute_combat_move §16`.
@@ -252,9 +255,9 @@ load-bearing — reordering will silently break behavior.
 | §4 | CK3 resource costs | PC only (slot 0) |
 | §5 | Target stance bypass | strips workspace target stances (`bypass_dodge` / `bypass_stealth` / `remove_guard`) before §6 reads |
 | §5b | AoE debuff pre-broadcast | strips slot stances; must precede §6 so per-target damage iteration sees the post-strip state |
-| §6 | HP damage dispatch | reads §5 / §5b stance state. Writes `pod_combat_last_result` on the host (consumed by the rider gates §7 / §8 / §9) |
+| §6 | HP damage dispatch | reads §5 / §5b stance state. Writes `pod_combat_last_outcome` (=`flag:attack`) and `pod_combat_last_attack_result` on the host (consumed by the rider gates §7 / §8 / §9) |
 | §7 | Morale damage | independent of §6 in pipeline, but rider-gated by `morale_damage_condition`. Default = always; set to `on_hp_damage` / `on_contact` / `on_miss` to make the morale payload conditional |
-| §8 | Self-damage | rider-gated by `self_damage_condition`. Default = always (current reckless-charge behavior). MUST preserve §6 result flags via the snapshot/restore pattern even when the rider fires, since the self-hit writes its own `pod_combat_last_*` state inside the call |
+| §8 | Self-damage | rider-gated by `self_damage_condition`. Default = always (current reckless-charge behavior). No snapshot/restore needed under the B1 scope-export contract — the bypass-guard damage call returns via scope values and never touches `pod_combat_last_*` host vars, so §6's writes survive untouched |
 | §9 | HP heal | rider-gated by `heal_condition`. Default = always; legacy drain moves emit `heal_condition = on_hp_damage` at codegen so they still gate on a landed hit. MUST run AFTER §6 for the rider gate to read the right outcome |
 | §10 | Morale heal | currently always-fire (no rider condition wired). Symmetric extension is one column away if a future move needs it |
 | §11 | Tier buffs/debuffs | applied to actor / target. Should precede §12 so a "buff yourself then guard" composes as expected (stat-then-stance) |
@@ -268,9 +271,9 @@ load-bearing — reordering will silently break behavior.
 ### Anti-invariants — orderings that MUST NOT happen
 
 - §6 before §5/§5b — damage hits unstripped stances.
-- §7/§8/§9 before §6 — rider gates read `pod_combat_last_result`,
-  which is set by §6. Reordering breaks `on_hp_damage` / `on_contact` /
-  `on_miss` conditions.
+- §7/§8/§9 before §6 — rider gates read `pod_combat_last_outcome`
+  and `pod_combat_last_attack_result`, both set by §6. Reordering
+  breaks `on_hp_damage` / `on_contact` / `on_miss` conditions.
 - §15 before §6 — retaliation reads stale state from prior move.
 - §16 anywhere but last — log captures partial result, missing the
   rider amounts the later phases populated.
@@ -373,8 +376,8 @@ pod_combat_slot_$SLOT$` (the slot exists) and just read the value.
 | Field | Absence semantics |
 |---|---|
 | `slot_char` | meaningful only as a scope reference; absence = "slot is empty" |
-| `slot_base_soak` | gate for the round-end soak revert in `pod_combat_clear_per_turn_slot_state_effect` (filters the `pod_combat_active_slots` walk that resets `slot_soak` to its base) |
-| `slot_hit_chance` | gate for the synthesis fallback in `pod_combat_slot_hit_chance_value` (the fallback fires when `hit_chance` hasn't been written yet by `calculate_all_hit_chances`) |
+| `slot_base_soak` | gate for `pod_combat_recalc_slot_stats_via_story_effect` (its rebuild path branches on `has_variable = slot_base_soak`; the standalone round-end soak revert was retired since the round-tier revert that runs immediately after already rebuilds `slot_soak` from base + remaining tiers) |
+| `slot_hit_chance` | presence means "calculate_all_hit_chances has populated this slot's hit chance"; primarily a load_actor / load_target read for the workspace mirror and the GUI's per-slot display path (the legacy synthesis-fallback SV `pod_combat_slot_hit_chance_value` was removed when the display moved to PODCombatSlotHitDisplay) |
 | `slot_base_hit_chance` | gate in `pod_combat_recalc_slot_stats_effect` |
 | `slot_initiative` | set during initiative calc (alive slots only); presence distinguishes "filled-and-rolled this round" from "unfilled or pre-calc" |
 | `slot_turn_order` | turn rank within the round, stamped by `pod_combat_calc_turn_orders_effect` after initiative is rolled |
@@ -392,86 +395,151 @@ Readers of these fields use per-field `has_variable` checks.
 
 ## §4 Result codes
 
-Flag-valued outcome model held in `pod_combat_last_result` on the
-host (entry-side mirror is `entry.var:result` on the log story).
-Helpers along the damage and heal pipelines write directly to this
-var; `push_log` reads it unconditionally and dispatches to the
-matching log loc key.
+Three-axis result model held on the combat host across three
+orthogonal vars; entry-side mirrors are captured by `push_log` onto
+the log story (`entry.var:outcome` / `attack_result` / `retal_fired`).
+Helpers along the damage / heal / morale pipelines write to the
+host vars during move execution; `push_log` reads them, captures
+them onto the entry, and the log dispatcher (`PODCombatLogResultText`)
+plus the retal rider customizable_loc render the row.
 
-| Flag | Outcome |
-|---|---|
-| _unset_ | sentinel — "no result yet" (use `NOT has_variable`) |
-| `flag:hp_damage` | HP damage landed |
-| `flag:guard_blocked` | attack blocked by guard |
-| `flag:soaked` | attack soaked |
-| `flag:missed` | attack missed |
-| `flag:dodged` | target dodged |
-| `flag:hp_damage_retal` | HP damage landed + retaliation triggered |
-| `flag:soaked_retal` | HP damage + retaliation soaked |
-| `flag:utility` | utility move applied (no damage; default if no helper writes) |
-| `flag:morale_damage` | morale damage only |
-| `flag:hp_healed` | HP healed |
-| `flag:morale_healed` | morale healed |
-| `flag:stealthed` | stealth-triggered auto-miss (distinct from `flag:dodged` so the loc line links to the Stealth concept, not Dodge) |
+**The three axes:**
 
-**Sentinel handling:** §2 of `POD_execute_combat_move` removes
-`pod_combat_last_result` so absence is the "no result yet" sentinel
-for the new move's pipeline. Helpers write the matching flag as the
-move resolves. `push_log` defaults to `flag:utility` when the var is
-still unset at log-push time.
+| Host var | Entry mirror | Values | Meaning |
+|---|---|---|---|
+| `pod_combat_last_outcome` | `entry.var:outcome` | `flag:attack \| heal \| morale_damage \| morale_healed \| utility` | Top-level outcome flag — "what kind of action was this row". Defaults to `flag:utility` if no helper wrote a value. |
+| `pod_combat_last_attack_result` | `entry.var:attack_result` | `flag:hp_damage \| soaked \| missed \| dodged \| stealthed \| guard_blocked` | Inner attack resolution. ONLY meaningful when `outcome=flag:attack`; readers gate on the outcome axis first. |
+| `pod_combat_last_retal_fired` | `entry.var:retal_fired` | `1` (present) or absent | Overlay flag — set unconditionally by the retaliation helper whenever a counter-strike resolved. Independent of outcome and attack_result. |
 
-**Priority semantics:** Most damage-side outcomes are SET by a
-single mutually-exclusive branch in the damage pipeline, so a plain
-`set_variable = { name = pod_combat_last_result value = flag:X }`
-is sufficient. The exceptions:
+`flag:stealthed` is distinct from `flag:dodged` so the loc line
+links to the Stealth concept (not Dodge); both mechanically auto-miss.
 
-- Retaliation OVERLAYS damage: `flag:hp_damage → flag:hp_damage_retal`,
-  `flag:soaked → flag:soaked_retal` conditionally
-  (`pod_combat_promote_result_code_retaliation_effect`).
-- Secondary effects (morale damage, heal) only set their flag if no
-  primary HP-damage outcome has fired
-  (`pod_combat_set_result_code_if_unset_effect`).
+**Sentinel handling:** §2 of `POD_execute_combat_move` removes all
+three host vars (via `pod_combat_clear_last_result_vars_effect`) so
+absence is the "no result yet" sentinel for the new move's pipeline.
+Helpers write the matching axis vars as the move resolves. `push_log`
+defaults to `flag:utility` for `entry.var:outcome` when the host var
+is still unset at log-push time; `attack_result` and `retal_fired`
+are simply not captured when their host vars are unset.
 
-**Self-damage snapshot/restore.** §8 stashes `pod_combat_last_damage`
-+ `pod_combat_last_result` into `pod_combat_pre_self_last_damage` +
-`pod_combat_pre_self_result`, fires the bypass-guard damage helper
-(which overwrites both with the self-hit's outcome), then restores
-from the snapshot so the log line reflects the MAIN hit's number
-and outcome.
+**Priority semantics:** The damage pipeline writes the outcome /
+attack_result pair in lockstep via
+`pod_combat_set_attack_result_effect` (outcome=flag:attack +
+attack_result=$CODE$). Secondary outcomes (morale damage, HP heal,
+morale heal) use `pod_combat_set_outcome_if_unset_effect` so they
+only become the primary outcome when no earlier writer has fired —
+a damage+heal move keeps outcome=attack as primary; the heal amount
+rides along in `pod_combat_last_heal_amount` and the heal rider
+customizable_loc emits a side line.
+
+Retaliation is an INDEPENDENT overlay (not a transform of the
+outcome flag). `pod_combat_set_retal_fired_effect` sets
+`pod_combat_last_retal_fired = 1` regardless of the main attack's
+outcome — so a missed main attack with a landed retal preserves
+the missed outcome AND signals the counter-strike via the
+PODCombatLogRetalRider customizable_loc. (The previous single-flag
+model overwrote the main attack's outcome with `hp_damage_retal` /
+`soaked_retal` composite flags, which silently lost the main
+attack's actual result when retaliation overwrote it.)
+
+**Self-damage.** §8 of `POD_execute_combat_move` discards the
+scope exports from the bypass-guard damage call entirely — the
+main attack's outcome / attack_result / damage vars survive the
+self-damage call untouched because `pod_combat_route_to_pod_damage`
+now uses a scope-export-only return contract (see B1 refactor) and
+nothing host-side gets clobbered. No snapshot/restore needed.
 
 **Result-code partition triggers** (in
-`pod_combat_move_execution_triggers.txt`) compose against the result
-flag to express the rider/reaction gates:
+`pod_combat_move_execution_triggers.txt`) compose against the
+outcome + attack_result axes to express the rider / reaction gates.
+Each gates on `outcome = flag:attack` first to ensure attack_result
+is meaningful before checking specific flag values:
 
 - `pod_combat_result_code_indicates_contact_trigger` —
-  `flag:hp_damage / guard_blocked / soaked / hp_damage_retal / soaked_retal`
-  (HP damage / blocked / soaked / retaliation overlays).
+  outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked).
+  HP damage / blocked / soaked.
 - `pod_combat_result_code_indicates_miss_trigger` —
-  `flag:missed / dodged / stealthed` (miss / dodge / stealth).
+  outcome=attack + attack_result ∈ (missed, dodged, stealthed).
 - `pod_combat_result_code_indicates_hp_damage_trigger` —
-  `flag:hp_damage / hp_damage_retal / soaked_retal` (a wound went
-  through).
+  outcome=attack + attack_result=hp_damage (a wound went through).
+
+A parametric trigger
+`pod_combat_result_indicates_no_damage_dealt_trigger = { RESULT_VAR = X }`
+reads the attack_result enum off either `pod_combat_last_attack_result`
+(host scope, RESULT_VAR=pod_combat_last_attack_result) or
+`entry.var:attack_result` (log entry scope, RESULT_VAR=attack_result),
+used by the GUI's damage-source icon suppression on no-damage rows.
+
+### AoE log shape (Phase C)
+
+AoE moves (`targeting = team_enemy / team_ally`) push **one log
+row per target** as the iteration progresses, instead of leaving
+§16 to capture only the last-target state and rescuing it with a
+dispatcher-side intent fallback. The four AoE iterators
+(`POD_combat_apply_team_enemy_hp_damage` /
+`_morale_damage` / `POD_combat_apply_team_ally_hp_heal` /
+`_morale_heal`) each call `pod_combat_push_log_effect` inside the
+loop after the per-target effect resolves, capturing the per-target
+outcome / attack_result / damage / target_side onto the new log
+entry. Per-target state is cleared between iterations via
+`pod_combat_clear_per_target_state_effect` (which preserves the
+`pod_combat_aoe_phase_pushed_rows` tripwire flag — distinct from
+the full `pod_combat_clear_last_result_vars_effect` used at §2 /
+push_log post-capture / cleanup).
+
+`target_side` capture uses a temporary `pod_combat_aoe_iter_target_slot`
+host var set by the iterator before each push (read with priority
+by push_log's target_side branch). The host's
+`pod_combat_selected_target` stays on the move's primary target
+throughout the AoE iteration so it can be restored cleanly by the
+post-loop `pod_combat_load_workspace_effect`.
+
+§16's wrap-up `push_log` is gated: when the AoE flag is set,
+§16 only fires if actor-side state remains (self-heal amount,
+self-morale-heal amount, or retal_fired overlay) — otherwise the
+per-target rows are the whole log entry for the move, and no
+summary row is pushed.
+
+The single-flag-era AoE intercept (3 dispatcher branches +
+3 loc keys + `pod_combat_log_entry_attack_failed_trigger`) was
+dropped wholesale alongside the per-target shape — those existed
+to rescue the misleading last-target capture under the old single-
+row contract. The per-target contract makes them obsolete.
 
 ### Log dispatcher
 
 `PODCombatLogResultText` customizable_localization
-(`pod_combat_log_custom_loc.txt`) consumes three saved scopes:
+(`pod_combat_log_custom_loc.txt`) consumes two saved scopes:
 
-- `entry` — the log entry story scope, for `var:damage` / `heal_amount`
-  / `morale_damage_amount` / `morale_heal_amount` reads
-- `move` — the executing move story, for `damage_type` / `damage_source`
-  / `targeting` / buff-tier checks the AoE intercept and rider
+- `entry` — the log entry story scope, for `var:outcome` /
+  `var:attack_result` / `var:retal_fired` axis reads AND for
+  `var:damage` / `heal_amount` / `morale_damage_amount` /
+  `morale_heal_amount` / `retal_damage` amount reads
+- `move` — the executing move story, for `damage_type` /
+  `damage_source` / `targeting` / buff-tier checks the rider
   customizable_locs need
-- `rcode` — a flag-scope wrapping `entry.var:result`, bound via
-  `MakeScopeFlag(...GetFlagKey)` in the GUI raw_text bindings
 
-Each trigger branch checks `scope:rcode` against a flag literal;
-matching branch resolves to the corresponding loc key (e.g.
-`pod_combat_log_result_text_hp_damage`). The HP-track outcomes
-(`hp_damage` / `hp_damage_retal` / `soaked_retal` / `hp_healed`)
-split into `_aggravated` variants — the wound-box icon swaps from
-superficial to aggravated based on
+The rcode flag-scope used by the single-flag model is gone — the
+dispatcher branches gate directly on `scope:entry.var:outcome` /
+`scope:entry.var:attack_result`.
+
+Each trigger branch composes on the outcome axis first
+(outcome=flag:attack routes into the attack_result sub-dispatch;
+outcome=flag:heal / morale_damage / morale_healed routes to their
+respective text lines; outcome=flag:utility renders empty). The
+HP-track outcomes (outcome=attack + attack_result=hp_damage, plus
+outcome=heal) split into `_aggravated` variants — the wound-box
+icon swaps from superficial to aggravated based on
 `scope:move.var:damage_type` / `heal_type`.
+
+The retal overlay (`entry.var:retal_fired`) is rendered by a
+SEPARATE customizable_loc, `PODCombatLogRetalRider`, invoked as
+its own text_single in the result-column hbox alongside the main
+dispatcher. It emits "+ Counter -X HP" / "+ Counter Soaked" rider
+lines independent of the main outcome — so EVERY main outcome
+(hp_damage / soaked / guard_blocked / missed / dodged / stealthed)
+can carry the retal overlay without needing dedicated `_retal`
+composite flags.
 
 ---
 
@@ -550,17 +618,31 @@ each one whose §6 outcome matched its trigger condition.
 
 | Reaction | Trigger | Result flags that fire it |
 |---|---|---|
-| **Retaliate on contact** ("thorns") | `pod_combat_result_code_indicates_contact_trigger` | `flag:hp_damage` · `flag:guard_blocked` · `flag:soaked` · `flag:hp_damage_retal` / `flag:soaked_retal` (retaliation overlays) |
-| **Retaliate on evasion** ("riposte") | `pod_combat_result_code_indicates_miss_trigger` | `flag:missed` · `flag:dodged` · `flag:stealthed` |
+| **Retaliate on contact** ("thorns") | `pod_combat_result_code_indicates_contact_trigger` | outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked) |
+| **Retaliate on evasion** ("riposte") | `pod_combat_result_code_indicates_miss_trigger` | outcome=attack + attack_result ∈ (missed, dodged, stealthed) |
 
-Retaliation damage inherits the `damage_source` and `damage_type`
-from the skill that armed the stance:
+Retaliation damage inherits the `damage_type` from the skill that
+armed the stance:
 
 - **Superficial:** goes through the actor's soak check (can be soaked).
 - **Aggravated:** can not be soaked, tracked as aggravated damage.
 
 The `_agg` companion variable (presence = aggravated, absent =
 superficial) is set on the workspace alongside the amount in §13.
+
+**Asymmetry — `damage_source` is dropped, `damage_type` is preserved.**
+`pod_combat_apply_retaliation_helper` hardcodes `REASON = duel` (or
+`duel_aggravated`) when calling into the wound pipeline, regardless
+of the original attack's source. So a vampire's fire-attack that
+triggers a Brujah Potence-thorns response logs the response as
+generic "duel" damage, not "fire" — the retal carries the
+defender's flavor (their stance, their aggravated/not), not the
+attacker's. This matches the design intent of thorns as "the
+defender's counter-flavor" but is worth noting for designers
+authoring retal stances: the log won't show "fire retaliation"
+even on a fire-vs-Brujah exchange. The retal rider's
+PODCombatLogRetalRider customizable_loc renders "+ Counter -X HP"
+with the generic superficial wound-box icon for the same reason.
 
 ### Adding a new reaction class
 
@@ -572,10 +654,13 @@ superficial) is set on the workspace alongside the amount in §13.
    `pod_combat_check_retaliation_effect` with the matching
    `CONDITION_TRIGGER` param.
 
-The shared payload helper handles the spirit gate, the bypass-guard
-damage call, the result-code promotion, and the pre/post
-`last_damage` save/restore, so each new reaction stays a few lines
-of declaration.
+The shared payload helper (`pod_combat_apply_retaliation_helper`)
+handles the spirit gate, the bypass-guard damage call, the lift of
+the retal's landed damage into `pod_combat_last_retal_damage`, and
+the `pod_combat_last_retal_fired` overlay flag for the log dispatch.
+Under the B1 scope-export contract no snapshot/restore is needed —
+the main attack's outcome / attack_result / damage host vars survive
+the call untouched. Each new reaction stays a few lines of declaration.
 
 ---
 
@@ -601,7 +686,7 @@ skips the new-object-dependent block.
 Skill effects read and write only the workspace
 (`pod_combat_actor_*` / `pod_combat_target_*`), not the slot story
 directly. Load/save effects walk slot stories at action boundaries.
-This single-shape contract lets one `POD_execute_combat_move`
+This single-shape contract lets one generated `POD_execute_combat_move`
 body run for the PC, AI coterie, primary opponent, and knights
 without per-actor branching.
 
@@ -651,12 +736,12 @@ of the same name with the `slot_` prefix swapped for `pod_combat_actor_` /
 `pod_combat_target_`.
 
 **Asymmetric mirrors.** Four slot fields are mirrored on only one
-side: `slot_init_bonus` is mirrored on **neither**
-side; `slot_ap_drain` and `slot_energy_used` are mirrored on the
-**actor** side only. See §1 *Action workspace (transient)* for the
-full table and the per-field rationale. When adding a new slot
-field, default to mirroring it on both sides — drop a mirror only
-when the reader audit shows the round-trip isn't earning its keep.
+side: `slot_init_bonus` is mirrored on **neither** side;
+`slot_ap_drain` and `slot_energy_used` are mirrored on the **actor**
+side only. See §1 *Action workspace (transient)* for the full table
+and the per-field rationale. When adding a new slot field, default
+to mirroring it on both sides — drop a mirror only when the reader
+audit shows the round-trip isn't earning its keep.
 
 **Allowed readers (during the window):**
 - `POD_execute_combat_move` phases §1-§16
@@ -766,14 +851,49 @@ self-documenting names. The benefits over the int form:
 
 - Reads / writes don't require a decoder ring: `value = flag:hp_damage`
   vs `value = 0` plus a comment.
-- The reserved slot at code 4 was redundant — flags don't need stub
-  reservations; adding a new outcome class is just a new flag name.
-- Greppable: searching for `flag:soaked_retal` is unambiguous; an
+- Reserved-slot stubs from the int era are gone — adding a new
+  outcome / attack_result class is just a new flag name.
+- Greppable: searching for `flag:hp_damage` is unambiguous; an
   integer search for `value = 7` had false positives.
 
 The cost is slightly heavier flag-equality checks (`var:X = flag:Y`)
 vs int compares. Not measurable in practice given the rare write
 frequency (once per move per actor).
+
+### B2: Three-axis split (outcome / attack_result / retal_fired)
+
+The single `pod_combat_last_result` flag conflated (a) the kind of
+action this is (attack / heal / morale / utility), (b) hit
+resolution (landed / blocked / soaked / missed / dodged / stealthed),
+and (c) retaliation overlay (clean / retal-fired). Composite flags
+(`hp_damage_retal`, `soaked_retal`) carried two axes at once but
+ALWAYS lost information when the retal call overwrote the main
+attack's flag — a missed main attack with a landed retal rendered
+as `hp_damage_retal` (loses the miss), a soaked main attack with a
+landed retal rendered as `hp_damage_retal` (loses the soak).
+
+The three-axis split makes each piece of information independent:
+the main attack's outcome / attack_result are written ONCE by the
+damage pipeline and never overwritten; retaliation sets only the
+`retal_fired` overlay. The dispatcher collapses from 22 branches
+(with 6 retal-variant composites + counter_only fallbacks) to ~12
+branches (clean outer outcome × inner attack_result matrix) plus a
+separate `PODCombatLogRetalRider` customizable_loc for the overlay.
+
+The dropped pieces:
+- `pod_combat_promote_result_code_retaliation_effect` — replaced by
+  `pod_combat_set_retal_fired_effect`.
+- `pod_combat_set_result_code_effect` / `_if_unset_effect` — replaced
+  by `pod_combat_set_attack_result_effect` /
+  `pod_combat_set_outcome_if_unset_effect` respectively.
+- 6 loc keys (`pod_combat_log_result_text_hp_damage_retal[_aggravated|_counter_only]`,
+  `_soaked_retal[_aggravated|_counter_only]`) — replaced by 2
+  retal-rider loc keys (`pod_combat_log_retal_rider`,
+  `pod_combat_log_retal_rider_soaked`).
+- The `rcode` flag-scope passed to the customizable_loc dispatcher
+  — the dispatcher reads `entry.var:outcome` / `attack_result`
+  directly off the entry scope, eliminating the `MakeScopeFlag`
+  binding chain in the GUI raw_text.
 
 ### Mutual-kill attacker's advantage
 
