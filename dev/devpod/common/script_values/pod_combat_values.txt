@@ -9,30 +9,14 @@
 ###### CONSTANTS ######
 # Tier magnitudes — small/medium/large = ±10/±20/±30, applied by the
 # 8 tier-mag SVs (soak/hit × buff/debuff × round/combat) per slot.
+# LOCKSTEP: must match the recalc constants (@*_buff_mag in
+# pod_combat_tier_effects.txt) and the actual soak roll (bare 10/20/30 in
+# POD_soak_chance, POD_health_track_values.txt). File-scoped @-consts can't
+# be shared — retune all three together or displayed / workspace / rolled
+# soak diverge.
 @combat_tier_small_mag  = 10
 @combat_tier_medium_mag = 20
 @combat_tier_large_mag  = 30
-
-# Hit chance bounds — kept as named constants for documentation
-# clarity even though they no longer have an in-file consumer
-# (pod_combat_slot_hit_chance_value, the previous example, was
-# removed when the per-slot display moved to PODCombatSlotHitDisplay
-# / pod_combat_slot_hit_net_mod_value). Future top-level script
-# values clamping to the duel-system hit-chance window can reference
-# these instead of repeating the literals.
-#
-# Caveat: these `@` constants work in TOP-LEVEL script_value `min` /
-# `max` slots but NOT inside `min` / `max` of a script value nested
-# INSIDE a scripted_effect that uses `$PARAM$` substitution. There,
-# the parser tries to resolve `@combat_hit_chance_min` as an
-# event-target link and errors out ("Failed to find a valid event
-# target link"). For those sites the literal `min = 20 max = 95`
-# has to stay. Reproducer: previously attempted
-# `min = @combat_hit_chance_min` inside
-# pod_combat_calc_one_hit_chance_effect and the various
-# pod_combat_recalc_hit_* effects — all rejected at load.
-@combat_hit_chance_min = 20
-@combat_hit_chance_max = 95
 
 ###### BASE CONSTANTS ######
 
@@ -56,6 +40,29 @@ pod_combat_max_per_category = 4
 # Hard cap on total equipped moves across all categories.
 pod_combat_max_equipped = 16
 
+# Initiative roll upper bound. Each round, every alive combatant's
+# slot_initiative = slot_prowess + (random integer in [1, this value])
+# + slot_init_bonus. See pod_combat_calculate_initiative_effect in
+# pod_combat_group_effects.txt for the consuming integer_range call.
+#
+# Tuning:
+#   higher → more chaos in turn order (prowess matters less)
+#   lower  → more prowess-deterministic (small or no upsets)
+#   == 1   → pure prowess ordering (debug only)
+pod_combat_initiative_roll_max = 30
+
+# Morale damage = HP damage * pod_combat_morale_from_hp_ratio. Used by
+# pod_combat_route_to_pod_damage's spillover-into-morale calculation
+# (see pod_combat_effects.txt). Kept as a script value (rather than an
+# @ parse-time constant) for the same reason called out on the hit-
+# chance bounds above — `multiply = @morale_from_hp_ratio` inside a
+# script value nested in a $PARAM$-using effect doesn't resolve and
+# would crash the same way calc_one_hit_chance's `min` did. The
+# per-damage-call SV-eval cost is negligible (one int read), so the
+# script-value form stays.
+pod_combat_morale_from_hp_ratio = {
+	value = 2
+}
 
 # Mental-strain scaling for morale damage in the combat minigame.
 # Combat morale is 0-20, each point of morale damage
@@ -67,7 +74,8 @@ pod_combat_morale_stress_multiplier = 5
 
 # Maximum number of log entries kept in pod_combat_log. Each push
 # rebuilds the list (CK3 lists are append-only and we need newest-
-# first ordering). At 50 entries that bounds the per-push cost
+# first ordering), so without a cap the rebuild is O(N²) over the
+# combat's lifetime. At 50 entries that bounds the per-push cost
 # around 50 list-ops; for very long combats (NvN with 10+ actors
 # and 12+ rounds) it prevents the list from growing unbounded too.
 # Entries dropped beyond the cap get end_story'd so the underlying
@@ -230,13 +238,18 @@ pod_combat_slot_agg_damage_sv = {
 	}
 	max = pod_combat_slot_total_damage_sv
 }
-#converts morale to a percentage value
 pod_combat_slot_morale_pct = {
-	value = var:slot_morale
-	multiply = 100
-	divide = pod_combat_max_morale
-	min = 0
-	max = 100
+	# has_variable guard for consistency with the other slot SVs. Safe in
+	# practice (slot_morale is initialised at slot creation), but the guard
+	# avoids a warning if a future path queries an unfilled slot.
+	if = {
+		limit = { has_variable = slot_morale }
+		value = var:slot_morale
+		multiply = 100
+		divide = pod_combat_max_morale
+		min = 0
+		max = 100
+	}
 }
 pod_combat_slot_soak_value = {
 	value = var:slot_soak
@@ -452,14 +465,6 @@ pod_combat_log_show_damage_source_value = {
 # retaliation / init-mod variables that PODCombatLogBuffRider knows
 # how to render — 0 otherwise.
 #
-# Previously the GUI's text_single `visible` binding inlined a
-# 17-IsSet `Or(Or(Or(...)))` chain enumerating exactly these vars,
-# kept manually in parallel with the rider dispatcher's branches.
-# Adding a new buff attribute meant editing both lists; missing one
-# side caused either rider visibility to lag or empty rider rows to
-# render. This SV consolidates the enum into one place — the rider
-# dispatcher still defines the per-branch loc keys, but the gate
-# is a single ScriptValue read.
 #
 # Called on the move story scope (the GUI passes
 # `Scope.Var('move').Story.MakeScope` as the call scope). All

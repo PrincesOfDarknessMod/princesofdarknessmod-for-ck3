@@ -32,7 +32,7 @@
 #                      iteration (var:slot_index <= 4 vs >= 5), team
 #                      AoE filters, and victory-check team wipes.
 #                      There is NO pod_combat_player_* or
-#                      pod_combat_enemy_* var name — positional naming
+#                      pod_combat_enemy_* var name. Positional naming
 #                      lives in slot_index ranges, not var prefixes.
 ##############################################################################################
 
@@ -42,331 +42,188 @@
 # Called via dispatch effects that switch on pod_combat_current_actor / pod_combat_selected_target.
 ##############################################################################################
 
-# Caller scope = the slot story; caller must have saved the workspace
-# owner as scope:host before delegating. Reads the slot's vars
-# directly (current scope = slot story) and writes pod_combat_actor_*
-# on scope:host.
+# Parametric workspace-load helper. Reads the current slot story's
+# fields and writes them into the pod_combat_$SIDE$_* workspace mirror
+# on scope:host. Called via the actor / target thin wrappers below.
 #
-# MIRROR of pod_combat_load_target_from_story_effect (below) — same
-# field-by-field copy, writes pod_combat_actor_* instead of
-# pod_combat_target_*. If you add a field to one, add it to both.
+# Caller contract: current scope is the slot story being loaded;
+# scope:host must be the workspace owner (combat host). save_scope_as
+# at the top stashes the slot story so the post-scope-switch
+# `scope:host = { ... }` body can still reach the slot's fields via
+# scope:slot_story.var:slot_X.
 #
+# Param: SIDE — "actor" or "target".
+#
+# If you add a new mirrored field, add ONE line here (and the matching
+# writeback in pod_combat_save_side_to_story_helper). See
+# COMBAT_REFERENCE.info §11 "Adding a new workspace mirror field" for
+# the full checklist.
+pod_combat_load_side_from_story_helper = {
+	if = {
+		limit = { has_variable = slot_char }
+		save_scope_as = slot_story
+		scope:host = {
+			set_variable = { name = pod_combat_$SIDE$_soak value = scope:slot_story.var:slot_soak }
+			set_variable = { name = pod_combat_$SIDE$_base_soak value = scope:slot_story.var:slot_base_soak }
+			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_$SIDE$_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
+			set_variable = { name = pod_combat_$SIDE$_morale value = scope:slot_story.var:slot_morale }
+			set_variable = { name = pod_combat_$SIDE$_prowess value = scope:slot_story.var:slot_prowess }
+			set_variable = { name = pod_combat_$SIDE$_hit_chance value = scope:slot_story.var:slot_hit_chance }
+			# slot_energy_used is default-init'd to 0 at story creation,
+			# so always present — no has_variable gate needed. Mirrored
+			# both sides for symmetry; actor-side reader is the AI energy-
+			# attrition weighting, target-side is no-op overhead.
+			set_variable = { name = pod_combat_$SIDE$_energy_used value = scope:slot_story.var:slot_energy_used }
+			# Stance flags (presence-as-signal)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
+				set_variable = { name = pod_combat_$SIDE$_is_guarding value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_is_guarding }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_dodging } }
+				set_variable = { name = pod_combat_$SIDE$_is_dodging value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_is_dodging }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_is_stealthed } }
+				set_variable = { name = pod_combat_$SIDE$_is_stealthed value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_is_stealthed }
+			# Spirit-damage capability + incorporeality flags. Both read
+			# by pod_combat_resolve_contact_effect (target-side
+			# incorporeal_spirit gates checks_spirit_gate moves;
+			# can_damage_spirit lets actors land hits) and by
+			# pod_combat_apply_retaliation_helper (actor/target sides
+			# swap roles for the retaliator → original-attacker gate).
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_can_damage_spirit } }
+				set_variable = { name = pod_combat_$SIDE$_can_damage_spirit value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_can_damage_spirit }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_incorporeal_spirit } }
+				set_variable = { name = pod_combat_$SIDE$_incorporeal_spirit value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_incorporeal_spirit }
+			# Initiative bonus + AP drain (mirrored both sides for load/save
+			# symmetry). POD_execute_combat_move §14 writes target-side via
+			# workspace mirror; consumed at round-end (init_bonus) or
+			# target's next turn start (ap_drain) via slot or
+			# actor-side-after-load reads.
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_init_bonus } }
+				set_variable = { name = pod_combat_$SIDE$_init_bonus value = scope:slot_story.var:slot_init_bonus }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_init_bonus }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_ap_drain } }
+				set_variable = { name = pod_combat_$SIDE$_ap_drain value = scope:slot_story.var:slot_ap_drain }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_ap_drain }
+			# Retaliation stances (4 vars: hit / miss × value / aggravated flag)
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit } }
+				set_variable = { name = pod_combat_$SIDE$_retaliate_hit value = scope:slot_story.var:slot_retaliate_hit }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_retaliate_hit }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_hit_agg } }
+				set_variable = { name = pod_combat_$SIDE$_retaliate_hit_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_retaliate_hit_agg }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss } }
+				set_variable = { name = pod_combat_$SIDE$_retaliate_miss value = scope:slot_story.var:slot_retaliate_miss }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_retaliate_miss }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_retaliate_miss_agg } }
+				set_variable = { name = pod_combat_$SIDE$_retaliate_miss_agg value = yes }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_retaliate_miss_agg }
+			# Tier tracking vars (8 total: soak/hit × buff/debuff × round/combat).
+			# Presence on slot = active tier; absence-as-signal preserved.
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
+				set_variable = { name = pod_combat_$SIDE$_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_soak_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
+				set_variable = { name = pod_combat_$SIDE$_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_soak_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
+				set_variable = { name = pod_combat_$SIDE$_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_soak_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
+				set_variable = { name = pod_combat_$SIDE$_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_soak_debuff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
+				set_variable = { name = pod_combat_$SIDE$_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_hit_buff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_buff_combat_tier } }
+				set_variable = { name = pod_combat_$SIDE$_hit_buff_combat_tier value = scope:slot_story.var:slot_hit_buff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_hit_buff_combat_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_round_tier } }
+				set_variable = { name = pod_combat_$SIDE$_hit_debuff_round_tier value = scope:slot_story.var:slot_hit_debuff_round_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_hit_debuff_round_tier }
+			if = {
+				limit = { scope:slot_story = { has_variable = slot_hit_debuff_combat_tier } }
+				set_variable = { name = pod_combat_$SIDE$_hit_debuff_combat_tier value = scope:slot_story.var:slot_hit_debuff_combat_tier }
+			}
+			else = { remove_variable = pod_combat_$SIDE$_hit_debuff_combat_tier }
+			# Character ref. Read by AI trait gates (actor-side) and the
+			# damage pipeline as var:pod_combat_$TARGET_SIDE$_char in
+			# retaliation / self-damage contexts.
+			set_variable = { name = pod_combat_$SIDE$_char value = scope:slot_story.var:slot_char }
+		}
+	}
+}
+
+# Thin wrapper — loads actor workspace from current slot story.
+# Caller scope = slot story; scope:host must be saved before delegating.
 # Used by pod_combat_load_workspace_effect's iteration over
 # pod_combat_active_slots (finds the slot whose slot_index matches
 # pod_combat_current_actor), and by any future single-slot caller
 # that needs to save scope:host and flip into a slot story before
 # delegating.
 pod_combat_load_actor_from_story_effect = {
-	if = {
-		limit = { has_variable = slot_char }
-		save_scope_as = slot_story
-		scope:host = {
-			set_variable = { name = pod_combat_actor_soak value = scope:slot_story.var:slot_soak }
-			set_variable = { name = pod_combat_actor_base_soak value = scope:slot_story.var:slot_base_soak }
-			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_actor_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
-			set_variable = { name = pod_combat_actor_morale value = scope:slot_story.var:slot_morale }
-			set_variable = { name = pod_combat_actor_prowess value = scope:slot_story.var:slot_prowess }
-			set_variable = { name = pod_combat_actor_hit_chance value = scope:slot_story.var:slot_hit_chance }
-			# slot_energy_used is default-init'd to 0 at story creation, so
-			# always present — no has_variable gate needed. Named
-			# pod_combat_actor_energy_used (not _player_) — see comment
-			# in pod_combat_move_effects.txt §3 for the convention break.
-			set_variable = { name = pod_combat_actor_energy_used value = scope:slot_story.var:slot_energy_used }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
-				set_variable = { name = pod_combat_actor_is_guarding value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_actor_is_guarding
-			}
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_dodging } }
-				set_variable = { name = pod_combat_actor_is_dodging value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_actor_is_dodging
-			}
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_stealthed } }
-				set_variable = { name = pod_combat_actor_is_stealthed value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_actor_is_stealthed
-			}
-			# Spirit-damage capability (static per combat). The actor needs
-			# this flag to land attacks on incorporeal spirit targets 
-			# read by the spirit gate inside pod_combat_resolve_contact_effect
-			# (gated on the move's checks_spirit_gate capability flag) via
-			# pod_combat_$ACTOR_SIDE$_can_damage_spirit.
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_can_damage_spirit } }
-				set_variable = { name = pod_combat_actor_can_damage_spirit value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_actor_can_damage_spirit
-			}
-			# Incorporeality on the actor side is read by the retaliation
-			# spirit gate in pod_combat_apply_retaliation_helper: when the
-			# original attacker (= retaliation target) is incorporeal, the
-			# counter-strike only lands if the retaliator has the matching
-			# can_damage_spirit flag.
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_incorporeal_spirit } }
-				set_variable = { name = pod_combat_actor_incorporeal_spirit value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_actor_incorporeal_spirit
-			}
-			# Initiative bonus is not mirrored on the workspace — slot_init_bonus
-			# is set by mid-execution moves and consumed at round-end by the
-			# initiative recalc, both of which read the slot directly. The
-			# workspace mirror would carry no information.
-			#
-			# AP drain (applied at turn start, then cleared).
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_ap_drain } }
-				set_variable = { name = pod_combat_actor_ap_drain value = scope:slot_story.var:slot_ap_drain }
-			}
-			else = { remove_variable = pod_combat_actor_ap_drain }
-			# Retaliation stances
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_hit } }
-				set_variable = { name = pod_combat_actor_retaliate_hit value = scope:slot_story.var:slot_retaliate_hit }
-			}
-			else = { remove_variable = pod_combat_actor_retaliate_hit }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_hit_agg } }
-				set_variable = { name = pod_combat_actor_retaliate_hit_agg value = yes }
-			}
-			else = { remove_variable = pod_combat_actor_retaliate_hit_agg }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_miss } }
-				set_variable = { name = pod_combat_actor_retaliate_miss value = scope:slot_story.var:slot_retaliate_miss }
-			}
-			else = { remove_variable = pod_combat_actor_retaliate_miss }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_miss_agg } }
-				set_variable = { name = pod_combat_actor_retaliate_miss_agg value = yes }
-			}
-			else = { remove_variable = pod_combat_actor_retaliate_miss_agg }
-			# Tier tracking vars (slot -> player workspace)
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
-				set_variable = { name = pod_combat_actor_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
-			}
-			else = { remove_variable = pod_combat_actor_soak_buff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
-				set_variable = { name = pod_combat_actor_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_actor_soak_buff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
-				set_variable = { name = pod_combat_actor_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
-			}
-			else = { remove_variable = pod_combat_actor_soak_debuff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
-				set_variable = { name = pod_combat_actor_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_actor_soak_debuff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
-				set_variable = { name = pod_combat_actor_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
-			}
-			else = { remove_variable = pod_combat_actor_hit_buff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_buff_combat_tier } }
-				set_variable = { name = pod_combat_actor_hit_buff_combat_tier value = scope:slot_story.var:slot_hit_buff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_actor_hit_buff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_debuff_round_tier } }
-				set_variable = { name = pod_combat_actor_hit_debuff_round_tier value = scope:slot_story.var:slot_hit_debuff_round_tier }
-			}
-			else = { remove_variable = pod_combat_actor_hit_debuff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_debuff_combat_tier } }
-				set_variable = { name = pod_combat_actor_hit_debuff_combat_tier value = scope:slot_story.var:slot_hit_debuff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_actor_hit_debuff_combat_tier }
-			# Actor character reference. Read by:
-			#   * The AI selection effect to run trait gates against the
-			#     current actor (e.g. has_trait = fera) so enemy AIs only
-			#     pick moves they actually qualify for.
-			#   * The damage pipeline as var:pod_combat_$TARGET_SIDE$_char
-			#     when TARGET_SIDE="actor" (single-target self-damage,
-			#     retaliation against the original attacker, etc.).
-			set_variable = { name = pod_combat_actor_char value = scope:slot_story.var:slot_char }
-		}
-	}
+	pod_combat_load_side_from_story_helper = { SIDE = actor }
 }
 
-# Caller scope = the slot story; caller must have saved the workspace
-# owner as scope:host before delegating. Reads the slot's vars
-# directly (current scope = slot story) and writes pod_combat_target_*
-# on scope:host.
-#
-# The save-then-re-enter dance lets us read slot fields via
-# scope:slot_story.var:slot_X from inside scope:host. Without it,
-# every read inside scope:host = { ... } would resolve against host
-# scope and the slot fields wouldn't be visible.
-#
+# Thin wrapper — loads target workspace from current slot story.
+# Caller scope = slot story; scope:host must be saved before delegating.
 # Called from every_in_list iterations on pod_combat_active_slots in
 # the AoE dispatchers and the workspace dispatch (where the iteration
 # body's current scope IS the slot story), and from
 # pod_combat_select_target / pod_combat_ai_swap_to_pc_target_effect for
 # their single-slot host→story flips.
 #
-# MIRROR of pod_combat_load_actor_from_story_effect (above) same
-# field-by-field copy, writes pod_combat_target_* instead of
-# pod_combat_actor_*. If you add a field to one, add it to both.
+# Plus a target-specific pair-hit-chance recalc after the workspace
+# fields are loaded. Slot-stored hit chance is leader-baseline (computed
+# once at combat init in pod_combat_calculate_all_hit_chances_effect),
+# so without this every AI swap, AoE per-target iteration, and
+# workspace-load would push the wrong number into the damage roll. The
+# recalc reads pod_combat_actor_prowess (set by the actor load that
+# runs before this) and pod_combat_target_prowess (set by the helper
+# above), then layers the active hit-tier modifiers. No slot writeback
 pod_combat_load_target_from_story_effect = {
+	pod_combat_load_side_from_story_helper = { SIDE = target }
 	if = {
 		limit = { has_variable = slot_char }
-		save_scope_as = slot_story
-		scope:host = {
-			set_variable = { name = pod_combat_target_soak value = scope:slot_story.var:slot_soak }
-			set_variable = { name = pod_combat_target_base_soak value = scope:slot_story.var:slot_base_soak }
-			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_target_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
-			set_variable = { name = pod_combat_target_morale value = scope:slot_story.var:slot_morale }
-			set_variable = { name = pod_combat_target_prowess value = scope:slot_story.var:slot_prowess }
-			set_variable = { name = pod_combat_target_hit_chance value = scope:slot_story.var:slot_hit_chance }
-			# Target-side slot_energy_used is not mirrored — the AI energy-
-			# attrition weighting only reads the actor side.
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_guarding } }
-				set_variable = { name = pod_combat_target_is_guarding value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_target_is_guarding
-			}
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_dodging } }
-				set_variable = { name = pod_combat_target_is_dodging value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_target_is_dodging
-			}
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_is_stealthed } }
-				set_variable = { name = pod_combat_target_is_stealthed value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_target_is_stealthed
-			}
-			# Incorporeality on the target side — read by the spirit gate
-			# inside pod_combat_resolve_contact_effect when the move
-			# carries the checks_spirit_gate capability flag (default-on
-			# for physical attack_type, opt-in for supernatural). The
-			# attack auto-misses when this flag is set and the actor
-			# lacks pod_combat_$ACTOR_SIDE$_can_damage_spirit (mirroring
-			# PoD's POD_damage_spirit_custom_trigger).
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_incorporeal_spirit } }
-				set_variable = { name = pod_combat_target_incorporeal_spirit value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_target_incorporeal_spirit
-			}
-			# Target's spirit-damage capability — read by the retaliation
-			# spirit gate in pod_combat_apply_retaliation_helper, where the
-			# target side becomes the retaliator and must have this flag to
-			# land a counter-strike on an incorporeal original-attacker.
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_can_damage_spirit } }
-				set_variable = { name = pod_combat_target_can_damage_spirit value = yes }
-			}
-			else = {
-				remove_variable = pod_combat_target_can_damage_spirit
-			}
-			# Initiative bonus and AP drain are not mirrored on the target
-			# side. Both were write-only mirrors: a single move-execution
-			# write site (POD_execute_combat_move §14) would stage the
-			# value for save_workspace to push to the slot, but nothing on
-			# the target side ever read them — so the §14 writes now hit
-			# the target slot directly via the active_slots iterator.
-			# Retaliation stances on the target side
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_hit } }
-				set_variable = { name = pod_combat_target_retaliate_hit value = scope:slot_story.var:slot_retaliate_hit }
-			}
-			else = { remove_variable = pod_combat_target_retaliate_hit }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_hit_agg } }
-				set_variable = { name = pod_combat_target_retaliate_hit_agg value = yes }
-			}
-			else = { remove_variable = pod_combat_target_retaliate_hit_agg }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_miss } }
-				set_variable = { name = pod_combat_target_retaliate_miss value = scope:slot_story.var:slot_retaliate_miss }
-			}
-			else = { remove_variable = pod_combat_target_retaliate_miss }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_retaliate_miss_agg } }
-				set_variable = { name = pod_combat_target_retaliate_miss_agg value = yes }
-			}
-			else = { remove_variable = pod_combat_target_retaliate_miss_agg }
-			# Tier tracking vars (slot -> target workspace)
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
-				set_variable = { name = pod_combat_target_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
-			}
-			else = { remove_variable = pod_combat_target_soak_buff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
-				set_variable = { name = pod_combat_target_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_target_soak_buff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
-				set_variable = { name = pod_combat_target_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
-			}
-			else = { remove_variable = pod_combat_target_soak_debuff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
-				set_variable = { name = pod_combat_target_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_target_soak_debuff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
-				set_variable = { name = pod_combat_target_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
-			}
-			else = { remove_variable = pod_combat_target_hit_buff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_buff_combat_tier } }
-				set_variable = { name = pod_combat_target_hit_buff_combat_tier value = scope:slot_story.var:slot_hit_buff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_target_hit_buff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_debuff_round_tier } }
-				set_variable = { name = pod_combat_target_hit_debuff_round_tier value = scope:slot_story.var:slot_hit_debuff_round_tier }
-			}
-			else = { remove_variable = pod_combat_target_hit_debuff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_hit_debuff_combat_tier } }
-				set_variable = { name = pod_combat_target_hit_debuff_combat_tier value = scope:slot_story.var:slot_hit_debuff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_target_hit_debuff_combat_tier }
-			# Alias matching $TARGET_SIDE$ = "target" — parallels
-			# pod_combat_actor_char (see actor-load above). Lets the damage
-			# pipeline reference var:pod_combat_$TARGET_SIDE$_char uniformly.
-			set_variable = { name = pod_combat_target_char value = scope:slot_story.var:slot_char }
-
-			# Refresh workspace hit chances for the new actor/target pair.
-			# Slot-stored hit chance is leader-baseline (computed once at
-			# combat init in pod_combat_calculate_all_hit_chances_effect),
-			# so without this every AI swap, AoE per-target iteration, and
-			# workspace-load would push the wrong number into the damage
-			# roll. The pair recalc reads the workspace's pod_combat_actor_prowess
-			# (set by the actor load that runs before this) and the
-			# pod_combat_target_prowess we just wrote above, then layers
-			# the active hit-tier modifiers via the per-side recalc
-			# effects. No slot writeback — that's intentional, see the
-			# comment on the recalc effect itself in
-			# pod_combat_tier_effects.txt.
-			pod_combat_recalc_pair_hit_chance_effect = yes
-		}
+		scope:host = { pod_combat_recalc_pair_hit_chance_effect = yes }
 	}
 }
 
@@ -375,140 +232,155 @@ pod_combat_load_target_from_story_effect = {
 # Two effects that copy the actor or target workspace back into a slot story.
 ##############################################################################################
 
-# Caller scope = slot story; caller must have saved the workspace
-# owner as scope:host. Reads workspace vars on scope:host and writes
-# the slot story's vars directly.
+# Parametric workspace-save helper. Reads pod_combat_$SIDE$_* from
+# scope:host and writes the slot story's slot_X fields. Includes the
+# alive-flip (death / incapacitation / wound-track-full / morale-broken)
+# for BOTH sides — symmetric since an actor can KO itself via
+# self-damage or incoming retaliation just as a target can. Called via
+# the actor / target thin wrappers below.
 #
-# Mirrors pod_combat_save_target_to_story_effect but reads the actor
-# side (pod_combat_actor_*). Called from
-# pod_combat_save_workspace_effect's iteration over pod_combat_active_slots.
-pod_combat_save_actor_to_story_effect = {
+# Caller contract: current scope is the slot story being written;
+# scope:host must be the workspace owner. The `has_variable =
+# pod_combat_$SIDE$_char` gate at the top ensures we don't write to
+# slots whose workspace mirrors weren't loaded.
+#
+# Param: SIDE — "actor" or "target".
+#
+# If you add a new mirrored field, add ONE writeback here (and the
+# matching load in pod_combat_load_side_from_story_helper above). See
+# COMBAT_REFERENCE.info §11 "Adding a new workspace mirror field" for
+# the full checklist.
+pod_combat_save_side_to_story_helper = {
 	if = {
-		limit = { scope:host = { has_variable = pod_combat_actor_char } }
-		# Alive-flip on death / incapacitation. Reads slot_char from
-		# current scope (slot story); writes slot_alive on current scope.
+		limit = { scope:host = { has_variable = pod_combat_$SIDE$_char } }
+		# Flush the post-action morale to the slot FIRST so the shared KO
+		# trigger below reads it from the slot field (var:slot_morale), the
+		# same way the post-flush actor/target KO checks do.
+		set_variable = { name = slot_morale value = scope:host.var:pod_combat_$SIDE$_morale }
+		# Alive-flip — flips slot_alive = 0 on any KO condition, for BOTH
+		# sides, via the shared pod_combat_slot_should_be_marked_ko_trigger
+		# (one definition, also used by the actor/target KO checks in
+		# pod_combat_save_workspace_effect; the four KO sources are
+		# documented on the trigger).
 		if = {
-			limit = {
-				OR = {
-					var:slot_char = { is_alive = no }
-					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-				}
-			}
+			limit = { pod_combat_slot_should_be_marked_ko_trigger = yes }
 			set_variable = { name = slot_alive value = 0 }
 		}
 		# Workspace -> slot writes. The slot story is current scope so
 		# writes are direct `set_variable = { name = slot_X ... }`;
-		# reads come from scope:host.var:pod_combat_actor_X.
-		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_actor_soak }
-		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_actor_base_soak }
-		if = { limit = { scope:host = { has_variable = pod_combat_actor_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_actor_base_hit_chance } }
-		set_variable = { name = slot_morale         value = scope:host.var:pod_combat_actor_morale }
-		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_actor_prowess }
-		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_actor_hit_chance }
+		# reads come from scope:host.var:pod_combat_$SIDE$_X.
+		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_$SIDE$_soak }
+		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_$SIDE$_base_soak }
+		if = { limit = { scope:host = { has_variable = pod_combat_$SIDE$_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_$SIDE$_base_hit_chance } }
+		# slot_morale is written at the top of this block (before the KO check).
+		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_$SIDE$_prowess }
+		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_$SIDE$_hit_chance }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_energy_used } }
-			set_variable = { name = slot_energy_used value = scope:host.var:pod_combat_actor_energy_used }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_energy_used } }
+			set_variable = { name = slot_energy_used value = scope:host.var:pod_combat_$SIDE$_energy_used }
 		}
+		# Stance flags (presence-as-signal)
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_is_guarding } }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_is_guarding } }
 			set_variable    = { name = slot_is_guarding value = yes }
 		}
-		else = {
-			remove_variable = slot_is_guarding
-		}
+		else = { remove_variable = slot_is_guarding }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_is_dodging } }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_is_dodging } }
 			set_variable    = { name = slot_is_dodging value = yes }
 		}
-		else = {
-			remove_variable = slot_is_dodging
-		}
+		else = { remove_variable = slot_is_dodging }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_is_stealthed } }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_is_stealthed } }
 			set_variable    = { name = slot_is_stealthed value = yes }
 		}
-		else = {
-			remove_variable = slot_is_stealthed
-		}
-		# slot_init_bonus is not mirrored on the actor side — no
-		# workspace reader. The slot value is updated directly by the
-		# initiative-debuff move payload (which targets the enemy
-		# slot) and consumed by the round-end initiative recalc;
-		# neither path touches the workspace.
-		#
-		# AP drain persists across workspace cycles via the actor mirror
-		# (one reader: pod_combat_apply_ap_drain_effect at turn start).
+		else = { remove_variable = slot_is_stealthed }
+		# Initiative bonus writeback. Round-end initiative recalc reads
+		# slot_init_bonus directly outside any workspace lifecycle.
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_ap_drain } }
-			set_variable    = { name = slot_ap_drain   value = scope:host.var:pod_combat_actor_ap_drain }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_init_bonus } }
+			set_variable    = { name = slot_init_bonus value = scope:host.var:pod_combat_$SIDE$_init_bonus }
+		}
+		else = { remove_variable = slot_init_bonus }
+		# AP drain writeback. Consumed at the affected combatant's next
+		# turn start by pod_combat_apply_ap_drain_effect.
+		if = {
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_ap_drain } }
+			set_variable    = { name = slot_ap_drain   value = scope:host.var:pod_combat_$SIDE$_ap_drain }
 		}
 		else = { remove_variable = slot_ap_drain }
-		# Retaliation stances
+		# Retaliation stances (4 vars: hit / miss × value / aggravated flag)
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_retaliate_hit } }
-			set_variable    = { name = slot_retaliate_hit value = scope:host.var:pod_combat_actor_retaliate_hit }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_retaliate_hit } }
+			set_variable    = { name = slot_retaliate_hit value = scope:host.var:pod_combat_$SIDE$_retaliate_hit }
 		}
 		else = { remove_variable = slot_retaliate_hit }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_retaliate_hit_agg } }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_retaliate_hit_agg } }
 			set_variable    = { name = slot_retaliate_hit_agg value = yes }
 		}
 		else = { remove_variable = slot_retaliate_hit_agg }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_retaliate_miss } }
-			set_variable    = { name = slot_retaliate_miss value = scope:host.var:pod_combat_actor_retaliate_miss }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_retaliate_miss } }
+			set_variable    = { name = slot_retaliate_miss value = scope:host.var:pod_combat_$SIDE$_retaliate_miss }
 		}
 		else = { remove_variable = slot_retaliate_miss }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_retaliate_miss_agg } }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_retaliate_miss_agg } }
 			set_variable    = { name = slot_retaliate_miss_agg value = yes }
 		}
 		else = { remove_variable = slot_retaliate_miss_agg }
-		# Tier tracking vars (player workspace -> slot). All eight tier
-		# vars use the same set-or-remove pattern: presence on the
-		# workspace = active tier on the slot. Tier vars are absence-
-		# as-signal — the helpers preserve that.
+		# Tier tracking vars (8 total: soak/hit × buff/debuff × round/combat).
+		# Presence on workspace = active tier on slot; absence-as-signal preserved.
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_soak_buff_round_tier } }
-			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_actor_soak_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_buff_round_tier } }
+			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_$SIDE$_soak_buff_round_tier }
 		}
 		else = { remove_variable = slot_soak_buff_round_tier    }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_soak_buff_combat_tier } }
-			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_actor_soak_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_buff_combat_tier } }
+			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_$SIDE$_soak_buff_combat_tier }
 		}
 		else = { remove_variable = slot_soak_buff_combat_tier   }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_soak_debuff_round_tier } }
-			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_actor_soak_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_debuff_round_tier } }
+			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_$SIDE$_soak_debuff_round_tier }
 		}
 		else = { remove_variable = slot_soak_debuff_round_tier  }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_soak_debuff_combat_tier } }
-			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_actor_soak_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_debuff_combat_tier } }
+			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_$SIDE$_soak_debuff_combat_tier }
 		}
 		else = { remove_variable = slot_soak_debuff_combat_tier }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_hit_buff_round_tier } }
-			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_actor_hit_buff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_hit_buff_round_tier } }
+			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_$SIDE$_hit_buff_round_tier }
 		}
 		else = { remove_variable = slot_hit_buff_round_tier     }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_hit_buff_combat_tier } }
-			set_variable    = { name = slot_hit_buff_combat_tier    value = scope:host.var:pod_combat_actor_hit_buff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_hit_buff_combat_tier } }
+			set_variable    = { name = slot_hit_buff_combat_tier    value = scope:host.var:pod_combat_$SIDE$_hit_buff_combat_tier }
 		}
 		else = { remove_variable = slot_hit_buff_combat_tier    }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_hit_debuff_round_tier } }
-			set_variable    = { name = slot_hit_debuff_round_tier   value = scope:host.var:pod_combat_actor_hit_debuff_round_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_hit_debuff_round_tier } }
+			set_variable    = { name = slot_hit_debuff_round_tier   value = scope:host.var:pod_combat_$SIDE$_hit_debuff_round_tier }
 		}
 		else = { remove_variable = slot_hit_debuff_round_tier   }
 		if = {
-			limit = { scope:host = { has_variable = pod_combat_actor_hit_debuff_combat_tier } }
-			set_variable    = { name = slot_hit_debuff_combat_tier  value = scope:host.var:pod_combat_actor_hit_debuff_combat_tier }
+			limit = { scope:host = { has_variable = pod_combat_$SIDE$_hit_debuff_combat_tier } }
+			set_variable    = { name = slot_hit_debuff_combat_tier  value = scope:host.var:pod_combat_$SIDE$_hit_debuff_combat_tier }
 		}
 		else = { remove_variable = slot_hit_debuff_combat_tier  }
 	}
+}
+
+# Thin wrapper — saves actor workspace back to current slot story.
+# Caller scope = slot story; scope:host must be saved before delegating.
+# Called from pod_combat_save_workspace_effect's iteration over
+# pod_combat_active_slots.
+pod_combat_save_actor_to_story_effect = {
+	pod_combat_save_side_to_story_helper = { SIDE = actor }
 }
 
 # ─── AOE TARGET-ALIVE CHECK ───────────────────────────────────────
@@ -520,8 +392,7 @@ pod_combat_save_actor_to_story_effect = {
 #
 # Flips slot_alive = 0 when ANY of:
 #   * The character died (is_alive = no — fatal duel + lethal blow).
-#   * The character is incapacitated (PoD's torpor / wight / dharma0 /
-#     shadow / zombu / incapable predicate).
+#   * The character is in an incapacitated states.
 #   * Combat morale broke (slot_morale <= 0). This is the only check
 #     pod_combat_save_target_to_story_effect's internal alive-check
 #     can't make pre-write — slot_morale isn't set until that effect
@@ -532,7 +403,7 @@ pod_combat_save_actor_to_story_effect = {
 #     stays yes.
 #
 # Called from per-target body inside the AoE iterators in
-# pod_combat_move_effects.txt — implicit scope must be the iterated
+# pod_combat_move_effects.txt. Implicit scope must be the iterated
 # slot story (var:slot_morale + var:slot_char live there).
 #
 # Centralised here so a future incapacitation clause only needs to be
@@ -541,165 +412,23 @@ pod_combat_save_actor_to_story_effect = {
 pod_combat_aoe_check_target_alive_effect = {
 	if = {
 		limit = {
-			OR = {
-				var:slot_char = { is_alive = no }
-				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-				var:slot_morale <= 0
-				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
-			}
+			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
 		set_variable = { name = slot_alive value = 0 }
 	}
 }
 
 
-# Caller scope = slot story; caller must have saved the workspace
-# owner as scope:host. Reads workspace vars on scope:host and writes
-# the slot story's vars directly.
-#
+# Thin wrapper — saves target workspace back to current slot story.
+# Caller scope = slot story; scope:host must be saved before delegating.
 # Called from every_in_list iterations on pod_combat_active_slots in
 # the AoE dispatchers and the workspace dispatch
 # (pod_combat_save_workspace_effect), and from the AI swap-target
 # effects' restore path (pod_combat_ai_restore_enemy_target_effect).
+# The full alive-flip (incl. wound-track-full + morale-broken) lives in
+# the shared helper now, applied to both sides.
 pod_combat_save_target_to_story_effect = {
-	if = {
-		limit = { scope:host = { has_variable = pod_combat_target_char } }
-		# Alive-flip on death / incapacitation / wound-track-full.
-		# The wound-track-full clause is what catches combat-HP
-		# exhaustion in non-fatal duels (where PoD's death check is
-		# gated, so is_alive stays yes and the trait checks won't
-		# fire) — without it those targets would stay marked alive
-		# even with a full wound track. In fatal duels it's redundant
-		# with is_alive=no for mortal characters but still useful for
-		# the brief window between wound-track-fill and PoD's death
-		# check resolving. Reads slot_char from current scope (slot
-		# story); writes slot_alive on current scope.
-		if = {
-			limit = {
-				OR = {
-					var:slot_char = { is_alive = no }
-					var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-					var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
-					# Morale-broken target — added for parity with the
-					# other three KO check sites (init-time KO check,
-					# save_workspace's actor + target passes, and
-					# aoe_check_target_alive). The save_target path was
-					# missing this clause; without it, a morale-only
-					# attack that reduced a target to slot_morale = 0
-					# wouldn't flip slot_alive until the next save tick
-					# touched the slot through one of the other paths.
-					# Reads workspace mirror (pod_combat_target_morale)
-					# instead of var:slot_morale because we haven't
-					# written the new morale into the slot yet — the
-					# workspace value IS the post-attack number.
-					scope:host.var:pod_combat_target_morale <= 0
-				}
-			}
-			set_variable = { name = slot_alive value = 0 }
-		}
-		# Workspace -> slot writes. The slot story is current scope so
-		# writes are direct `set_variable = { name = slot_X ... }`;
-		# reads come from scope:host.var:pod_combat_target_X.
-		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_target_soak }
-		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_target_base_soak }
-		if = { limit = { scope:host = { has_variable = pod_combat_target_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_target_base_hit_chance } }
-		set_variable = { name = slot_morale         value = scope:host.var:pod_combat_target_morale }
-		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_target_prowess }
-		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_target_hit_chance }
-		# slot_energy_used is not written on the target side — the AI
-		# energy-attrition counter is updated only when an actor SPENDS
-		# energy on their own move (via pod_combat_actor_energy_used in
-		# POD_execute_combat_move §3). The target-side workspace mirror
-		# is therefore absent (write-only would have no consumer).
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_is_guarding } }
-			set_variable    = { name = slot_is_guarding value = yes }
-		}
-		else = {
-			remove_variable = slot_is_guarding
-		}
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_is_dodging } }
-			set_variable    = { name = slot_is_dodging value = yes }
-		}
-		else = {
-			remove_variable = slot_is_dodging
-		}
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_is_stealthed } }
-			set_variable    = { name = slot_is_stealthed value = yes }
-		}
-		else = {
-			remove_variable = slot_is_stealthed
-		}
-		# Initiative bonus and AP drain are not mirrored on the target
-		# side — both would be write-only with no reader.
-		# POD_execute_combat_move §14 writes slot_init_bonus /
-		# slot_ap_drain directly on the target slot via an active_slots
-		# lookup, so save_target has nothing to push back here.
-		# Retaliation stances
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_retaliate_hit } }
-			set_variable    = { name = slot_retaliate_hit value = scope:host.var:pod_combat_target_retaliate_hit }
-		}
-		else = { remove_variable = slot_retaliate_hit }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_retaliate_hit_agg } }
-			set_variable    = { name = slot_retaliate_hit_agg value = yes }
-		}
-		else = { remove_variable = slot_retaliate_hit_agg }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_retaliate_miss } }
-			set_variable    = { name = slot_retaliate_miss value = scope:host.var:pod_combat_target_retaliate_miss }
-		}
-		else = { remove_variable = slot_retaliate_miss }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_retaliate_miss_agg } }
-			set_variable    = { name = slot_retaliate_miss_agg value = yes }
-		}
-		else = { remove_variable = slot_retaliate_miss_agg }
-		# Tier tracking vars (target workspace -> slot)
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_soak_buff_round_tier } }
-			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_target_soak_buff_round_tier }
-		}
-		else = { remove_variable = slot_soak_buff_round_tier    }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_soak_buff_combat_tier } }
-			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_target_soak_buff_combat_tier }
-		}
-		else = { remove_variable = slot_soak_buff_combat_tier   }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_soak_debuff_round_tier } }
-			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_target_soak_debuff_round_tier }
-		}
-		else = { remove_variable = slot_soak_debuff_round_tier  }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_soak_debuff_combat_tier } }
-			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_target_soak_debuff_combat_tier }
-		}
-		else = { remove_variable = slot_soak_debuff_combat_tier }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_hit_buff_round_tier } }
-			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_target_hit_buff_round_tier }
-		}
-		else = { remove_variable = slot_hit_buff_round_tier     }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_hit_buff_combat_tier } }
-			set_variable    = { name = slot_hit_buff_combat_tier    value = scope:host.var:pod_combat_target_hit_buff_combat_tier }
-		}
-		else = { remove_variable = slot_hit_buff_combat_tier    }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_hit_debuff_round_tier } }
-			set_variable    = { name = slot_hit_debuff_round_tier   value = scope:host.var:pod_combat_target_hit_debuff_round_tier }
-		}
-		else = { remove_variable = slot_hit_debuff_round_tier   }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_target_hit_debuff_combat_tier } }
-			set_variable    = { name = slot_hit_debuff_combat_tier  value = scope:host.var:pod_combat_target_hit_debuff_combat_tier }
-		}
-		else = { remove_variable = slot_hit_debuff_combat_tier  }
-	}
+	pod_combat_save_side_to_story_helper = { SIDE = target }
 }
 
 ##############################################################################################
@@ -735,21 +464,7 @@ pod_combat_load_workspace_effect = {
 
 	# Push the freshly pair-recomputed hit chances back to the actor's
 	# and target's slot stories so the per-slot GUI display matches the
-	# values that will actually drive the upcoming damage roll. Without
-	# this, slot_hit_chance keeps whatever the previous turn's
-	# save_workspace / save_target wrote — most visibly: an AI attacking
-	# the PC saves "PC vs that AI" into slot 0, then PC turn start runs
-	# this effect (workspace gets pair-refreshed against PC's selected
-	# target via pod_combat_recalc_pair_hit_chance_effect inside
-	# load_target), but slot 0 stays on the AI-vs-PC value until the
-	# player clicks an attack and the post-move save_workspace finally
-	# writes the live workspace back. Result was the displayed hit chance
-	# changing the moment the player took their move, even though only
-	# the slot's display was catching up. Symmetric with the writeback
-	# inside save_actor / save_target — same flow, just at the load
-	# tick instead of the save tick. Single-pair only (no AoE concerns)
-	# because the AoE iterators call pod_combat_load_target_from_story_effect
-	# directly per target, bypassing this dispatcher entirely.
+	# values that will actually drive the upcoming damage roll.
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -834,22 +549,16 @@ pod_combat_save_workspace_effect = {
 		pod_combat_save_target_to_story_effect = yes
 	}
 
-	# KO check on the action's target. Same OR'd KO conditions across
-	# four sources (PoD is_alive, pod_combat_is_incapacitated_trigger,
-	# slot_morale ≤ 0, wound-track-full) see comment block above for
-	# rationale. Iterates pod_combat_active_slots and flips slot_alive=0
-	# only on the slot whose slot_index matches selected_target. 
+	# KO check on the action's target — flips slot_alive=0 via the shared
+	# pod_combat_slot_should_be_marked_ko_trigger (four KO sources
+	# documented there). Iterates pod_combat_active_slots, matching only
+	# the slot whose slot_index equals selected_target.
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
 			scope:host = { has_variable = pod_combat_selected_target }
 			var:slot_index = scope:host.var:pod_combat_selected_target
-			OR = {
-				var:slot_char = { is_alive = no }
-				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-				var:slot_morale <= 0
-				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
-			}
+			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
 		set_variable = { name = slot_alive value = 0 }
 	}
@@ -862,12 +571,7 @@ pod_combat_save_workspace_effect = {
 		limit = {
 			scope:host = { has_variable = pod_combat_current_actor }
 			var:slot_index = scope:host.var:pod_combat_current_actor
-			OR = {
-				var:slot_char = { is_alive = no }
-				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-				var:slot_morale <= 0
-				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
-			}
+			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
 		set_variable = { name = slot_alive value = 0 }
 	}
@@ -880,8 +584,6 @@ pod_combat_save_workspace_effect = {
 	# NOT used: an AoE move would fire the check after each victim's
 	# damage call, and a multi-victim wipe would emit one cleanup per
 	# kill. Checking only at action boundaries keeps cleanup atomic.
-	# The check is guarded on NOT = pod_combat_is_over so cascading
-	# calls (AoE save_workspace) are idempotent.
 	pod_combat_check_group_victory_effect = yes
 }
 
@@ -895,7 +597,7 @@ pod_combat_init_slot_from_character_effect = {
 	# Applies the discipline combat buffs and reads health/soak/prowess
 	# into the slot variables.
 	#
-	# Shapeshifting for AI fera is NOT done here — it runs upfront in
+	# Shapeshifting for AI fera is NOT done here. It runs upfront in
 	# pod_combat_initialize_effect as a pre-pass, so every potential
 	# CASTER already has its crinos modifier when the discipline effects
 	# query it (especially for the delirium check, which reads
@@ -1193,14 +895,7 @@ pod_combat_initialize_effect = {
 	# -- Pre-pass: shapeshift all AI fera combatants BEFORE any slot init --
 	# This must run before the slot loop because each slot's init calls
 	# POD_enemy_knight_set_discipline_battle_effect with the opposing team
-	# leader as CASTER. That effect's delirium check queries
-	# $CASTER$ = { POD_give_delirium_trigger = yes } which requires the
-	# crinos character modifier to already be present. If we waited and
-	# shifted inside each slot's init, player-team slots 0-4 would query
-	# the un-shifted opponent leader (slot 5 hasn't run yet), and slot 5
-	# would similarly miss any allied fera that shifted in their own slot.
-	# Shapeshifting upfront ensures every CASTER has its warform modifier
-	# before any delirium / discipline query runs.
+	# leader as CASTER.
 	#
 	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift.
 	scope:pod_combat_target = {
@@ -1276,6 +971,7 @@ pod_combat_initialize_effect = {
 				var:pod_combat_mode = 3
 			}
 		}
+		# Add coterie members in relation-list iteration order. 
 		every_relation = {
 			type = coterie_member
 			limit = {
@@ -1392,19 +1088,15 @@ pod_combat_initialize_effect = {
 	# damage, scripted incapacitation, torpor, morale-broken from a
 	# prior scene) would be marked alive at init and could act / be
 	# targeted before the first save_workspace check flipped their
-	# flag. Apply the same 4-way KO predicate the action-boundary
-	# checks use (see lines ~841-872) and then run the victory check
+	# flag. Apply the shared pod_combat_slot_should_be_marked_ko_trigger
+	# (same predicate the action-boundary checks use) and then run the
+	# victory check
 	# so a degenerate "everyone on one side is already KO'd" combat
 	# resolves immediately instead of running a phantom first round.
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			OR = {
-				var:slot_char = { is_alive = no }
-				var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
-				var:slot_morale <= 0
-				var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }
-			}
+			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
 		set_variable = { name = slot_alive value = 0 }
 	}
@@ -1622,9 +1314,7 @@ pod_combat_group_cleanup_effect = {
 	# fight bias on the way OUT).
 	# Iterate active slots, skipping the PC (slot 0) and any non-AI
 	# combatants. var:slot_alive isn't checked — even KO'd AIs have
-	# accumulated cross-fight bias that should be cleared. Replaced
-	# nine hardcoded `if = { limit = { ...slot_N... } var:slot_N.var:slot_char = { ... } }`
-	# blocks with a single iteration.
+	# accumulated cross-fight bias that should be cleared. 
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -1672,29 +1362,21 @@ pod_combat_group_cleanup_effect = {
 
 ##############################################################################################
 # SECTION 8: INITIATIVE SYSTEM
-# For each alive combatant slot (0-9), calculate initiative as
-# prowess + (one of seven discrete buckets {1, 5, 10, 15, 20, 25, 30})
-# + init_bonus. NOT a uniform random(1-30) — the seven buckets are
-# uniformly weighted (1 each in random_list) but the values are
-# discrete, which produces a coarser distribution than continuous 1-30
-# would. Stored on each slot story as slot_initiative; slot_has_acted
-# is cleared on the same pass.
 ##############################################################################################
 
 # Roll initiative for every filled+alive slot in one pass over
 # pod_combat_active_slots, fold in each slot's pending slot_init_bonus,
-# and clear slot_has_acted ready for the new round. Iteration body
-# runs in slot-story scope so the random_list bucket pick saves to
-# scope:init_roll and the per-slot writes are direct.
+# and clear slot_has_acted ready for the new round.
 pod_combat_calculate_initiative_effect = {
 	# Roll initiative for every alive combatant and stamp turn-order
-	# rank. Initiative = prowess + bucket_pick + init_bonus, where
-	# bucket_pick is one of seven discrete values {1, 5, 10, 15, 20,
-	# 25, 30} chosen uniformly via random_list with weight 1 each.
-	# Tuning the variance means changing the bucket VALUES (not
-	# switching to a uniform range), adding more buckets extends the
-	# curve, narrower spreads (e.g. {5, 10, 15}) make it more
-	# prowess-deterministic.
+	# rank. Initiative = prowess + roll + init_bonus, where roll is a
+	# uniform integer in [1, pod_combat_initiative_roll_max] sampled via
+	# the engine's `integer_range` script-math primitive. The upper
+	# bound is the only tunable — defined in
+	# pod_combat_values.txt (search `pod_combat_initiative_roll_max`)
+	# with a comment block explaining the gameplay knob:
+	#   higher → more chaos in turn order
+	#   lower  → more prowess-deterministic
 	# init_bonus comes from buff/debuff moves applied previous round;
 	# positive = faster (buff), negative = slower (debuff). Cleared
 	# after application.
@@ -1706,16 +1388,15 @@ pod_combat_calculate_initiative_effect = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = { var:slot_alive = 1 }
-		random_list = {
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 1  } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 5  } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 10 } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 15 } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 20 } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 25 } } }
-			1 = { save_scope_value_as = { name = init_roll value = { value = var:slot_prowess add = 30 } } }
+		set_variable = {
+			name = slot_initiative
+			value = {
+				value = var:slot_prowess
+				add = {
+					integer_range = { min = 1 max = pod_combat_initiative_roll_max }
+				}
+			}
 		}
-		set_variable = { name = slot_initiative value = scope:init_roll }
 		if = {
 			limit = { has_variable = slot_init_bonus }
 			change_variable = { name = slot_initiative add = var:slot_init_bonus }
@@ -1812,19 +1493,6 @@ pod_combat_find_next_actor_effect = {
 	# stories' insertion order (slots 0..9), so among ties the
 	# lowest-indexed slot wins because the strict `>` check inside the
 	# body only updates best_* on a STRICTLY higher init.
-	#
-	# The max-comparison lives inside the body, NOT in the iteration
-	# limit. CK3's `every_in_list` doesn't reliably re-evaluate `limit`
-	# against host-var mutations made by earlier iteration bodies — the
-	# list is captured up-front and a host-var-cross-iteration check in
-	# `limit` ends up letting every slot through, so whichever iterated
-	# LAST wins regardless of initiative. With pod_combat_active_slots
-	# filled in [0, 1, 5, 6, 7] order, that bug surfaced as "highest
-	# slot index always acts first," e.g. NPC slot 7 beating PC slot 0
-	# even when PC's initiative was higher. Moving the strict `>`
-	# compare into the body via `if = { limit = { ... } }` reads
-	# `var:pod_combat_best_init` against host's CURRENT state each
-	# iteration, since effect blocks run synchronously.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
@@ -1933,11 +1601,10 @@ pod_combat_ai_select_player_target_effect = {
 ##############################################################################################
 
 pod_combat_restore_pc_target_effect = {
-	# Detect dead/missing pc_target via any_in_list, if NO active
+	# Detect dead/missing pc_target via any_in_list — if NO active
 	# slot matches pc_target with slot_alive = 1, we need to retarget.
 	# The OR also covers the unset case (no pc_target var) and the
-	# self-targeting case (pc_target = 0 = PC). Replaced a 10-AND OR
-	# block keyed on integer slot index.
+	# self-targeting case (pc_target = 0 = PC).
 	save_scope_as = host
 	if = {
 		limit = {
@@ -2255,14 +1922,6 @@ pod_combat_check_group_victory_effect = {
 # SECTION 13: GROUP ROUND END
 # Increment round, calculate new initiative, expire round-duration tier buffs,
 # and set up the next round.
-#
-# No health write-back happens here. Wounds are applied LIVE during each move
-# via POD_increase_wounds_hostile_effect, not deferred to round end. The
-# fatality-mode finalization (wound cap + nonfatal-flag strip) runs once at
-# combat END via pod_combat_apply_nonfatal_effect called from
-# pod_combat_end_combat_effect. Calling it from here would strip
-# pod_combat_nonfatal_active after round 1, silently breaking fatality = no
-# from round 2 onward.
 ##############################################################################################
 
 pod_combat_group_end_round_effect = {
@@ -2293,11 +1952,7 @@ pod_combat_group_end_round_effect = {
 	# rebuild each slot's live soak and hit_chance from base + remaining
 	# combat-duration tier magnitudes via
 	# pod_combat_recalc_slot_stats_via_story_effect (covers slot_soak
-	# revert too — no separate soak-reset pass needed). Recalc-from-base
-	# avoids the clamping loss a delta-based revert would accumulate.
-	# Guard / Dodge / Stealth flags are intentionally NOT cleared here;
-	# stances persist until consumed by an attack or wiped at combat end
-	# (pod_combat_cleanup_effect).
+	# revert too — no separate soak-reset pass needed).
 	pod_combat_revert_round_tiers_effect = yes
 
 	# If PC (slot 0) goes first, set up workspace and wait for player input
@@ -2327,62 +1982,69 @@ pod_combat_group_end_round_effect = {
 }
 
 pod_combat_process_pre_pc_turns_effect = {
-	# Process AI turns that happen before PC's turn in initiative order
-	# Unrolled loop: up to 9 iterations
-
-	# Current actor is already set by find_next_actor
+	# Process AI turns that happen before the PC's turn, in initiative
+	# order. The caller has already set current_actor via find_next.
+	# Flat unroll (max 9 non-PC slots): each iteration runs the current
+	# AI's turn then advances to the next actor; the != 0 guard stops the
+	# loop as soon as find_next lands on the PC (current_actor = 0), after
+	# which every remaining iteration's limit fails and control falls
+	# through to the PC-setup block below. Advancing after EVERY executed
+	# AI (including the last) means the PC is still reached even when all
+	# 9 AIs act first (PC lowest initiative). Mirrors the flat shape of
+	# pod_combat_process_group_turns_effect.
+	# Iteration 1
 	if = {
 		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
 		pod_combat_execute_ai_turn_effect = yes
-
-		# Find next actor
 		pod_combat_find_next_actor_effect = yes
-		if = {
-			limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-			pod_combat_execute_ai_turn_effect = yes
-
-			pod_combat_find_next_actor_effect = yes
-			if = {
-				limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-				pod_combat_execute_ai_turn_effect = yes
-
-				pod_combat_find_next_actor_effect = yes
-				if = {
-					limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-					pod_combat_execute_ai_turn_effect = yes
-
-					pod_combat_find_next_actor_effect = yes
-					if = {
-						limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-						pod_combat_execute_ai_turn_effect = yes
-
-						pod_combat_find_next_actor_effect = yes
-						if = {
-							limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-							pod_combat_execute_ai_turn_effect = yes
-
-							pod_combat_find_next_actor_effect = yes
-							if = {
-								limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-								pod_combat_execute_ai_turn_effect = yes
-
-								pod_combat_find_next_actor_effect = yes
-								if = {
-									limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-									pod_combat_execute_ai_turn_effect = yes
-
-									pod_combat_find_next_actor_effect = yes
-									if = {
-										limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
-										pod_combat_execute_ai_turn_effect = yes
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+	}
+	# Iteration 2
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 3
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 4
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 5
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 6
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 7
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 8
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
+	}
+	# Iteration 9
+	if = {
+		limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor >= 0 var:pod_combat_current_actor != 0 NOT = { has_variable = pod_combat_is_over } }
+		pod_combat_execute_ai_turn_effect = yes
+		pod_combat_find_next_actor_effect = yes
 	}
 
 	# If PC is next (or combat is over), set up workspace for PC
@@ -2423,22 +2085,6 @@ pod_combat_process_pre_pc_turns_effect = {
 		# _target_from_story_effect, where every stance flag has both
 		# a `set_variable = yes` branch and an `else = remove_variable`
 		# branch keyed on the slot story's slot_is_X presence.
-		#
-		# A previous version had:
-		#   remove_variable = pod_combat_actor_is_guarding
-		#   remove_variable = pod_combat_target_is_guarding
-		#   remove_variable = pod_combat_actor_is_dodging
-		#   remove_variable = pod_combat_target_is_dodging
-		#   set_variable = { name = pod_combat_actor_soak value = var:pod_combat_actor_base_soak }
-		#   set_variable = { name = pod_combat_target_soak value = var:pod_combat_target_base_soak }
-		# That block ran AFTER load_workspace and unconditionally
-		# wiped stance flags + zeroed tier soak bonuses. After the
-		# PC turn ended, pod_combat_save_workspace_effect saved the
-		# wiped workspace back to the slot stories, permanently
-		# erasing slot_is_guarding / slot_is_dodging on both PC and
-		# the selected target, and stripping tier-driven soak from
-		# slot_soak until the next round-end recalc rebuilt it.
-		# Removed to fix the stance/soak persistence bug.
 	}
 }
 

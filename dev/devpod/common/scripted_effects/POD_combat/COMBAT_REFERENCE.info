@@ -169,17 +169,22 @@ can read it without crossing into the slot-story scope.
 
 Most tier, stance, retaliation, spirit, and `base_*` fields exist on
 both sides — load/save effects walk slot stories and write into /
-read back from the matching workspace mirror. **Four mirrors are
-asymmetric**:
+read back from the matching workspace mirror. As of the workspace-mirror
+symmetrization, the mirrors are **fully symmetric**: every field —
+including `slot_init_bonus`, `slot_ap_drain`, and `slot_energy_used` — is
+loaded and saved on BOTH the actor and target side. Both sides flow
+through one parametric pair, `pod_combat_load_side_from_story_helper` /
+`pod_combat_save_side_to_story_helper` (`SIDE = actor|target`); the four
+public load/save effects (`load_actor` / `load_target` / `save_actor` /
+`save_target`) are thin wrappers over them.
 
-| Slot field | Actor mirror | Target mirror | Why the asymmetry |
-|---|---|---|---|
-| `slot_init_bonus` | dropped | dropped | Written by the initiative-debuff move payload directly on the target slot (via `active_slots` lookup); consumed by the round-end initiative recalc reading `slot_init_bonus` directly. No workspace reader. |
-| `slot_ap_drain` | mirrored | dropped | Actor side has one reader (`pod_combat_apply_ap_drain_effect` at the actor's next turn). Target side was write-only — the move payload now writes the target slot directly. |
-| `slot_energy_used` | mirrored | dropped | Actor side has four readers (AI energy-attrition weighting). Target side had no readers or writers — pure load/save overhead. |
+A few fields only have a live reader on one side (e.g. `slot_energy_used`
+feeds the actor-side AI energy-attrition weighting; the target-side
+mirror is no-op overhead), but they're mirrored anyway for shape
+uniformity — one helper body, no per-field branching.
 
-When you add a new slot field, default to mirroring it on both sides;
-only drop a mirror once the field's read count proves out.
+When you add a new slot field, mirror it on both sides (one line in each
+helper). See §11 *Adding a new workspace mirror field*.
 
 **Lifecycle contract:** These variables are valid ONLY between a
 `pod_combat_load_workspace_effect` call and the matching
@@ -598,8 +603,15 @@ Stat is `soak` or `hit`, direction is `buff` or `debuff`, duration is
 
 - The number of slots changes (currently 10).
 - The tier stat categories change (currently `soak`, `hit`).
-- Tier magnitudes change (must remain in lockstep with the move-side
-  tier setters in `pod_combat_move_init_effects.txt`).
+- Tier magnitudes change (the ±10/20/30 small/medium/large values).
+  These are hardcoded in lockstep across THREE files — CK3 `@`-constants
+  are file-scoped, so the value can't be shared: `pod_combat_tier_effects.txt`
+  (`@*_buff_mag`, workspace/slot recalc), `pod_combat_values.txt`
+  (`@combat_tier_*_mag`, GUI display SVs), and `POD_health_track_values.txt`
+  (bare `10/20/30` in `POD_soak_chance` — the soak the wound pipeline
+  actually rolls). NOTE: the move-side tier setters in
+  `pod_combat_move_init_effects.txt` carry only the tier ORDINAL (1/2/3),
+  not the magnitude, so they are NOT part of this lockstep.
 
 ---
 
@@ -735,13 +747,17 @@ discarded with the workspace. Everything else mirrors a slot field
 of the same name with the `slot_` prefix swapped for `pod_combat_actor_` /
 `pod_combat_target_`.
 
-**Asymmetric mirrors.** Four slot fields are mirrored on only one
-side: `slot_init_bonus` is mirrored on **neither** side;
-`slot_ap_drain` and `slot_energy_used` are mirrored on the **actor**
-side only. See §1 *Action workspace (transient)* for the full table
-and the per-field rationale. When adding a new slot field, default
-to mirroring it on both sides — drop a mirror only when the reader
-audit shows the round-trip isn't earning its keep.
+**Symmetric mirrors.** Every mirrored slot field is loaded and saved on
+BOTH the actor and target side — including `slot_init_bonus`,
+`slot_ap_drain`, and `slot_energy_used`. Both sides route through one
+parametric pair (`pod_combat_load_side_from_story_helper` /
+`pod_combat_save_side_to_story_helper`, `SIDE = actor|target`); the four
+public load/save effects are thin wrappers over them. A few fields have a
+live reader on only one side (e.g. `slot_energy_used` → the actor-side AI
+energy-attrition weighting), but they're mirrored regardless for shape
+uniformity — one helper body, no per-field branching. See §1 *Action
+workspace (transient)* for the field list. When adding a new slot field,
+mirror it on both sides (one line in each helper).
 
 **Allowed readers (during the window):**
 - `POD_execute_combat_move` phases §1-§16
@@ -841,14 +857,9 @@ stance-less target. Contrast with `bypass_guard` (which the runtime
 no longer reads at all — collapsed into the `checks_guard`
 capability flag).
 
-### Result-flag model (not result-int)
+### Result-flag model
 
-`pod_combat_last_result` holds a flag value (`flag:hp_damage`,
-`flag:guard_blocked`, etc.), not an integer code. B1 originally
-introduced the consolidation as an int (codes 0..12 with a reserved
-slot at 4); the flag-value migration replaced that with
-self-documenting names. The benefits over the int form:
-
+The result vars hold flag values (`flag:hp_damage`, `flag:attack`, etc.)
 - Reads / writes don't require a decoder ring: `value = flag:hp_damage`
   vs `value = 0` plus a comment.
 - Reserved-slot stubs from the int era are gone — adding a new
@@ -951,23 +962,23 @@ Code-side entry points and where they live.
 
 | File | Purpose |
 |---|---|
-| `POD_combat/pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Read by the move list. |
-| `POD_combat/pod_combat_move_list_effects.txt` | One `POD_init_combat_move` block per CSV row, plus analyzer-suppression blocks. |
-| `POD_combat/pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§16 phase contract above. |
-| `POD_combat/pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
-| `POD_combat/pod_combat_group_effects.txt` | Workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
-| `POD_combat/pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
-| `POD_combat/pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
-| `POD_combat/pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file — see `scripts/python/POD-Combat/AI_LOGIC_GUIDE.md` for the per-modifier rationale. |
-| `POD_combat/PoD_single_combat_effects.txt` | Late-load override that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. |
+| `POD_combat\pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Read by the move list. |
+| `POD_combat\pod_combat_move_list_effects.txt` | One `POD_init_combat_move` block per CSV row, plus analyzer-suppression blocks. |
+| `POD_combat\pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§16 phase contract above. |
+| `POD_combat\pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
+| `POD_combat\pod_combat_group_effects.txt` | Workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
+| `POD_combat\pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
+| `POD_combat\pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
+| `POD_combat\pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file — see `scripts/python/POD-Combat/AI_LOGIC_GUIDE.md` for the per-modifier rationale. |
+| `POD_combat\PoD_single_combat_effects.txt` | Late-load override that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. |
 
 ### Scripted triggers
 
 | File | Purpose |
 |---|---|
-| `POD_combat/pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
-| `POD_combat/pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. |
-| `POD_combat/pod_combat_damage_source_weakness_triggers.txt` | Single source of truth for splat weakness → damage source mapping. Per-source triggers (`pod_combat_target_is_weak_to_{silver,gold,sun,fire,holy}_trigger`) + bridge trigger consumed by the AI selector's weakness-exploitation bias. |
+| `POD_combat\pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
+| `POD_combat\pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. |
+| `POD_combat\pod_combat_damage_source_weakness_triggers.txt` | Single source of truth for splat weakness → damage source mapping. Per-source triggers (`pod_combat_target_is_weak_to_{silver,gold,sun,fire,holy}_trigger`) + bridge trigger consumed by the AI selector's weakness-exploitation bias. |
 
 ### Story cycles
 
@@ -983,10 +994,12 @@ Code-side entry points and where they live.
 
 ### Decisions
 
+Both files live under `common\decisions\POD_combat\`.
+
 | File | Purpose |
 |---|---|
-| `POD_combat/pod_combat_decisions.txt` | Player-facing decisions (`pod_combat_configure_skills`). |
-| `POD_combat/pod_combat_move_decisions.txt` | One hidden decision per move, used by `can_execute_decision` for unlock gating. |
+| `POD_combat\pod_combat_decisions.txt` | Player-facing decisions (`pod_combat_configure_skills`). |
+| `POD_combat\pod_combat_move_decisions.txt` | One hidden decision per move, used by `can_execute_decision` for unlock gating. |
 
 ### Character interactions
 
@@ -1010,24 +1023,23 @@ Code-side entry points and where they live.
 
 | File | Purpose |
 |---|---|
-| `POD_windows/pod_combat_window.gui` | The mid-combat window — move buttons, log, slot panels. |
-| `POD_windows/pod_combat_skills_window.gui` | The loadout editor (Configure Skills decision). |
-| `scripted_widgets/pod_combat_scripted_widgets.txt` | Reusable widget templates referenced by the combat / loadout windows (move buttons, log rows, stat tiles). |
-| `pod_texticons_combat.gui` | Inline `@<name>!` icons for stances and damage sources. |
+| `POD_windows\pod_combat_window.gui` | The mid-combat window — move buttons, log, slot panels. |
+| `POD_windows\pod_combat_skills_window.gui` | The loadout editor (Configure Skills decision). |
+| `scripted_widgets\pod_combat_scripted_widgets.txt` | Reusable widget templates referenced by the combat / loadout windows (move buttons, log rows, stat tiles). |
+| `POD_shared\pod_texticons_combat.gui` | Inline `@<name>!` icons for stances and damage sources. |
 | `window_decisions.gui` | Vanilla override that hides the `hidden` decision group from the Decisions panel. |
 
 ### Localization
 
 | File | Purpose |
 |---|---|
-| `pod_combat_static_l_english.yml` | Hand-authored loc — desc keys, log loc, capability callouts, etc. |
+| `pod_combat_static_l_english.yml` | loc — desc keys, log loc, capability callouts, etc. |
 | `pod_combat_l_english.yml` | Three keys per move: `pod_combat_move_<key>` (bare display name), `_desc` (PODCombatMoveDesc stat-card target), `_tooltip` (flavor sentence from CSV `notes`). |
 
 ### Customizable localization
 
 | File | Purpose |
 |---|---|
-| `00_POD_combat_custom_loc.txt` | `PODEnergySplatWord`, `PODCombatXxxCostInline`, `PODCombatMoveInlineTooltip`. |
 | `pod_combat_log_custom_loc.txt` | `PODCombatLogResultText` and the rider customizable_locs the log GUI invokes. |
 
 ### Data binding
@@ -1121,18 +1133,152 @@ block:
 scope:sc_ctx.var:alias_<name> ?= { save_scope_as = <name> }
 ```
 
-`?=` is CK3's safe-scope-navigation operator: the body runs in the
-LHS scope iff the LHS resolves, otherwise it's a silent no-op. That's
-how the whitelist stays open by design — extra branches that find
-no scope at launch are silent skips. (Pre-`?=` versions used
-`if = { limit = { exists = scope:X } scope:X = { ... } }`; same
-semantics, more syntax.)
+---
 
-### Surfaces NOT yet stashed
+## §11 Cross-file change checklists
 
-- **Typed scope objects**: `scope:vassal_war`, `scope:vassal_claim`,
-  `scope:laamp_title`. The variable-storage pattern should work the
-  same way — add when triggered in testing.
-- **Raw scope values**: `scope:duel_legal`, `scope:fp2_*_gate`. These
-  aren't character or object scopes; would need a different detection
-  mechanism than `exists = scope:X`.
+Some combat-system features have surface area that fans out across
+multiple files. Adding a new value to one of these axes requires
+coordinated edits across all the named sites — partial changes
+typically compile fine but silently produce the wrong runtime
+behavior (a new damage source shows as "[broken loc key]" in
+tooltips; a new outcome flag renders as blank in the combat log; a
+new workspace mirror desyncs at every action boundary).
+
+These checklists are the antidote: a single grep'able location of
+"if you touch X, also touch Y." They complement the individual
+"Adding a new" subsections in §2 (phase), §6 (reaction class), and
+§10 (alias) above — those cover the single-file additions; the
+checklists below cover the fan-out cases.
+
+### Adding a new damage source
+
+E.g. acid, electric, void. Carries fan-out across damage routing,
+PoD wound-system integration, AI weakness selection, tooltip
+rendering, and the combat-log dispatcher.
+
+1. **Damage dispatcher**:
+   `pod_combat_move_effects.txt:803` — `POD_combat_dispatch_by_source`
+   adds the new `var:damage_source = flag:X` → `REASON = death_X`
+   branch.
+2. **Damage routing**: confirm `pod_combat_route_to_pod_damage` in
+   `pod_combat_effects.txt:~408` handles the new REASON correctly.
+   May need branch additions for source-specific behavior
+   (aggravated promotion, soak bypass).
+3. **Splat-weakness triggers**: `pod_combat_damage_source_weakness_triggers.txt`
+   — add per-splat weakness branch if applicable. The AI uses these
+   for weakness-bias move selection.
+4. **PoD aggravated classification**: `pod_combat_damage_type_overrides.txt`
+   — if the new source promotes to aggravated for specific splats,
+   add the AND-branch there.
+5. **Move-description SGUI**: `pod_combat_skill_guis.txt:703-885`
+   — `pod_combat_move_desc` enumerates damage sources for the HP-damage
+   section. Add 2 branches per source (drain / no-drain variants).
+6. **Static loc**: `pod_combat_static_l_english.yml` — add 2 new
+   loc keys: `pod_combat_desc_hp_damage_X` and
+   `pod_combat_desc_hp_damage_X_drain`.
+7. **Combat-log marker**: `pod_combat_log_custom_loc.txt` —
+   `PODCombatDamageSourceMarker` enumerates sources for the log icon.
+   Add a branch.
+8. **Game concept**: `pod_combat_concepts.txt` — add a concept
+    entry so the source name is hover-able as a concept tooltip.
+9. **Error suppression**: `pod_combat_error_suppression_effects.txt`
+    — add `POD_combat_suppress_flag = { FLAG = X }`. Required because
+    the flag is set via macro substitution and read via customizable
+    localization (both validator-invisible).
+10. **Damage icon**: optionally add `gfx/interface/icons/combat/X_damage.dds`
+    if visual styling is desired.
+
+### Adding a new outcome flag
+
+E.g. a new `pod_combat_last_outcome` value beyond the current
+`attack` / `heal` / `morale_damage` / `morale_healed` / `utility`.
+The 3-axis result model is documented in §4 above; this checklist
+covers the cross-file impact of expanding the outcome axis.
+
+1. **Set the flag**: pick the writer site. Existing writers live in
+   `pod_combat_effects.txt` (e.g. `pod_combat_set_outcome_if_unset_effect`).
+2. **Customizable loc dispatcher**: `pod_combat_log_custom_loc.txt`
+   — `PODCombatLogResultText` adds a new branch on
+   `scope:entry.var:outcome = flag:X`.
+3. **Loc key**: `pod_combat_static_l_english.yml` — add the new
+   `pod_combat_log_result_text_X` (and any sub-keys if branching
+   further on attack_result).
+4. **Partition triggers**: `pod_combat_partition_triggers.txt` —
+   any partition trigger that should include / exclude the new
+   outcome (e.g. `pod_combat_result_code_indicates_contact_trigger`,
+   `pod_combat_result_code_indicates_damage_trigger`). Audit each.
+5. **Rider gate**: `pod_combat_rider_condition_passes_trigger` in
+   `pod_combat_move_execution_triggers.txt` — if the outcome is
+   rider-eligible (carries chained damage / heal / morale riders),
+   add a branch to the rider condition dispatcher.
+6. **Damage payload reader**:
+   `pod_combat_apply_damage_payload_effect` may need an outcome-aware
+   branch if the new flag should change payload-application logic.
+7. **Error suppression**: `pod_combat_error_suppression_effects.txt`
+   — `POD_combat_suppress_flag = { FLAG = X }`.
+8. **Documentation**: update §4 result codes table in this file with
+   the new flag's meaning and the partition triggers that include
+   it.
+
+### Adding a new workspace mirror field
+
+Each field a combatant carries that needs to be readable across
+both the actor and target lifecycle phases of an action lives as a
+mirror pair (`pod_combat_actor_X` / `pod_combat_target_X`) on the
+combat host, hydrated from the slot story at load time and pushed
+back at save time. Because the load/save paths are parametric over
+`SIDE = actor|target`, a new mirror is one line per helper (not one per
+side) — ~5 sites total:
+
+1. **Slot story field**: declare via `pod_combat_init_slot_*` or a
+   move-execution writer; document in §1 above.
+2. **Load (both sides)**: add the slot→workspace copy to
+   `pod_combat_load_side_from_story_helper` in
+   `pod_combat_group_effects.txt`. One line covers actor + target — the
+   public `load_actor` / `load_target` effects are thin `{ SIDE = ... }`
+   wrappers over it.
+3. **Save (both sides)**: add the workspace→slot writeback to
+   `pod_combat_save_side_to_story_helper` (same file).
+4. **Debug assert (both sides)**: add a presence- or value-match
+   assertion to the parametric
+   `pod_combat_debug_assert_side_slot_match_effect` in
+   `pod_combat_debug_effects.txt` (the actor/target asserts wrap it).
+5. **Cleanup**: `pod_combat_cleanup_effect` in `pod_combat_effects.txt`
+   — add `remove_variable` for the actor and target workspace vars.
+6. **Workspace-cleaned assertion**: optionally extend
+   `POD_combat_assert_workspace_cleaned_effect` in
+   `pod_combat_debug_effects.txt` §4 if the field is high-signal
+   (workspace state that would clearly cause bugs if leaked).
+7. **Error suppression**: if the variable is set parametrically (rather
+   than via literal `set_variable = pod_combat_actor_X`), add
+   `POD_combat_suppress_log_entry_var = { VAR = X }` or
+   `POD_combat_suppress_optional_move_var = { VAR = X }` in
+   `pod_combat_error_suppression_effects.txt`.
+8. **Documentation**: update the §1 Variable namespace table.
+
+### Adding a new capability flag
+
+E.g. `checks_X`, `requires_X` on the move story — capability flags
+gate behavior in the contact resolver and related pipelines.
+
+1. **Setter**: `pod_combat_move_init_effects.txt` —
+   `POD_combat_move_set_X` per-flag setter OR use the generic
+   `POD_combat_move_set_flag = { NAME = X }`.
+2. **Reader**: the gate that consumes the flag — typically
+   `pod_combat_resolve_contact_effect`, `pod_combat_check_guard_effect`,
+   or another pipeline stage in `pod_combat_effects.txt` /
+   `pod_combat_move_effects.txt`. Reads via
+   `scope:move.var:X` or `has_variable = X`.
+3. **Error suppression**:
+   `POD_combat_suppress_optional_move_var = { VAR = X }` in
+   `pod_combat_error_suppression_effects.txt`.
+4. **CSV column** (if exposed to designers):
+   `pod_combat_skills_master.csv` adds the column;
+   `generate_combat_files.py` reads it and emits the setter call.
+5. **Documentation**:
+   `common\scripted_effects\POD_combat\COMBAT_MOVE_AUTHORING_GUIDE.info` documents
+   the column's semantics for designers.
+6. **Capability default**: if the flag has an attack-type default,
+   update the resolver section of `pod_combat_move_init_effects.txt`
+   that applies defaults from `attack_type`.

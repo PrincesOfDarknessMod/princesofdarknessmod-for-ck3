@@ -12,322 +12,313 @@
 # never executes at runtime. The parser still walks the body when checking
 # set/use pairing, so a literal `set_variable` / `add_character_flag` /
 # `has_variable` / `this = flag:X` inside an always=no branch counts as
-# a set or use. Mirrors PoD's own POD_error_suppression_unused_flag /
-# _unset_flag helpers in
-# POD Reference/common/scripted_effects/POD_error_suppression_effects.txt.
+# a set or use.
 #
-# Sections below cover, in order:
-#   1. Debug character flags — console-only toggles + desync tripwire.
-#   2. Log-entry story_cycle vars — consumed by the GUI row template
-#      and the PODCombatLog* custom_loc dispatchers.
-#   3. Optional move-story vars — written parametrically by the modular
-#      setters in pod_combat_move_init_effects.txt; the analyzer can't
-#      pair the `set_variable = { name = $X$ ... }` macro substitution
-#      with the literal `has_variable = X` reads in the runtime engine.
-#   4. Flag-sink — literal SETs for flag values the runtime only writes
-#      via macro substitution (`flag:$CODE$`).
-#   5. Flag uses — literal USEs for flag values the runtime only reads
-#      via customizable_localization (custom_loc reads don't count per
-#      the validator's localization exclusion).
-#   6. Event target aliases — saved-scope names the custom_loc dispatcher
-#      reads but that are only set in GUI raw_text (GuiScope.AddScope).
+# Three parametric helpers below mirror PoD's
+# POD_error_suppression_unused_flag / _unset_flag in
+# POD Reference/common/scripted_effects/POD_error_suppression_effects.txt,
+# but combat-flavored:
+#   - POD_combat_suppress_optional_move_var — literal SET for an optional
+#     move-story var whose setter writes parametrically (analyzer can't
+#     pair `set_variable = { name = $X$ ... }` with literal reads).
+#   - POD_combat_suppress_log_entry_var — literal USE for a log-entry
+#     story var consumed only by GUI bindings and customizable_loc
+#     dispatchers (both validator-invisible blind spots).
+#   - POD_combat_suppress_flag — combined SET + USE for a flag literal
+#     that appears as both a variable value (sink SET) and a custom_loc
+#     dispatcher selector (USE).
 #
-# Adding a new combat var / flag / scope alias: add it to the matching
-# section here, not to a per-call site. Per-move parametric suppressions
-# (POD_error_suppression_unused_flag with $SKILL_KEY$ / $CATEGORY$ /
-# $CONFIG$ / $TARGETING$) stay in POD_init_combat_move since they can
-# only resolve in the macro-substituted scope.
+# Adding a new combat var / flag / scope alias: add one call to the
+# matching helper below, not a per-call site. Per-move parametric
+# suppressions (POD_error_suppression_unused_flag with $SKILL_KEY$ /
+# $CATEGORY$ / $CONFIG$ / $TARGETING$) stay in POD_init_combat_move
+# since they can only resolve in the macro-substituted scope.
 ##############################################################################################
+
+
+##############################################################################
+# PARAMETRIC HELPERS
+##############################################################################
+
+# Provides a literal SET for an optional move-story var. The modular
+# setters in pod_combat_move_init_effects.txt write these parametrically
+# (`set_variable = { name = $X$ ... }`), which the analyzer can't pair
+# with the literal `has_variable = X` reads scattered through the
+# execution engine. Calling this once per optional var name gives the
+# parser the SET it needs.
+#
+# Param: VAR — bare variable name (e.g. ap_cost, energy_cost, hp_damage).
+POD_combat_suppress_optional_move_var = {
+	if = {
+		limit = { always = no }
+		character:POD_wraith_01 = { set_variable = $VAR$ }
+	}
+}
+
+# Provides a literal USE for a log-entry story var. These vars are
+# written by pod_combat_push_log_effect and consumed by the GUI row
+# template (Scope.Var('X').GetValue) or by PODCombatLog* customizable_loc
+# dispatchers — neither of which the validator can see. Calling this
+# once per log-entry var gives the parser the USE it needs.
+#
+# Param: VAR — bare variable name (e.g. outcome, attack_result, round).
+POD_combat_suppress_log_entry_var = {
+	if = {
+		limit = {
+			always = no
+			character:POD_wraith_01 = { has_variable = $VAR$ }
+		}
+	}
+}
+
+# Provides BOTH a SET (via the POD_combat_flag_sink scratch var) and a
+# USE (via literal `this = flag:X`) for a flag literal that appears on
+# both axes — variable value (sink SET) and customizable_loc dispatcher
+# selector (USE). Replaces the prior two-section split where each flag
+# had to be listed once in §4 and again in §5.
+#
+# Param: FLAG — bare flag name (e.g. single_enemy, fire, ATK).
+POD_combat_suppress_flag = {
+	if = {
+		limit = { always = no }
+		character:POD_wraith_01 = {
+			set_variable = { name = POD_combat_flag_sink value = flag:$FLAG$ }
+			remove_variable = POD_combat_flag_sink
+		}
+	}
+	if = {
+		limit = {
+			always = no
+			this = flag:$FLAG$
+		}
+	}
+}
+
+
+##############################################################################
+# MAIN SUPPRESSION DRIVER
+##############################################################################
 
 POD_combat_suppress_validator_warnings = {
 
 	##############################################################################
-	# 1. LOG-ENTRY STORY_CYCLE VARS
+	# 1. DEBUG CHARACTER FLAGS
+	# (kept inline — the character-flag SET/USE pair is a different
+	# pattern from the helpers above; not worth a fourth helper for two
+	# uses.)
 	##############################################################################
 
-	# actor_side — set by pod_combat_push_log_effect on each new log
-	# entry. Read by pod_combat_window.gui's row template to drive
-	# ally / enemy border colour + actor-name tint
-	# (Scope.Var('actor_side').GetValue). The validator can't see GUI
-	# reads — same blind spot as localization. Provides the USE.
-	#
-	# The scope here is the host (PC), not a log_entry story, so the
-	# has_variable check would always be false at runtime — but the
-	# always=no outer guard means it never evaluates. The parser sees
-	# the var name and counts it as used.
+	# pod_combat_debug_active — console-only debug character flag.
+	# Toggled by the user via `add_character_flag pod_combat_debug_active`
+	# in the console. Never set in script. Read by the workspace-mirror
+	# desync assertions in pod_combat_debug_effects.txt and the assertion
+	# gates in pod_combat_group_effects.txt. Provides the SET pair.
+	if = {
+		limit = { always = no }
+		add_character_flag = pod_combat_debug_active
+		remove_character_flag = pod_combat_debug_active
+	}
+
+	# pod_combat_debug_workspace_desync — desync tripwire character flag.
+	# Set by pod_combat_debug_assert_*_effect on a mirror mismatch; read
+	# by the user via console `has_character_flag pod_combat_debug_workspace_desync`
+	# to answer "did the workspace ever desync this session." Never read
+	# in script. Provides the USE pair.
 	if = {
 		limit = {
 			always = no
-			has_variable = actor_side
+			has_character_flag = pod_combat_debug_workspace_desync
 		}
 	}
 
-	# outcome / attack_result / retal_fired — three-axis result vars on
-	# each log entry, set by pod_combat_push_log_effect. Read by
-	# PODCombatLogResultText (outcome + attack_result) and
-	# PODCombatLogRetalRider (retal_fired) custom_loc dispatchers.
-	# Customizable_localization reads don't count to the validator.
-	#
-	# aoe_burst_index — set by push_log when called from inside an AoE
-	# iterator (0 = first row of the move's burst; 1+ = subsequent).
-	# Read by pod_combat_window.gui's buff-rider visibility check to
-	# suppress duplicate buff-rider lines across N per-target rows.
-	# GUI Var reads are validator-invisible — same blind spot as
-	# actor_side above.
-	#
+
+	##############################################################################
+	# 2. LOG-ENTRY STORY VARS
+	##############################################################################
+
+	# actor_side — drives the row's ally/enemy border colour and actor-
+	# name tint via Scope.Var('actor_side') in the GUI template.
+	POD_combat_suppress_log_entry_var = { VAR = actor_side       }
+
+	# Three-axis result model (outcome + attack_result + retal_fired),
+	# the optional retal_agg rider, the AoE per-target burst_index,
+	# system_message bookend flag, and the per-row round counter — all
+	# set by pod_combat_push_log_effect and consumed by the GUI row +
+	# PODCombatLog* custom_loc dispatchers.
+	POD_combat_suppress_log_entry_var = { VAR = outcome          }
+	POD_combat_suppress_log_entry_var = { VAR = attack_result    }
+	POD_combat_suppress_log_entry_var = { VAR = retal_fired      }
+	POD_combat_suppress_log_entry_var = { VAR = retal_agg        }
+	POD_combat_suppress_log_entry_var = { VAR = aoe_burst_index  }
+	POD_combat_suppress_log_entry_var = { VAR = system_message   }
+	POD_combat_suppress_log_entry_var = { VAR = round            }
+
 	# follow_up — set on the POD_combat_sc_context story by
 	# POD_save_event_as_var, consumed in pod_combat.9999 via
 	# `trigger_event = { saved_event_id = scope:sc_ctx.var:follow_up }`.
 	# The trigger_event's saved_event_id parameter doesn't count as a use.
-	if = {
-		limit = { always = no }
-		character:POD_wraith_01 = {
-			if = { limit = { has_variable = outcome          } }
-			if = { limit = { has_variable = attack_result    } }
-			if = { limit = { has_variable = retal_fired      } }
-			if = { limit = { has_variable = retal_agg        } }
-			if = { limit = { has_variable = aoe_burst_index  } }
-			if = { limit = { has_variable = system_message   } }
-			if = { limit = { has_variable = round            } }
-			if = { limit = { has_variable = follow_up        } }
-		}
-	}
+	POD_combat_suppress_log_entry_var = { VAR = follow_up        }
+
 
 	##############################################################################
-	# 2. OPTIONAL MOVE-STORY VARS
+	# 3. OPTIONAL MOVE-STORY VARS
 	##############################################################################
 
 	# Every optional variable the execution engine or AI dispatcher reads
 	# via `has_variable` on a move story. Each one is written by a modular
 	# setter in pod_combat_move_init_effects.txt — but only when a CSV
 	# move exercises that attribute, so if no current move uses (say)
-	# `bypass_dodge`, the analyzer otherwise raises "Variable bypass_dodge
-	# is used but is never set." Provides the SET for each.
+	# `bypass_dodge`, the analyzer would otherwise raise "Variable
+	# bypass_dodge is used but is never set." One call per optional var
+	# name gives it the SET.
 	#
 	# When adding a new POD_combat_move_set_* setter:
 	#   - If the setter is exercised by every move, no entry needed.
-	#   - If it's optional (most are), add the var name below.
-	if = {
-		limit = { always = no }
-		character:POD_wraith_01 = {
-			# Cost vars
-			set_variable = ap_cost
-			set_variable = energy_cost
-			set_variable = gold_cost
-			set_variable = stress_cost
-			set_variable = piety_cost
-			set_variable = prestige_cost
-			# Damage / heal vars
-			set_variable = hp_damage
-			set_variable = morale_damage
-			set_variable = self_damage
-			set_variable = hp_heal
-			set_variable = morale_heal
-			set_variable = heal_type
-			set_variable = damage_source
-			set_variable = damage_type
-			# Tier vars (8 tuples)
-			set_variable = soak_buff_round_tier
-			set_variable = soak_buff_combat_tier
-			set_variable = soak_debuff_round_tier
-			set_variable = soak_debuff_combat_tier
-			set_variable = hit_buff_round_tier
-			set_variable = hit_buff_combat_tier
-			set_variable = hit_debuff_round_tier
-			set_variable = hit_debuff_combat_tier
-			# Presence flags
-			set_variable = set_guard
-			set_variable = dodge
-			set_variable = stealth
-			set_variable = remove_guard
-			set_variable = bypass_dodge
-			set_variable = bypass_stealth
-			set_variable = retaliate_if_hit
-			set_variable = retaliate_if_missed
-			set_variable = retaliate_agg
-			set_variable = is_starter_move
-			set_variable = drain
-			# Parametric non-tier
-			set_variable = ap_gain
-			set_variable = ap_drain
-			set_variable = initiative_debuff
-			set_variable = retaliate_damage
-			# Capability flags — resolved from attack_type defaults +
-			# per-move override_* CSV columns. Read via has_variable
-			# inside pod_combat_resolve_contact_effect and
-			# pod_combat_check_guard_effect.
-			set_variable = checks_spirit_gate
-			set_variable = requires_hit_roll
-			set_variable = checks_guard
-			set_variable = checks_stance
-			# Rider-condition story vars. heal_condition is set by the
-			# generator on drain moves; the other two have setters
-			# defined but no CSV row currently calls them.
-			set_variable = heal_condition
-			set_variable = morale_damage_condition
-			set_variable = self_damage_condition
-		}
-	}
+	#   - If it's optional (most are), add a one-line call below.
+
+	# Cost vars
+	POD_combat_suppress_optional_move_var = { VAR = ap_cost }
+	POD_combat_suppress_optional_move_var = { VAR = energy_cost }
+	POD_combat_suppress_optional_move_var = { VAR = gold_cost }
+	POD_combat_suppress_optional_move_var = { VAR = stress_cost }
+	POD_combat_suppress_optional_move_var = { VAR = piety_cost }
+	POD_combat_suppress_optional_move_var = { VAR = prestige_cost }
+
+	# Damage / heal vars
+	POD_combat_suppress_optional_move_var = { VAR = hp_damage }
+	POD_combat_suppress_optional_move_var = { VAR = morale_damage }
+	POD_combat_suppress_optional_move_var = { VAR = self_damage }
+	POD_combat_suppress_optional_move_var = { VAR = hp_heal }
+	POD_combat_suppress_optional_move_var = { VAR = morale_heal }
+	POD_combat_suppress_optional_move_var = { VAR = heal_type }
+	POD_combat_suppress_optional_move_var = { VAR = damage_source }
+	POD_combat_suppress_optional_move_var = { VAR = damage_type }
+
+	# Tier vars (8 tuples: soak/hit × buff/debuff × round/combat)
+	POD_combat_suppress_optional_move_var = { VAR = soak_buff_round_tier }
+	POD_combat_suppress_optional_move_var = { VAR = soak_buff_combat_tier }
+	POD_combat_suppress_optional_move_var = { VAR = soak_debuff_round_tier }
+	POD_combat_suppress_optional_move_var = { VAR = soak_debuff_combat_tier }
+	POD_combat_suppress_optional_move_var = { VAR = hit_buff_round_tier }
+	POD_combat_suppress_optional_move_var = { VAR = hit_buff_combat_tier }
+	POD_combat_suppress_optional_move_var = { VAR = hit_debuff_round_tier }
+	POD_combat_suppress_optional_move_var = { VAR = hit_debuff_combat_tier }
+
+	# Presence flags
+	POD_combat_suppress_optional_move_var = { VAR = set_guard }
+	POD_combat_suppress_optional_move_var = { VAR = dodge }
+	POD_combat_suppress_optional_move_var = { VAR = stealth }
+	POD_combat_suppress_optional_move_var = { VAR = remove_guard }
+	POD_combat_suppress_optional_move_var = { VAR = bypass_dodge }
+	POD_combat_suppress_optional_move_var = { VAR = bypass_stealth }
+	POD_combat_suppress_optional_move_var = { VAR = retaliate_if_hit }
+	POD_combat_suppress_optional_move_var = { VAR = retaliate_if_missed }
+	POD_combat_suppress_optional_move_var = { VAR = retaliate_agg }
+	POD_combat_suppress_optional_move_var = { VAR = is_starter_move }
+	POD_combat_suppress_optional_move_var = { VAR = drain }
+
+	# Parametric non-tier
+	POD_combat_suppress_optional_move_var = { VAR = ap_gain }
+	POD_combat_suppress_optional_move_var = { VAR = ap_drain }
+	POD_combat_suppress_optional_move_var = { VAR = initiative_debuff }
+	POD_combat_suppress_optional_move_var = { VAR = retaliate_damage }
+
+	# Capability flags — resolved from attack_type defaults + per-move
+	# override_* CSV columns. Read via has_variable inside
+	# pod_combat_resolve_contact_effect and pod_combat_check_guard_effect.
+	POD_combat_suppress_optional_move_var = { VAR = checks_spirit_gate }
+	POD_combat_suppress_optional_move_var = { VAR = requires_hit_roll }
+	POD_combat_suppress_optional_move_var = { VAR = checks_guard }
+	POD_combat_suppress_optional_move_var = { VAR = checks_stance }
+
+	# Rider-condition story vars. heal_condition is set by the
+	# generator on drain moves; the other two have setters defined
+	# but no CSV row currently calls them.
+	POD_combat_suppress_optional_move_var = { VAR = heal_condition }
+	POD_combat_suppress_optional_move_var = { VAR = morale_damage_condition }
+	POD_combat_suppress_optional_move_var = { VAR = self_damage_condition }
+
 
 	##############################################################################
-	# 3. FLAG LITERALS — SETs (flag-sink)
+	# 4. FLAG LITERALS (combined SET + USE)
 	##############################################################################
 
-	# Literal flag SETs for values the runtime only writes via macro
-	# substitution (`set_variable = { value = flag:$CODE$ }`). The
-	# analyzer needs a literal `flag:X` call to pair with each `var:X =
-	# flag:Y` read; parameterized substitutions don't count.
-	#
-	# Categories below match the flag's runtime role:
-	#   - targeting:      var:targeting on the move story
-	#   - damage source:  var:damage_source on the move story
-	#   - damage type:    var:damage_type on the move story
-	#   - category:       var:combat_category on the move story
-	#   - rider condition: var:heal_condition / morale_damage_condition /
-	#                     self_damage_condition on the move story
-	#   - outcome axis:   var:pod_combat_last_outcome on the host
-	#                     (entry.var:outcome on the log entry)
-	#   - attack_result:  var:pod_combat_last_attack_result on the host
-	#                     (entry.var:attack_result on the log entry)
-	if = {
-		limit = { always = no }
-		character:POD_wraith_01 = {
-			# Targeting
-			set_variable = { name = POD_combat_flag_sink value = flag:single_enemy }
-			set_variable = { name = POD_combat_flag_sink value = flag:single_ally }
-			set_variable = { name = POD_combat_flag_sink value = flag:single_pc }
-			set_variable = { name = POD_combat_flag_sink value = flag:self }
-			set_variable = { name = POD_combat_flag_sink value = flag:team_enemy }
-			set_variable = { name = POD_combat_flag_sink value = flag:team_ally }
-			# Damage source (sunlight is a legacy CSV alias the generator
-			# canonicalises to "sun" before emit; sinking both keeps the
-			# alias support resilient to future changes)
-			set_variable = { name = POD_combat_flag_sink value = flag:fire }
-			set_variable = { name = POD_combat_flag_sink value = flag:cold }
-			set_variable = { name = POD_combat_flag_sink value = flag:lightning }
-			set_variable = { name = POD_combat_flag_sink value = flag:sun }
-			set_variable = { name = POD_combat_flag_sink value = flag:sunlight }
-			set_variable = { name = POD_combat_flag_sink value = flag:silver }
-			set_variable = { name = POD_combat_flag_sink value = flag:gold }
-			set_variable = { name = POD_combat_flag_sink value = flag:holy }
-			set_variable = { name = POD_combat_flag_sink value = flag:balefire }
-			# Damage type
-			set_variable = { name = POD_combat_flag_sink value = flag:superficial }
-			set_variable = { name = POD_combat_flag_sink value = flag:aggravated }
-			# Category
-			set_variable = { name = POD_combat_flag_sink value = flag:ATK }
-			set_variable = { name = POD_combat_flag_sink value = flag:DEF }
-			set_variable = { name = POD_combat_flag_sink value = flag:CTL }
-			set_variable = { name = POD_combat_flag_sink value = flag:PWR }
-			# Rider condition
-			set_variable = { name = POD_combat_flag_sink value = flag:always }
-			set_variable = { name = POD_combat_flag_sink value = flag:on_hp_damage }
-			set_variable = { name = POD_combat_flag_sink value = flag:on_contact }
-			set_variable = { name = POD_combat_flag_sink value = flag:on_miss }
-			# Outcome axis
-			set_variable = { name = POD_combat_flag_sink value = flag:attack }
-			set_variable = { name = POD_combat_flag_sink value = flag:heal }
-			set_variable = { name = POD_combat_flag_sink value = flag:morale_damage }
-			set_variable = { name = POD_combat_flag_sink value = flag:morale_healed }
-			set_variable = { name = POD_combat_flag_sink value = flag:utility }
-			# Attack result axis
-			set_variable = { name = POD_combat_flag_sink value = flag:hp_damage }
-			set_variable = { name = POD_combat_flag_sink value = flag:soaked }
-			set_variable = { name = POD_combat_flag_sink value = flag:missed }
-			set_variable = { name = POD_combat_flag_sink value = flag:dodged }
-			set_variable = { name = POD_combat_flag_sink value = flag:stealthed }
-			set_variable = { name = POD_combat_flag_sink value = flag:guard_blocked }
-			# System-message bookend flags — emitted by
-			# pod_combat_push_system_log_effect, read by the
-			# PODCombatLogSystemMessageText custom_loc dispatcher.
-			set_variable = { name = POD_combat_flag_sink value = flag:combat_started }
-			set_variable = { name = POD_combat_flag_sink value = flag:combat_ended_victory }
-			set_variable = { name = POD_combat_flag_sink value = flag:combat_ended_defeat }
-			set_variable = { name = POD_combat_flag_sink value = flag:round_begins }
-			remove_variable = POD_combat_flag_sink
-		}
-	}
+	# Every flag literal the runtime writes via macro substitution
+	# (`set_variable = { value = flag:$CODE$ }`) and reads via
+	# customizable_localization (`var:X = flag:Y` in custom_loc trigger
+	# branches). Listing each via POD_combat_suppress_flag provides
+	# matched SET + USE in one call, with both halves invisible to the
+	# validator otherwise.
 
-	##############################################################################
-	# 4. FLAG LITERALS — USEs
-	##############################################################################
+	# Targeting
+	POD_combat_suppress_flag = { FLAG = single_enemy }
+	POD_combat_suppress_flag = { FLAG = single_ally }
+	POD_combat_suppress_flag = { FLAG = single_pc }
+	POD_combat_suppress_flag = { FLAG = self }
+	POD_combat_suppress_flag = { FLAG = team_enemy }
+	POD_combat_suppress_flag = { FLAG = team_ally }
 
-	# Literal flag USEs for values the runtime only reads via
-	# customizable_localization (entry.var:outcome = flag:X branches in
-	# PODCombatLogResultText, etc.). The validator explicitly excludes
-	# "use in localization" from set/use pairing, so the literal `this =
-	# flag:X` pattern in an always=no branch provides the needed USE.
-	#
-	# Flags that ARE read script-side (e.g. flag:hp_damage in the
-	# partition triggers, flag:attack in the rider gate) don't strictly
-	# need a USE entry here — but listing every sunk flag keeps the
-	# section symmetric with section 4 and ensures no future refactor
-	# that drops a script-side reader silently triggers a warning.
-	if = {
-		limit = {
-			always = no
-			OR = {
-				# Targeting
-				this = flag:single_enemy
-				this = flag:single_ally
-				this = flag:single_pc
-				this = flag:self
-				this = flag:team_enemy
-				this = flag:team_ally
-				# Damage source
-				this = flag:fire
-				this = flag:cold
-				this = flag:lightning
-				this = flag:sun
-				this = flag:sunlight
-				this = flag:silver
-				this = flag:gold
-				this = flag:holy
-				this = flag:balefire
-				# Damage type
-				this = flag:superficial
-				this = flag:aggravated
-				# Category
-				this = flag:ATK
-				this = flag:DEF
-				this = flag:CTL
-				this = flag:PWR
-				# Rider condition
-				this = flag:always
-				this = flag:on_hp_damage
-				this = flag:on_contact
-				this = flag:on_miss
-				# Outcome axis
-				this = flag:attack
-				this = flag:heal
-				this = flag:morale_damage
-				this = flag:morale_healed
-				this = flag:utility
-				# Attack result axis
-				this = flag:hp_damage
-				this = flag:soaked
-				this = flag:missed
-				this = flag:dodged
-				this = flag:stealthed
-				this = flag:guard_blocked
-				# System-message bookend flags
-				this = flag:combat_started
-				this = flag:combat_ended_victory
-				this = flag:combat_ended_defeat
-				this = flag:round_begins
-			}
-		}
-	}
+	# Damage source (sunlight is a legacy CSV alias the generator
+	# canonicalises to "sun" before emit; sinking both keeps the
+	# alias support resilient to future changes)
+	POD_combat_suppress_flag = { FLAG = fire }
+	POD_combat_suppress_flag = { FLAG = cold }
+	POD_combat_suppress_flag = { FLAG = lightning }
+	POD_combat_suppress_flag = { FLAG = sun }
+	POD_combat_suppress_flag = { FLAG = sunlight }
+	POD_combat_suppress_flag = { FLAG = silver }
+	POD_combat_suppress_flag = { FLAG = gold }
+	POD_combat_suppress_flag = { FLAG = holy }
+	POD_combat_suppress_flag = { FLAG = balefire }
+
+	# Damage type
+	POD_combat_suppress_flag = { FLAG = superficial }
+	POD_combat_suppress_flag = { FLAG = aggravated }
+
+	# Category
+	POD_combat_suppress_flag = { FLAG = ATK }
+	POD_combat_suppress_flag = { FLAG = DEF }
+	POD_combat_suppress_flag = { FLAG = CTL }
+	POD_combat_suppress_flag = { FLAG = PWR }
+
+	# Rider condition
+	POD_combat_suppress_flag = { FLAG = always }
+	POD_combat_suppress_flag = { FLAG = on_hp_damage }
+	POD_combat_suppress_flag = { FLAG = on_contact }
+	POD_combat_suppress_flag = { FLAG = on_miss }
+
+	# Outcome axis
+	POD_combat_suppress_flag = { FLAG = attack }
+	POD_combat_suppress_flag = { FLAG = heal }
+	POD_combat_suppress_flag = { FLAG = morale_damage }
+	POD_combat_suppress_flag = { FLAG = morale_healed }
+	POD_combat_suppress_flag = { FLAG = utility }
+
+	# Attack result axis
+	POD_combat_suppress_flag = { FLAG = hp_damage }
+	POD_combat_suppress_flag = { FLAG = soaked }
+	POD_combat_suppress_flag = { FLAG = missed }
+	POD_combat_suppress_flag = { FLAG = dodged }
+	POD_combat_suppress_flag = { FLAG = stealthed }
+	POD_combat_suppress_flag = { FLAG = guard_blocked }
+
+	# System-message bookend flags — emitted by
+	# pod_combat_push_system_log_effect, read by the
+	# PODCombatLogSystemMessageText custom_loc dispatcher.
+	POD_combat_suppress_flag = { FLAG = combat_started }
+	POD_combat_suppress_flag = { FLAG = combat_ended_victory }
+	POD_combat_suppress_flag = { FLAG = combat_ended_defeat }
+	POD_combat_suppress_flag = { FLAG = round_begins }
+
 
 	##############################################################################
 	# 5. EVENT TARGET ALIASES
+	# (kept inline — save_scope_as inside an always=no block is a
+	# different pattern from the flag/var helpers; both names live here
+	# because they're set only in GUI raw_text via GuiScope.AddScope,
+	# never in scripted-effect bodies the analyzer can see.)
 	##############################################################################
 
-	# Saved-scope names the custom_loc dispatchers read (scope:entry /
-	# scope:move) but that are only set in GUI raw_text via
-	# `GuiScope.AddScope('entry', ...).AddScope('move', ...)` — outside
-	# any scripted-effect, so the analyzer never sees the writes.
-	# `save_scope_as` inside an always=no branch provides the SET.
 	if = {
 		limit = { always = no }
 		save_scope_as = entry

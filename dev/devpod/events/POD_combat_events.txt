@@ -31,7 +31,9 @@ namespace = pod_combat_debug
 
 # Simple hidden follow-up for debug interactions. Cleans the
 # shirtlessness flag pod_combat_debug_interaction may have applied
-# and shows a result toast. 
+# and shows a result toast. The engaged_in_single_combat flag is
+# released earlier by pod_combat.9999 (the integrated bridge event)
+# — this debug follow-up doesn't touch it.
 
 pod_combat_debug.0001 = {
 	hidden = yes
@@ -43,19 +45,39 @@ pod_combat_debug.0001 = {
 			DEFENDER = scope:sc_defender
 		}
 
+		# Guard the scope derefs: a draw / mutual-KO can leave sc_victor and
+		# sc_loser unset, and an unguarded right_icon on an unset scope errors.
 		if = {
-			limit = { scope:sc_victor = root }
+			# PC won — show the defeated opponent.
+			limit = {
+				exists = scope:sc_victor
+				scope:sc_victor = root
+				exists = scope:sc_loser
+			}
 			send_interface_toast = {
 				title = pod_combat_debug_victory_toast
 				left_icon = root
 				right_icon = scope:sc_loser
 			}
 		}
-		else = {
+		else_if = {
+			# PC lost — show the victor.
+			limit = {
+				exists = scope:sc_victor
+				NOT = { scope:sc_victor = root }
+			}
 			send_interface_toast = {
 				title = pod_combat_debug_defeat_toast
 				left_icon = root
 				right_icon = scope:sc_victor
+			}
+		}
+		else = {
+			# Draw / mutual-KO / unresolved victor — single-portrait toast,
+			# no second icon to dereference.
+			send_interface_toast = {
+				title = pod_combat_debug_draw_toast
+				left_icon = root
 			}
 		}
 	}
@@ -95,485 +117,44 @@ pod_combat.9999 = {
 	hidden = yes
 
 	immediate = {
-		# ── Read context story through PC pointer ──
-		# pod_combat_sc_context is the only pointer var we keep on the
-		# PC during a duel-driven combat — it points to the
-		# POD_combat_sc_context story where the launcher stashed every
-		# saved scope, every parent-event alias, the rule flags, and
-		# the follow-up event id. All restoration below reads through
-		# var:pod_combat_sc_context.var:X.
-		var:pod_combat_sc_context = { save_scope_as = sc_ctx }
+		# Thin orchestrator. Six finalization phases, each named via a
+		# helper effect in pod_combat_sc_context_effects.txt — see that
+		# file's header for the full sequence rationale + per-phase
+		# contract. Touching any one phase = edit one helper, not this
+		# event body.
 
-		# ── Reconstruct character scopes from stash ──
-		scope:sc_ctx.var:initiator = { save_scope_as = sc_initiator }
-		scope:sc_ctx.var:attacker  = { save_scope_as = sc_attacker }
-		scope:sc_ctx.var:defender  = { save_scope_as = sc_defender }
+		# Phase 1: Reconstruct sc_initiator / sc_attacker / sc_defender
+		# + alias scopes (victim, recipient, target, attacker, challenger,
+		# adversary) + sc_victor / sc_loser from the PC's
+		# pod_combat_sc_context pointer.
+		POD_combat_restore_sc_context_effect = yes
 
-		# Defender aliases (covers victim, recipient, defender, target, adversary)
-		scope:sc_ctx.var:defender = { save_scope_as = victim }
-		scope:sc_ctx.var:defender = { save_scope_as = recipient }
-		scope:sc_ctx.var:defender = { save_scope_as = defender }
-		scope:sc_ctx.var:defender = { save_scope_as = target }
-		scope:sc_ctx.var:defender = { save_scope_as = adversary }
+		# Phase 2: Rebuild parent-event aliases (scope:spirit, scope:actor,
+		# scope:my_rival, etc. — 24 entries). Whitelist must stay
+		# synchronised with pod_combat_sc_stash_parent_aliases_effect in
+		# the launcher.
+		pod_combat_sc_restore_parent_aliases_effect = yes
 
-		# Attacker aliases (covers attacker, challenger)
-		scope:sc_ctx.var:attacker = { save_scope_as = attacker }
-		scope:sc_ctx.var:attacker = { save_scope_as = challenger }
+		# Phase 3: Round-trip the rule flags (fatality / fixed / locale)
+		# from sc_ctx variables into saved-scope flag values. Also
+		# captures sc_finished and victory_type for the follow-up.
+		POD_combat_restore_sc_rule_flags_effect = yes
 
-		# ── Restore custom parent-event aliases ──
-		# Rebuild any caller-specific scope names (scope:spirit,
-		# scope:actor, scope:my_rival, etc.) that the parent event
-		# saved before handing off to the minigame. Stash is populated
-		# by pod_combat_sc_stash_parent_aliases_effect in the launcher;
-		# the matching whitelist lives there too. Missing stashes are
-		# skipped — any follow-up that reads an un-stashed alias will
-		# still throw the same "Undefined event target" error, and the
-		# alias needs to be added to the launcher whitelist.
-		#
-		# `?=` is CK3's safe-scope-navigation operator: if the LHS
-		# resolves (the alias_X var is set on sc_ctx), the engine
-		# switches scope to the var's value and runs the body; if not,
-		# the line is a silent no-op. Replaces the explicit
-		# `if = { limit = { exists ... } ... }` wrapper one line at a time.
-		scope:sc_ctx.var:alias_spirit           ?= { save_scope_as = spirit }
-		scope:sc_ctx.var:alias_alastor          ?= { save_scope_as = alastor }
-		scope:sc_ctx.var:alias_wyrm_champion    ?= { save_scope_as = wyrm_champion }
-		scope:sc_ctx.var:alias_vampire_attacker ?= { save_scope_as = vampire_attacker }
-		scope:sc_ctx.var:alias_actor            ?= { save_scope_as = actor }
-		scope:sc_ctx.var:alias_parent           ?= { save_scope_as = parent }
-		scope:sc_ctx.var:alias_aggressor_vassal ?= { save_scope_as = aggressor_vassal }
-		scope:sc_ctx.var:alias_distant_knight   ?= { save_scope_as = distant_knight }
-		scope:sc_ctx.var:alias_snitch           ?= { save_scope_as = snitch }
-		scope:sc_ctx.var:alias_strong_leader    ?= { save_scope_as = strong_leader }
-		scope:sc_ctx.var:alias_warrior_monk     ?= { save_scope_as = warrior_monk }
-		scope:sc_ctx.var:alias_attacked_rival   ?= { save_scope_as = attacked_rival }
-		scope:sc_ctx.var:alias_my_rival         ?= { save_scope_as = my_rival }
-		scope:sc_ctx.var:alias_rival_burner     ?= { save_scope_as = rival_burner }
-		scope:sc_ctx.var:alias_rival_on_sight   ?= { save_scope_as = rival_on_sight }
-		scope:sc_ctx.var:alias_rivals_child     ?= { save_scope_as = rivals_child }
-		scope:sc_ctx.var:alias_og_root          ?= { save_scope_as = og_root }
-		scope:sc_ctx.var:alias_root_for_loc     ?= { save_scope_as = root_for_loc }
-		scope:sc_ctx.var:alias_recidivist       ?= { save_scope_as = recidivist }
-		scope:sc_ctx.var:alias_owner            ?= { save_scope_as = owner }
-		scope:sc_ctx.var:alias_shadowflame      ?= { save_scope_as = shadowflame }
-		scope:sc_ctx.var:alias_burned_artifact  ?= { save_scope_as = burned_artifact }
-		scope:sc_ctx.var:alias_scheme           ?= { save_scope_as = scheme }
-		scope:sc_ctx.var:alias_vassal_claim     ?= { save_scope_as = vassal_claim }
+		# Phase 4: Side-effect finalization — release engaged flags,
+		# bump victor's primary armament artifact_duel_var, apply
+		# fatality-mode-aware death outcomes.
+		POD_combat_apply_duel_finalization_effect = yes
 
-		# Victor / loser from minigame result
-		if = {
-			limit = {
-				has_variable = pod_combat_winner
-				has_variable = pod_combat_loser
-			}
-			var:pod_combat_winner = { save_scope_as = sc_victor }
-			var:pod_combat_loser  = { save_scope_as = sc_loser }
-		}
+		# Phase 5: Fire the follow-up event. Three-step fallback chain
+		# (initiator → defender → attacker, gated on is_alive) matches
+		# vanilla's pattern so `root` of the follow-up is the same
+		# character vanilla would have used.
+		POD_combat_fire_sc_followup_effect = yes
 
-		# ── Reconstruct rule-flag scope values ──
-		# save_scope_value_as accepts literal flag values (`flag:X`) but
-		# does NOT accept a flag-typed variable as its `value`. It
-		# evaluates value as a script-value expression and rejects the
-		# flag with "Got value of type 'flag'". So every flag has to
-		# round-trip through an enumerated if/else_if chain comparing
-		# the stored variable against each known literal. Vanilla's
-		# `00_single_combat_effects.txt` writes the flags this way too;
-		# we just have to read them back the same way we'd write them
-		#
-		# NOTE on `fixed`: round-tripped for follow-up event
-		# compatibility (any handler reading scope:fixed sees what the
-		# parent event passed). Reaching this restore path always means
-		# scope:fixed = flag:no — the configure_start_*_combat_effect
-		# overrides route FIXED = sc_attacker / sc_defender duels around
-		# the minigame entirely (single combat falls through to vanilla;
-		# group combat falls through to the auto-resolve branch which
-		# honors FIXED before its prowess coin flip). Restoring the
-		# value here keeps the follow-up event reading a consistent
-		# rule set regardless of which path resolved the duel.
-
-		# Fatality
-		if = {
-			limit = { scope:sc_ctx.var:fatality = flag:always }
-			save_scope_value_as = { name = fatality value = flag:always }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:fatality = flag:default }
-			save_scope_value_as = { name = fatality value = flag:default }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:fatality = flag:possible }
-			save_scope_value_as = { name = fatality value = flag:possible }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:fatality = flag:practice }
-			save_scope_value_as = { name = fatality value = flag:practice }
-		}
-		else = {
-			save_scope_value_as = { name = fatality value = flag:no }
-		}
-		if = {
-			limit = { scope:sc_ctx.var:fixed = flag:sc_attacker }
-			save_scope_value_as = { name = fixed value = flag:sc_attacker }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:fixed = flag:sc_defender }
-			save_scope_value_as = { name = fixed value = flag:sc_defender }
-		}
-		else = {
-			save_scope_value_as = { name = fixed value = flag:no }
-		}
-		if = {
-			limit = { scope:sc_ctx.var:locale = flag:battlefield }
-			save_scope_value_as = { name = locale value = flag:battlefield }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:terrain_scope }
-			save_scope_value_as = { name = locale value = flag:terrain_scope }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:throne_room }
-			save_scope_value_as = { name = locale value = flag:throne_room }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:army_camp }
-			save_scope_value_as = { name = locale value = flag:army_camp }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:tavern }
-			save_scope_value_as = { name = locale value = flag:tavern }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:feast }
-			save_scope_value_as = { name = locale value = flag:feast }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:sitting_room }
-			save_scope_value_as = { name = locale value = flag:sitting_room }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:random_nice_day }
-			save_scope_value_as = { name = locale value = flag:random_nice_day }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:corridor_night }
-			save_scope_value_as = { name = locale value = flag:corridor_night }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:alley_night }
-			save_scope_value_as = { name = locale value = flag:alley_night }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:alley_day }
-			save_scope_value_as = { name = locale value = flag:alley_day }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:corridor_day }
-			save_scope_value_as = { name = locale value = flag:corridor_day }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:temple }
-			save_scope_value_as = { name = locale value = flag:temple }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:courtyard }
-			save_scope_value_as = { name = locale value = flag:courtyard }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:dungeon }
-			save_scope_value_as = { name = locale value = flag:dungeon }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:docks }
-			save_scope_value_as = { name = locale value = flag:docks }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:market }
-			save_scope_value_as = { name = locale value = flag:market }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:ep2_travel_bridge }
-			save_scope_value_as = { name = locale value = flag:ep2_travel_bridge }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:apocalyptic }
-			save_scope_value_as = { name = locale value = flag:apocalyptic }
-		}
-		else_if = {
-			limit = { scope:sc_ctx.var:locale = flag:duel_locale }
-			save_scope_value_as = { name = locale value = flag:duel_locale }
-		}
-		else = {
-			# Unrecognised / unset locale — fall back to battlefield,
-			# the safe default that every duel template handles. Keep
-			# this list synchronised with PoD's
-			# single_combat_events.txt background overrides; missing
-			# locales fall through to battlefield and lose the
-			# original visual context.
-			save_scope_value_as = { name = locale value = flag:battlefield }
-		}
-
-		# If the locale uses terrain_scope, follow PoD's pattern of
-		# saving the defender's location as the background.
-		if = {
-			limit = { scope:locale = flag:terrain_scope }
-			scope:sc_defender.location = { save_scope_as = background_terrain_scope }
-		}
-
-		save_scope_value_as = { name = sc_finished  value = yes }
-		save_scope_value_as = { name = victory_type value = flag:skill }
-
-		# ── Release engaged flags ──
-		scope:sc_attacker = {
-			if = {
-				limit = { is_alive = yes }
-				remove_variable = engaged_in_single_combat
-			}
-		}
-		scope:sc_defender = {
-			if = {
-				limit = { is_alive = yes }
-				remove_variable = engaged_in_single_combat
-			}
-		}
-
-		# ── Victor weapon: artifact_duel_var increment ──
-		# Tracks how many duels the victor's primary armament has won,
-		# feeding the artifact.4080 narrative chain ("your weapon has
-		# fought N duels" lore events). First win on a given artifact
-		# sets the var to 1; subsequent wins increment.
-		#
-		# Verbatim port from PoD's finalise_combat_results_effect
-		# (POD Reference/events/single_combat_events.txt ~line 2622),
-		# which the minigame intercepts and replaces — without porting
-		# this block, intercepted-duel victors silently lose artifact
-		# duel-count progression even when the rest of the result
-		# pipeline (fera ferocity, fatality death, follow-up) fires
-		# correctly. Inserted between engaged-flag release and the
-		# death-only outcomes block to match vanilla's ordering.
-		#
-		# Two-branch structure handles "first duel for this artifact"
-		# (sets the var to 1) vs "subsequent duel" (change_variable add
-		# = 1). random_character_artifact picks a single weapon when the
-		# victor has multiple equipped primary armaments — mirrors
-		# vanilla rather than incrementing every weapon.
-		#
-		# Defensive `exists = scope:sc_victor` guard matches the death-
-		# outcomes block below: a draw / mutual KO leaves sc_victor
-		# unset, in which case no artifact gets the progression bump.
-		if = {
-			limit = { exists = scope:sc_victor }
-			scope:sc_victor = {
-				if = {
-					limit = {
-						any_character_artifact = {
-							is_equipped = yes
-							artifact_slot_type = primary_armament
-							NOT = { has_variable = artifact_duel_var }
-						}
-					}
-					random_character_artifact = {
-						limit = {
-							is_equipped = yes
-							artifact_slot_type = primary_armament
-							NOT = { has_variable = artifact_duel_var }
-						}
-						set_variable = {
-							name  = artifact_duel_var
-							value = 1
-						}
-					}
-				}
-				else_if = {
-					limit = {
-						any_character_artifact = {
-							is_equipped = yes
-							artifact_slot_type = primary_armament
-							has_variable = artifact_duel_var
-						}
-					}
-					random_character_artifact = {
-						limit = {
-							is_equipped = yes
-							artifact_slot_type = primary_armament
-							has_variable = artifact_duel_var
-						}
-						change_variable = {
-							name = artifact_duel_var
-							add  = 1
-						}
-					}
-				}
-			}
-		}
-
-		# ── Apply death-only outcomes ──
-		# NOTE: Wound damage was written to PoD health tracks live
-		# during move execution (the damage helpers in
-		# pod_combat_effects.txt call POD_increase_wounds_* immediately,
-		# not deferred). PoD's wound pipeline invokes
-		# POD_health_death_check_effect inline whenever wounds land —
-		# see POD_apply_wound_boxes in
-		# POD Reference/common/scripted_effects/POD_health_track_effects.txt
-		# and the override note at the top of pod_combat_death_gate_overrides.txt
-		# — so a lethal hit kills the loser the moment it resolves,
-		# subject to the pod_combat_nonfatal_active gate for non-fatal
-		# duels. Re-applying POD_increase_wounds_hostile_effect here
-		# would double-damage the loser and risk a duplicate death
-		# trigger.
-		#
-		# For fatality modes that guarantee a kill (always, default-tribal),
-		# we still call pod_death directly so the outcome is deterministic
-		# even when the wound math fell short of the death threshold.
-		if = {
-			limit = { exists = scope:sc_victor }
-
-			if = {
-				limit = { scope:fatality = flag:practice }
-			}
-			else = {
-				# POD_fera_add_renown_effect grants renown to its
-				# execution scope (see POD Reference/common/scripted_effects/
-				# POD_fera/POD_fera_renown_effects.txt). PoD's own duel
-				# finalizer fires this inside the attacker context;
-				# pod_combat.9999 enters from the PC combat host instead,
-				# so without the scope:sc_victor wrap the bare call lands
-				# the ferocity reward on the player even when an AI won.
-				# Wrap into the actual victor — fera ferocity tracks the
-				# combatant who closed the kill, regardless of which side
-				# initiated.
-				scope:sc_victor = {
-					POD_fera_add_renown_effect = { TYPE = ferocity }
-				}
-			}
-
-			if = {
-				limit = { scope:fatality = flag:default }
-				# Tribal governments: tribal duels are always to the death.
-				if = {
-					limit = {
-						scope:sc_attacker = {
-							OR = {
-								AND = {
-									is_ruler = yes
-									government_has_flag = government_is_tribal
-								}
-								AND = {
-									is_ruler = no
-									exists = court_owner
-									scope:sc_attacker.court_owner = { government_has_flag = government_is_tribal }
-								}
-								AND = {
-									is_ruler = no
-									exists = host
-									scope:sc_attacker.host = { government_has_flag = government_is_tribal }
-								}
-								AND = {
-									is_ruler = no
-									NOR = { exists = court_owner exists = host }
-									scope:sc_defender = {
-										OR = {
-											AND = { is_ruler = yes government_has_flag = government_is_tribal }
-											AND = { is_ruler = no exists = court_owner scope:sc_defender.court_owner = { government_has_flag = government_is_tribal } }
-											AND = { is_ruler = no exists = host scope:sc_defender.host = { government_has_flag = government_is_tribal } }
-										}
-									}
-								}
-							}
-						}
-					}
-					# is_alive guard: under fatality = no this branch can't
-					# fire (the path is gated on `else_if` against
-					# flag:default), but live minigame damage can still
-					# kill the loser during fatality = default tribal
-					# fights — re-calling pod_death on a corpse spams the
-					# error log and risks duplicate downstream effects
-					# (kinslayer, doctrine triggers). Same pattern at the
-					# flag:always branch below.
-					if = {
-						limit = { scope:sc_loser = { is_alive = yes } }
-						scope:sc_loser = {
-							pod_death = { killer = scope:sc_victor death_reason = death_duel }
-						}
-					}
-					if = {
-						limit = { scope:sc_victor = { faith = { has_doctrine = tenet_cranial_trophies } } }
-						tgp_cranial_trophies_beheading_effect = { KILLER = scope:sc_victor DEAD = scope:sc_loser }
-					}
-				}
-				# Non-tribal default: trust minigame damage (no forced kill).
-			}
-			else_if = {
-				limit = { scope:fatality = flag:always }
-				scope:sc_victor = {
-					if = {
-						limit = {
-							this = scope:sc_attacker
-							NOT = { has_execute_reason = scope:sc_loser }
-						}
-						add_kinslayer_trait_or_nothing_effect = { VICTIM = scope:sc_loser }
-					}
-				}
-				# is_alive guard — see comment on the tribal-default
-				# branch above. fatality = always can still race with
-				# in-combat lethal damage (especially with the nonfatal
-				# round-end strip now fixed); the loser may already be
-				# down by the time pod_combat.9999 fires.
-				if = {
-					limit = { scope:sc_loser = { is_alive = yes } }
-					scope:sc_loser = {
-						pod_death = { killer = scope:sc_victor death_reason = death_duel }
-					}
-				}
-				if = {
-					limit = { scope:sc_victor = { faith = { has_doctrine = tenet_cranial_trophies } } }
-					tgp_cranial_trophies_beheading_effect = { KILLER = scope:sc_victor DEAD = scope:sc_loser }
-				}
-			}
-			# flag:no       — writeback already capped loser's track at 1 empty box; no further action.
-			# flag:possible — trust minigame damage; periodic death check handles full-track kills.
-		}
-
-		# ── Fire the follow-up event ──
-		# Match vanilla's three-step fallback chain (see
-		# events/single_combat_events.txt for the canonical pattern)
-		# so the follow-up's `root` is the same character vanilla
-		# would have used. The intercept gate only requires the PC
-		# to be one of {sc_attacker, sc_defender}. It does NOT
-		# require PC = sc_initiator. AI-initiated interactions
-		# targeting the PC (Sabbat alastor challenges, spirit
-		# attacks, etc.) fire with sc_initiator = AI even though
-		# PC is the defender, so the fallback chain matters.
-		#
-		# Fallback chain: initiator → defender → attacker. The chain
-		# exists because trigger_event silently no-ops if the host
-		# character is dead, and combatants in this duel may have died.
-		# Vanilla's comment is explicit: "Doesn't hugely matter
-		# technically, since the output event should be from a neutral
-		# scope, but if they're dead then the event won't fire and the
-		# chain silently invalidates."
-		if = {
-			limit = { scope:sc_initiator = { is_alive = yes } }
-			scope:sc_initiator = {
-				trigger_event = { saved_event_id = scope:sc_ctx.var:follow_up }
-			}
-		}
-		else_if = {
-			limit = { scope:sc_defender = { is_alive = yes } }
-			scope:sc_defender = {
-				trigger_event = { saved_event_id = scope:sc_ctx.var:follow_up }
-			}
-		}
-		else = {
-			scope:sc_attacker = {
-				trigger_event = { saved_event_id = scope:sc_ctx.var:follow_up }
-			}
-		}
-
-		# ── Full cleanup ──
-		# pod_combat_cleanup_effect ends the context story and removes
-		# the pointer var. Atomic teardown — every var that lived on the
-		# story (sc_* refs, rule flags, alias snapshots, follow-up id)
-		# vanishes when end_story fires.
+		# Phase 6: Full cleanup. pod_combat_cleanup_effect ends the
+		# context story and removes the pointer var. Atomic teardown
+		# — every var that lived on the story (sc_* refs, rule flags,
+		# alias snapshots, follow-up id) vanishes when end_story fires.
 		pod_combat_cleanup_effect = yes
 	}
 }
