@@ -1,0 +1,327 @@
+# Combat-PoD Duel Builder Guide
+
+This guide covers how to start a combat-minigame fight from script --
+the create / add / finalize builder.
+
+For the system internals (variable namespace, slot lifecycle, execution
+phases, result codes), see `COMBAT_REFERENCE.info`. This guide focuses on
+the authoring workflow: how to assemble a roster and kick off a fight.
+
+The builder effects live in
+`devpod/common/scripted_effects/POD_combat/pod_combat_group_effects.txt`.
+
+---
+
+## Do you even need the builder?
+
+Most duels should NOT call the builder directly.
+
+PoD's whole duel system (`hold_court`, schemes, activity events, the
+`single_combat.*` chain, etc.) routes through
+`configure_start_single_combat_effect`. the combat-minigame overrides that
+effect (in `PoD_override_single_combat_effects.txt`) and, for any
+PC-involved fight, automatically builds a **1v1** for you -- create + add
+the opponent + finalize, with the full caller context (follow-up event,
+parent-event scope aliases, rule flags) preserved.
+
+So if you're writing a normal story duel, just call
+`configure_start_single_combat_effect` the way PoD always has. The
+minigame takes over for free.
+
+**Call the builder directly only when you want a custom roster** the
+single-combat path can't express -- group fights, hand-picked
+combatants, ally/enemy line-ups that aren't "PC vs one opponent." The
+debug interactions in `POD_debug_interactions.txt` are the worked
+reference for this; the 1vN / Nv1 / NvN ones build their rosters by hand.
+
+---
+
+## The builder at a glance
+
+Three steps, five effects:
+
+```
+<PC scope> = {
+    POD_combat_create_duel_effect    = { ...config... }   # 1. once
+    POD_combat_duel_add_ally_effect  = { CHARACTER = X }  # 2. 0-4 times
+    POD_combat_duel_add_enemy_effect = { CHARACTER = X }  # 2. 1-5 times
+    POD_combat_finalize_duel_effect  = yes                # 3. once
+}
+```
+
+| Effect | When | What it does |
+|---|---|---|
+| `POD_combat_create_duel_effect` | once, first | Scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC in **slot 0** |
+| `POD_combat_duel_add_ally_effect` | 0-4 times | Seats a character in the next free **ally** slot (1-4) |
+| `POD_combat_duel_add_enemy_effect` | 1-5 times | Seats a character in the next free **enemy** slot (5-9); the **first** enemy goes to slot 5 |
+| `POD_combat_finalize_duel_effect` | once, last | Inits every slot, computes hit chances, opens the combat window, starts round 1 |
+
+The slot layout never changes: **PC = slot 0**, allies = 1-4, primary
+opponent + reinforcements = 5-9. Team is derived from the slot index
+(0-4 player, 5-9 enemy) -- there is no "mode" variable any more.
+
+---
+
+## The golden rules
+
+1. **Run everything in the PC's scope.** The PC is the combat host --
+   all the state hangs off them, and they are slot 0. If your `on_accept`
+   has `scope:actor = <the PC>`, wrap the builder in `scope:actor = { ... }`.
+
+2. **Never add the PC.** `create_duel` already seats them in slot 0.
+   Adding them again would burn an ally slot on a duplicate.
+
+3. **The first enemy you add is the "primary opponent" (slot 5).** It's
+   the hit-chance baseline for the whole player team and the PC's default
+   target. Add the headline enemy first; reinforcements after.
+
+4. **Pass SAVED SCOPES to `CHARACTER`, never a `var:` chain.** `add_*`
+   (and the init pass behind finalize) re-scope onto the character, so a
+   scope-relative `var:foo.var:bar` would resolve against the wrong scope
+   and throw. Use `save_scope_as` (or an already-saved scope like
+   `scope:recipient`) and pass that.
+
+5. **Rosters cap at 5 v 5.** Slots 0-4 (PC + 4 allies) vs 5-9 (5 enemies).
+   Extra `add_*` calls past a full side silently drop -- no error, no
+   overflow.
+
+6. **`finalize` is what opens the window.** Until you call it,
+   `pod_combat_active` is not set and the GUI stays hidden. Build the
+   whole roster first, finalize last.
+
+---
+
+## Gathering a roster from a loop
+
+When you pull combatants from `every_relation` / `every_knight` / etc.,
+the iterator's scope is the candidate, but `add_*` must run in the PC
+(host) scope. So: save the candidate, then re-enter the PC scope to add.
+
+```
+scope:actor = {                          # PC / host scope
+    every_relation = {
+        type = coterie_member
+        limit = { is_alive = yes is_adult = yes NOT = { has_trait = incapable } }
+        save_scope_as = duel_ally        # iterator scope = the ally
+        scope:actor = {                  # back into host scope
+            POD_combat_duel_add_ally_effect = { CHARACTER = scope:duel_ally }
+        }
+    }
+}
+```
+
+`scope:actor` is still resolvable inside the loop because saved scopes
+stay visible in nested blocks.
+
+---
+
+## `create_duel` parameters
+
+```
+POD_combat_create_duel_effect = {
+    INITIATOR    = scope:actor       # who started the duel
+    ATTACKER     = scope:actor       # the attacking party (PoD sc_attacker)
+    DEFENDER     = scope:recipient   # the defending party (PoD sc_defender)
+    FATALITY     = possible          # flag -- see table below
+    FIXED        = no                # flag -- no for the minigame
+    LOCALE       = terrain_scope     # flag -- background scene
+    OUTPUT_EVENT = my_namespace.0001 # event fired on INITIATOR at combat end
+}
+```
+
+`INITIATOR` / `ATTACKER` / `DEFENDER` are the PoD duel parties, in the
+`sc_*` sense -- they are **independent of slot layout**. The PC can be the
+defender (slot 0) while the attacker sits in slot 5. The post-combat
+event (`pod_combat.9999`) restores these so win/loss attribution and any
+`scope:sc_victor` logic in your follow-up stay correct. For a fight the
+PC instigates, all three are usually the PC / the PC / the opponent.
+
+### FATALITY modes
+
+| Value | Meaning |
+|---|---|
+| `no` | Non-fatal. Wounds are written live but capped so no track fills -- nobody dies. |
+| `practice` | Sparring. No wounds are written back at all. |
+| `possible` | Real fight. Wounds land; death from a filled wound track is possible. |
+| `default` | PoD's default: tribal duels are to the death, otherwise like `possible`. |
+| `always` | The loser is killed outright at the end. |
+
+### LOCALE
+
+A background-scene flag (`battlefield`, `terrain_scope`, `throne_room`,
+`alley_night`, ...). `terrain_scope` uses the defender's location. It only
+affects presentation; pick whatever matches the fiction.
+
+### OUTPUT_EVENT
+
+The event fired on `INITIATOR` when combat ends, via `pod_combat.9999`.
+Use it to react to the result -- read `scope:sc_victor` / `scope:sc_loser`
+in your event. Parent-event scope aliases you saved before launching
+(`scope:spirit`, `scope:scheme`, `scope:vassal_claim`, ...) are stashed
+automatically and restored before your event fires, so they're available
+there too.
+
+---
+
+## Worked example 1 -- minimal 1v1
+
+PC vs one opponent. (In practice you'd let
+`configure_start_single_combat_effect` do this -- shown here as the
+simplest possible builder call.)
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:recipient
+        FATALITY     = possible
+        FIXED        = no
+        LOCALE       = terrain_scope
+        OUTPUT_EVENT = my_namespace.0001
+    }
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:recipient }
+    POD_combat_finalize_duel_effect  = yes
+}
+```
+
+---
+
+## Worked example 2 -- PC + coterie vs opponent + their knights (NvN)
+
+The headline opponent goes in slot 5; their knights fill 6-9; the PC's
+coterie fills 1-4. This is the NvN debug interaction, trimmed.
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:recipient
+        FATALITY     = possible
+        FIXED        = no
+        LOCALE       = terrain_scope
+        OUTPUT_EVENT = my_namespace.0001
+    }
+
+    # Allies -> slots 1-4
+    every_relation = {
+        type = coterie_member
+        limit = { is_alive = yes is_adult = yes NOT = { has_trait = incapable } }
+        save_scope_as = duel_ally
+        scope:actor = { POD_combat_duel_add_ally_effect = { CHARACTER = scope:duel_ally } }
+    }
+
+    # Primary opponent -> slot 5 (add FIRST so it lands in 5)
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:recipient }
+
+    # Reinforcements -> slots 6-9 (extra ones past slot 9 just drop)
+    scope:recipient = {
+        every_knight = {
+            limit = {
+                is_alive = yes
+                NOT = { has_trait = incapable }
+                opinion = { target = scope:recipient value >= 0 }
+            }
+            save_scope_as = duel_enemy
+            scope:actor = { POD_combat_duel_add_enemy_effect = { CHARACTER = scope:duel_enemy } }
+        }
+    }
+
+    POD_combat_finalize_duel_effect = yes
+}
+```
+
+For **1vN** drop the ally loop (PC fights alone). For **Nv1** drop the
+knight loop (the opponent stands alone). That's the whole difference
+between the shapes now -- who you add, not a mode number.
+
+---
+
+## Worked example 3 -- a hand-picked roster
+
+Nothing forces you to gather from relations. Save whoever you want and
+add them. Here: PC + two named allies vs three named enemies.
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:the_villain   # the slot-5 headliner
+        FATALITY     = always
+        FIXED        = no
+        LOCALE       = throne_room
+        OUTPUT_EVENT = my_namespace.0001
+    }
+
+    POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_champion }
+    POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_sorcerer }
+
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:the_villain }   # -> slot 5
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_a }    # -> slot 6
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_b }    # -> slot 7
+
+    POD_combat_finalize_duel_effect = yes
+}
+```
+
+---
+
+## What `create_duel` sets up for you
+
+- **The duel story** -- a `POD_combat_sc_context` story_cycle on Charon
+  (`POD_wraith_01`), saved as `scope:pod_combat_duel`. It holds your
+  INITIATOR / ATTACKER / DEFENDER / rule flags / OUTPUT_EVENT and any
+  stashed parent-event aliases. The PC carries one pointer var
+  (`pod_combat_sc_context`) to it; cleanup at combat end is a single
+  `end_story`.
+- **A version check** -- if the move catalogue on the save is stale
+  (older `POD_combat_version`), it rebuilds before the fight so you never
+  run with broken move-story references.
+- **A defensive cleanup** -- if a previous fight leaked state, it's torn
+  down before the new roster is built.
+- **The PC in slot 0.**
+
+You don't have to think about any of it -- just supply the config and the
+roster.
+
+---
+
+## How a fight ends
+
+`finalize` runs the fight to its conclusion through the normal combat
+loop. When one side is wiped (or auto-resolved at init if a side starts
+KO'd), `pod_combat_end_combat_effect` fires `pod_combat.9999`, which:
+
+1. restores INITIATOR / ATTACKER / DEFENDER + your stashed aliases,
+2. applies the death outcome for your FATALITY mode,
+3. fires your `OUTPUT_EVENT` on the initiator (with `scope:sc_victor` /
+   `scope:sc_loser` available),
+4. ends the duel story and clears all combat state.
+
+So your follow-up event sees a clean, fully-restored scope table -- write
+it as if the duel had run through PoD's normal chain.
+
+---
+
+## Cheat sheet
+
+```
+# 1. create (once, in PC scope) -- config + PC into slot 0
+POD_combat_create_duel_effect = {
+    INITIATOR = .. ATTACKER = .. DEFENDER = ..
+    FATALITY = no|practice|possible|default|always
+    FIXED = no  LOCALE = ..  OUTPUT_EVENT = ..
+}
+
+# 2. add combatants (saved scopes only!)
+POD_combat_duel_add_ally_effect  = { CHARACTER = scope:.. }   # slots 1-4
+POD_combat_duel_add_enemy_effect = { CHARACTER = scope:.. }   # slots 5-9, first -> 5
+
+# 3. go live (once, last)
+POD_combat_finalize_duel_effect = yes
+```
+
+Rules: PC scope | don't re-add the PC | first enemy = slot 5 | saved
+scopes not var-chains | 5 v 5 cap | finalize opens the window.

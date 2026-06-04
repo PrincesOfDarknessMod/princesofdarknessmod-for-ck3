@@ -9,9 +9,6 @@
 #   5    = Primary opponent (always present)
 #   6-9  = Enemy slots (enemy knights, modes 1/3)
 #
-# Modes:
-#   0 = 1v1, 1 = 1vN, 2 = Nv1, 3 = NvN
-#
 # Terminology:
 #   actor / target   — workspace-relative. "actor" = whoever is ACTING
 #                      this action; "target" = whoever is being TARGETED.
@@ -598,10 +595,10 @@ pod_combat_init_slot_from_character_effect = {
 	# into the slot variables.
 	#
 	# Shapeshifting for AI fera is NOT done here. It runs upfront in
-	# pod_combat_initialize_effect as a pre-pass, so every potential
-	# CASTER already has its crinos modifier when the discipline effects
-	# query it (especially for the delirium check, which reads
-	# has_character_modifier on the CASTER).
+	# POD_combat_finalize_duel_effect (the active-slots shapeshift pass)
+	# before this dispatcher, so every potential CASTER already has its
+	# crinos modifier when the discipline effects query it (especially for
+	# the delirium check, which reads has_character_modifier on the CASTER).
 	#
 	# Discipline buff CASTER assignment:
 	#   Slots 0-4 (player team) → scope:pod_combat_target  (enemy leader)
@@ -723,108 +720,49 @@ pod_combat_init_slot_from_character_effect = {
 }
 
 ##############################################################################################
-# SECTION 5: SLOT ASSIGNMENT EFFECTS
-# Assign characters to the next available ally (1-4) or enemy (6-9) slot.
+# SECTION 5: DUEL BUILDER — create / add combatant
+#
+# Callers build a fight imperatively:
+#   <PC scope> = {
+#       POD_combat_create_duel_effect    = { INITIATOR=.. ATTACKER=.. DEFENDER=.. FATALITY=.. FIXED=.. LOCALE=.. OUTPUT_EVENT=.. }
+#       POD_combat_duel_add_ally_effect  = { CHARACTER = <ally>  }   # 0..4 times
+#       POD_combat_duel_add_enemy_effect = { CHARACTER = <enemy> }   # 1..5 times (first → slot 5)
+#       POD_combat_finalize_duel_effect  = yes
+#   }
+#
+# Slot layout is unchanged: PC = slot 0, allies = 1-4, primary opponent +
+# reinforcements = 5-9. The PC is always the combat host; every builder
+# effect runs in the PC's scope.
+#
+# Why slot stat-init is DEFERRED to finalize (add_* only records
+# occupancy): pod_combat_init_slot_from_character_effect applies each
+# combatant's discipline battle buff using the OPPOSING team leader as
+# CASTER (slots 0-4 read scope:pod_combat_target = the slot-5 enemy
+# leader; slots 5-9 read scope:combat_pc). The opposing leader isn't
+# known until the full roster is placed, so add_* defers init and
+# finalize runs it once (pod_combat_init_all_slots_effect) after deriving
+# the leader scopes.
 ##############################################################################################
 
-pod_combat_assign_ally_slot_effect = {
-	# $CHARACTER$ = character to add to next available ally slot (1-4)
-	# Team affiliation is derived from slot index — slots 0-4 = player
-	# team, 5-9 = enemy team; not stored as a per-slot variable. No
-	# pod_combat_actor_team_size counter is kept either; iterations
-	# over pod_combat_active_slots filtered by slot_index handle every
-	# reader that would have needed the count.
+POD_combat_create_duel_effect = {
+	# Scaffolds host state, creates the duel story (the caller-context
+	# handoff), and seats the PC in slot 0. Runs in the PC's scope.
 	#
-	# Occupancy check: gate on `has_variable = pod_combat_slot_$N$`
-	# rather than `var:pod_combat_slot_$N$ = { has_variable = slot_char }`.
-	# Under lazy creation the pointer var doesn't exist until the slot
-	# is first filled, and a raw `var:` lookup against an unset pointer
-	# throws "Failed to fetch variable" + "Failed context switch" at
-	# runtime. The pointer-var and slot_char presence are coextensive
-	# (set together by pod_combat_set_slot_char_effect), so the
-	# pointer-var check is sufficient.
-	if = {
-		limit = { NOT = { has_variable = pod_combat_slot_1 } }
-		pod_combat_set_slot_char_effect = { SLOT = 1 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 1 CHARACTER = $CHARACTER$ }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_2 } }
-		pod_combat_set_slot_char_effect = { SLOT = 2 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 2 CHARACTER = $CHARACTER$ }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_3 } }
-		pod_combat_set_slot_char_effect = { SLOT = 3 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 3 CHARACTER = $CHARACTER$ }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_4 } }
-		pod_combat_set_slot_char_effect = { SLOT = 4 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 4 CHARACTER = $CHARACTER$ }
-	}
-}
-
-pod_combat_assign_enemy_slot_effect = {
-	# $CHARACTER$ = character to add to next available enemy slot (6-9)
-	# pod_combat_enemy_team_size IS live. The assignment / fill-pass
-	# logic in pod_combat_initialize_effect reads it to gate
-	# how many enemies still fit. Per-slot _team is dead (computed
-	# from slot index everywhere).
-	#
-	# Occupancy check: see pod_combat_assign_ally_slot_effect — same
-	# rationale, the pointer-var check survives the not-yet-created
-	# case that `var:pod_combat_slot_$N$` blows up on.
-	if = {
-		limit = { NOT = { has_variable = pod_combat_slot_6 } }
-		pod_combat_set_slot_char_effect = { SLOT = 6 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 6 CHARACTER = $CHARACTER$ }
-		change_variable = { name = pod_combat_enemy_team_size add = 1 }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_7 } }
-		pod_combat_set_slot_char_effect = { SLOT = 7 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 7 CHARACTER = $CHARACTER$ }
-		change_variable = { name = pod_combat_enemy_team_size add = 1 }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_8 } }
-		pod_combat_set_slot_char_effect = { SLOT = 8 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 8 CHARACTER = $CHARACTER$ }
-		change_variable = { name = pod_combat_enemy_team_size add = 1 }
-	}
-	else_if = {
-		limit = { NOT = { has_variable = pod_combat_slot_9 } }
-		pod_combat_set_slot_char_effect = { SLOT = 9 CHARACTER = $CHARACTER$ }
-		pod_combat_init_slot_from_character_effect = { SLOT = 9 CHARACTER = $CHARACTER$ }
-		change_variable = { name = pod_combat_enemy_team_size add = 1 }
-	}
-}
-
-##############################################################################################
-# SECTION 6: GROUP INITIALIZATION
-# Sets up the full group combat: PC in slot 0, primary opponent in slot 5,
-# allies in slots 1-4 (modes 2/3), enemy reinforcements in slots 6-9 (modes 1/3).
-# Calculates hit chances and loads initial workspace.
-##############################################################################################
-
-pod_combat_initialize_effect = {
-	# $OPPONENT$ = primary target character
-	# $MODE$ = 0 (1v1), 1 (1vN), 2 (Nv1), 3 (NvN)
-
-	$OPPONENT$ = { save_scope_as = pod_combat_target }
+	# Params (all forwarded onto the duel story for pod_combat.9999):
+	#   INITIATOR / ATTACKER / DEFENDER — the original duel parties in
+	#       PoD's sc_* sense (NOT necessarily slot 0 / slot 5 — the PC may
+	#       be the defender). pod_combat.9999 restores these so win/loss
+	#       attribution and scope:sc_victor logic stay correct.
+	#   FATALITY / FIXED / LOCALE — duel rule flags.
+	#   OUTPUT_EVENT — follow-up event fired on INITIATOR at combat end.
+	save_scope_as = combat_pc
 
 	# Save-compat version check — mirrors the pod_combat_configure_skills
-	# decision's version reload. The configure decision was the only
-	# version-check site, so a player loading an older save and entering
-	# combat WITHOUT opening the configure window first would keep stale
-	# move-story references in their loadout (and AI loadouts in
-	# particular pull from the global catalogue, so AI selection would
-	# see the old stories too). Running the check here closes that gap.
-	# POD_reload_combat_moves clears the global list, rebuilds every
-	# story from the generator-emitted POD_initialize_combat_moves, and
-	# wipes every character's pod_combat_loadout — the empty-loadout
-	# fallback below then reseeds the PC with starter moves.
+	# decision's version reload, so a player who loads an older save and
+	# enters combat WITHOUT opening the configure window first doesn't run
+	# with stale move-story references. POD_reload_combat_moves rebuilds
+	# the global catalogue and wipes loadouts; the empty-loadout fallback
+	# below reseeds the PC with starter moves.
 	hidden_effect = {
 		if = {
 			limit = {
@@ -836,190 +774,232 @@ pod_combat_initialize_effect = {
 			POD_reload_combat_moves = yes
 		}
 	}
-
-	# Default loadout if no moves equipped (list-based after the refactor;
-	# POD_apply_default_combat_loadout iterates POD_combat_moves and adds
-	# every story with is_starter_move set).
 	if = {
 		limit = { pod_combat_no_moves_equipped_trigger = yes }
 		POD_apply_default_combat_loadout = yes
 	}
 
-	# Close config window if open
+	# Close the config window if open.
 	remove_variable = pod_combat_config_open
 
-	# Defensive cleanup for stale combat state: a prior combat that
-	# crashed, was force-quit, or left state via cleanup regression
-	# would leave pod_combat_active set with orphaned slot stories,
-	# old log entries, and stale workspace aliases. Without this
-	# preamble, the new fight inherits all of that: old log rows
-	# render in the new combat, slot stories on Charon leak (new
-	# ones are created without ending the old ones), and the
-	# workspace aliases (pod_combat_actor_char / pod_combat_target_char)
-	# point at characters from the prior fight until the new
-	# load_workspace overwrites them.
-	#
-	# pod_combat_cleanup_effect is the same teardown used at the
-	# normal end of combat; running it defensively here is
-	# idempotent when nothing's leftover.
+	# Defensive teardown of leftover combat state (a prior fight that
+	# crashed / was force-quit / regressed cleanup would leave
+	# pod_combat_active set with orphaned slot stories + stale workspace
+	# aliases). pod_combat_cleanup_effect is the same teardown used at the
+	# normal end of combat; running it here is idempotent when nothing's
+	# leftover. pod_combat_active is NOT set by create — it's set at
+	# finalize, so this check only fires for genuinely stale state.
 	if = {
 		limit = { has_variable = pod_combat_active }
 		pod_combat_cleanup_effect = yes
 	}
-
-	# Defensive: clear is_over flag in case the cleanup branch above
-	# didn't fire (no prior pod_combat_active) but a stale is_over
-	# somehow survived from earlier code paths.
 	remove_variable = pod_combat_is_over
 
-	set_variable = { name = pod_combat_mode value = $MODE$ }
-	set_variable = { name = pod_combat_active value = yes }
 	set_variable = { name = pod_combat_round value = 1 }
+	# Enemy team starts empty; the first add_enemy seats the primary
+	# opponent in slot 5 and bumps this to 1.
+	set_variable = { name = pod_combat_enemy_team_size value = 0 }
 
-	# Per-slot story_cycle scaffolding is lazy: each
-	# pod_combat_set_slot_char_effect call below creates the matching
-	# POD_combat_slot story on Charon on first use, anchors a pointer
-	# on the host (pod_combat_slot_$N$), and registers the slot in
-	# pod_combat_active_slots. Slots the current mode never fills
-	# never get a story_cycle scope. pod_combat_init_slot_from_character_effect
-	# (called per combatant below) writes the per-slot stat / stance /
-	# tier fields onto each freshly populated slot story. Cleanup walks
-	# pod_combat_active_slots in pod_combat_group_cleanup_effect at
-	# combat end. See pod_combat_slot_effects.txt for the lifecycle
-	# helpers.
-
-	# The PC also gets registered as slot 0's slot_char
-	# (via pod_combat_set_slot_char_effect) below.
-	save_scope_as = combat_pc
-
-	# -- Pre-pass: shapeshift all AI fera combatants BEFORE any slot init --
-	# This must run before the slot loop because each slot's init calls
-	# POD_enemy_knight_set_discipline_battle_effect with the opposing team
-	# leader as CASTER.
-	#
-	# The PC is EXPLICITLY EXCLUDED from auto-shapeshift.
-	scope:pod_combat_target = {
-		if = {
-			limit = {
-				is_ai = yes
-				has_trait = fera
-				POD_can_shapeshift_trigger = yes
-				NOT = { POD_is_shapeshifted_warform_trigger = yes }
-			}
-			POD_shapeshift_fera_warform_effect = yes
-		}
-	}
-	# Coterie allies (modes 2 and 3 only — matches the ally pickup loop below)
-	if = {
-		limit = {
-			OR = {
-				$MODE$ = 2
-				$MODE$ = 3
-			}
-		}
-		every_relation = {
-			type = coterie_member
-			limit = {
-				is_alive = yes
-				NOT = { has_trait = incapable }
-				is_ai = yes
-				has_trait = fera
-				POD_can_shapeshift_trigger = yes
-				NOT = { POD_is_shapeshifted_warform_trigger = yes }
-			}
-			POD_shapeshift_fera_warform_effect = yes
-		}
-	}
-	# Opponent's knights (modes 1 and 3 only — matches the knight pickup loop below)
-	if = {
-		limit = {
-			OR = {
-				$MODE$ = 1
-				$MODE$ = 3
-			}
-		}
-		scope:pod_combat_target = {
-			every_knight = {
-				limit = {
-					is_alive = yes
-					NOT = { has_trait = incapable }
-					opinion = {
-						target = scope:pod_combat_target
-						value >= 0
-					}
-					is_ai = yes
-					NOT = { this = scope:combat_pc }
-					has_trait = fera
-					POD_can_shapeshift_trigger = yes
-					NOT = { POD_is_shapeshifted_warform_trigger = yes }
-				}
-				POD_shapeshift_fera_warform_effect = yes
-			}
+	# ── The duel story: caller-context handoff, saved as a scope ──
+	# Anchored on Charon (immortal, off-map) so it survives the PC dying
+	# mid-combat. The PC keeps one pointer var (pod_combat_sc_context);
+	# cleanup is a single end_story. create_story runs in the normal path
+	# so its save_scope_as binds; the var writes go inside
+	# hidden_effect_new_object so tooltip-build (which skips not-yet-
+	# existing objects) doesn't error on the scope reads. See
+	# COMBAT_REFERENCE §7 for the new-object-wrap rationale.
+	character:POD_wraith_01 = {
+		create_story = {
+			type = POD_combat_sc_context
+			save_scope_as = pod_combat_duel
 		}
 	}
 
-	# -- Slot 0: PC (always) --
+	hidden_effect_new_object = {
+		# Dual-name the story as sc_ctx so pod_combat_sc_stash_parent_aliases_effect
+		# (which writes to scope:sc_ctx) keeps working unchanged. This lives
+		# INSIDE the new-object block: tooltip-build skips create_story, so a
+		# scope:pod_combat_duel reference in the normal path would error with
+		# "Undefined event target 'pod_combat_duel'".
+		scope:pod_combat_duel = { save_scope_as = sc_ctx }
+
+		scope:pod_combat_duel = {
+			set_variable = { name = initiator value = $INITIATOR$ }
+			set_variable = { name = attacker  value = $ATTACKER$ }
+			set_variable = { name = defender  value = $DEFENDER$ }
+			set_variable = { name = fatality  value = flag:$FATALITY$ }
+			set_variable = { name = fixed     value = flag:$FIXED$ }
+			set_variable = { name = locale    value = flag:$LOCALE$ }
+			POD_save_event_as_var = { VAR = follow_up ID = $OUTPUT_EVENT$ }
+		}
+
+		# Snapshot any parent-event aliases (scope:spirit, scope:scheme,
+		# scope:vassal_claim, …) onto the duel story for post-combat scope
+		# restore in pod_combat.9999. Each write is guarded by ?= safe
+		# navigation, so this is a silent no-op for callers (e.g. the
+		# debug interactions) with no such aliases in scope.
+		pod_combat_sc_stash_parent_aliases_effect = yes
+
+		# Pin the duel story on the PC for cleanup access.
+		scope:combat_pc = {
+			set_variable = { name = pod_combat_sc_context value = scope:pod_combat_duel }
+		}
+	}
+
+	# ── PC → slot 0 (occupancy only; stat init deferred to finalize) ──
 	pod_combat_set_slot_char_effect = { SLOT = 0 CHARACTER = scope:combat_pc }
-	pod_combat_init_slot_from_character_effect = { SLOT = 0 CHARACTER = scope:combat_pc }
+}
 
-	# -- Slots 1-4: Coterie allies (modes 2 and 3) --
+POD_combat_duel_add_ally_effect = {
+	# $CHARACTER$ = character to seat in the next free ally slot (1-4).
+	# Occupancy only — pod_combat_init_all_slots_effect (in finalize) runs
+	# the stat/discipline init once the full roster is placed. Runs in the
+	# PC (host) scope. Team is derived from slot index (1-4 = ally), not
+	# stored per-slot.
+	#
+	# Occupancy check gates on `has_variable = pod_combat_slot_$N$`.
+	# pointer-var and slot_char  presence are coextensive
+	# (set together by pod_combat_set_slot_char_effect).
+	if = {
+		limit = { NOT = { has_variable = pod_combat_slot_1 } }
+		pod_combat_set_slot_char_effect = { SLOT = 1 CHARACTER = $CHARACTER$ }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_2 } }
+		pod_combat_set_slot_char_effect = { SLOT = 2 CHARACTER = $CHARACTER$ }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_3 } }
+		pod_combat_set_slot_char_effect = { SLOT = 3 CHARACTER = $CHARACTER$ }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_4 } }
+		pod_combat_set_slot_char_effect = { SLOT = 4 CHARACTER = $CHARACTER$ }
+	}
+	# All four ally slots full → silently drop (the player team caps at 5).
+}
+
+POD_combat_duel_add_enemy_effect = {
+	# $CHARACTER$ = character to seat in the next free enemy slot (5-9).
+	# The FIRST enemy added lands in slot 5 — the primary opponent / enemy
+	# leader, which is the player team's hit-chance baseline and the PC's
+	# default target. Occupancy only; finalize runs the stat init.
+	# pod_combat_enemy_team_size (started at 0 by create) tracks the count
+	# and the 5-slot cap is enforced implicitly by slot availability.
+	#
+	# Occupancy check: see POD_combat_duel_add_ally_effect
+	if = {
+		limit = { NOT = { has_variable = pod_combat_slot_5 } }
+		pod_combat_set_slot_char_effect = { SLOT = 5 CHARACTER = $CHARACTER$ }
+		change_variable = { name = pod_combat_enemy_team_size add = 1 }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_6 } }
+		pod_combat_set_slot_char_effect = { SLOT = 6 CHARACTER = $CHARACTER$ }
+		change_variable = { name = pod_combat_enemy_team_size add = 1 }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_7 } }
+		pod_combat_set_slot_char_effect = { SLOT = 7 CHARACTER = $CHARACTER$ }
+		change_variable = { name = pod_combat_enemy_team_size add = 1 }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_8 } }
+		pod_combat_set_slot_char_effect = { SLOT = 8 CHARACTER = $CHARACTER$ }
+		change_variable = { name = pod_combat_enemy_team_size add = 1 }
+	}
+	else_if = {
+		limit = { NOT = { has_variable = pod_combat_slot_9 } }
+		pod_combat_set_slot_char_effect = { SLOT = 9 CHARACTER = $CHARACTER$ }
+		change_variable = { name = pod_combat_enemy_team_size add = 1 }
+	}
+	# All five enemy slots full → silently drop.
+}
+
+##############################################################################################
+# SECTION 6: SLOT-INIT DISPATCHER + DUEL FINALIZE
+#
+# pod_combat_init_all_slots_effect runs the per-slot stat / discipline init
+# for every occupied slot. $SLOT$ is a parse-time macro (it builds
+# var:pod_combat_slot_$SLOT$), so it can't be a runtime loop variable —
+# hence 10 guarded literal calls, mirroring pod_combat_calculate_all_hit_chances_effect.
+#
+# POD_combat_finalize_duel_effect completes a duel built via
+# create_duel + add_ally/add_enemy: derives the leader scopes, shapeshifts
+# AI fera, inits every slot, computes hit chances, runs the init-time KO /
+# victory check, opens the combat window (pod_combat_active = yes), and
+# starts round 1.
+##############################################################################################
+
+pod_combat_init_all_slots_effect = {
+	# Run pod_combat_init_slot_from_character_effect for every occupied
+	# slot. The caller (finalize) must have saved scope:pod_combat_target
+	# (slot-5 enemy leader) and scope:combat_pc (the PC) — init reads them
+	# as the discipline-buff CASTER (slots 0-4 → target, slots 5-9 → PC).
+	#
+	# CHARACTER must be a SAVED SCOPE, not a `var:pod_combat_slot_N.var:slot_char`
+	# chain: init_slot_from_character does `$CHARACTER$ = { ... CASTER =
+	# $CHARACTER$ }`, which switches into the character's scope and then
+	# re-evaluates $CHARACTER$ there. A var: chain would resolve
+	# `var:pod_combat_slot_N` against the slot occupant (which has no such
+	# var) and throw; a saved scope resolves globally regardless of the
+	# current scope. So each branch snapshots the occupant to
+	# scope:init_slot_char (overwritten per slot — the calls are sequential)
+	# before delegating.
+	if = { limit = { has_variable = pod_combat_slot_0 } var:pod_combat_slot_0.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 0 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_1 } var:pod_combat_slot_1.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 1 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_2 } var:pod_combat_slot_2.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 2 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_3 } var:pod_combat_slot_3.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 3 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_4 } var:pod_combat_slot_4.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 4 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_5 } var:pod_combat_slot_5.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 5 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_6 } var:pod_combat_slot_6.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 6 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_7 } var:pod_combat_slot_7.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 7 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_8 } var:pod_combat_slot_8.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 8 CHARACTER = scope:init_slot_char } }
+	if = { limit = { has_variable = pod_combat_slot_9 } var:pod_combat_slot_9.var:slot_char = { save_scope_as = init_slot_char } pod_combat_init_slot_from_character_effect = { SLOT = 9 CHARACTER = scope:init_slot_char } }
+}
+
+POD_combat_finalize_duel_effect = {
+	# Completes a duel built via create_duel + add_ally/add_enemy. Runs in
+	# the PC (host) scope. The combat window opens (pod_combat_active) only
+	# after this whole effect returns — it's one atomic tick, so the GUI
+	# never sees a half-initialized roster.
+
+	# Combat host + enemy-leader scopes for the per-slot discipline init.
+	# scope:combat_pc = the PC (root). scope:pod_combat_target = slot 5's
+	# occupant (the primary opponent / enemy leader). The old monolith
+	# took the opponent as a param and saved it up front; deriving it from
+	# slot 5 here decouples finalize from how the roster was assembled.
+	save_scope_as = combat_pc
 	if = {
 		limit = {
-			has_variable = pod_combat_mode
-			OR = {
-				var:pod_combat_mode = 2
-				var:pod_combat_mode = 3
-			}
+			has_variable = pod_combat_slot_5
+			var:pod_combat_slot_5 = { has_variable = slot_char }
 		}
-		# Add coterie members in relation-list iteration order. 
-		every_relation = {
-			type = coterie_member
-			limit = {
-				is_alive = yes
-				is_adult = yes
-				NOT = { has_trait = incapable }
-			}
-			save_scope_as = ally_candidate
-			scope:combat_pc = {
-				pod_combat_assign_ally_slot_effect = { CHARACTER = scope:ally_candidate }
-			}
-		}
+		var:pod_combat_slot_5.var:slot_char = { save_scope_as = pod_combat_target }
 	}
 
-	# -- Slot 5: Primary opponent (always) --
-	pod_combat_set_slot_char_effect = { SLOT = 5 CHARACTER = scope:pod_combat_target }
-	pod_combat_init_slot_from_character_effect = { SLOT = 5 CHARACTER = scope:pod_combat_target }
-	set_variable = { name = pod_combat_enemy_team_size value = 1 }
+	set_variable = { name = pod_combat_active value = yes }
 
-	# -- Slots 6-9: Opponent's knights (modes 1 and 3) --
-	if = {
+	# -- Pre-pass: shapeshift every AI fera combatant BEFORE slot init --
+	every_in_list = {
+		variable = pod_combat_active_slots
 		limit = {
-			has_variable = pod_combat_mode
-			OR = {
-				var:pod_combat_mode = 1
-				var:pod_combat_mode = 3
+			var:slot_char = {
+				is_ai = yes
+				has_trait = fera
+				POD_can_shapeshift_trigger = yes
+				NOT = { POD_is_shapeshifted_warform_trigger = yes }
 			}
 		}
-		scope:pod_combat_target = {
-			every_knight = {
-				limit = {
-					is_alive = yes
-					NOT = { has_trait = incapable }
-					opinion = {
-						target = scope:pod_combat_target
-						value >= 0
-					}
-				}
-				save_scope_as = enemy_candidate
-				scope:combat_pc = {
-					if = {
-						limit = { var:pod_combat_enemy_team_size < 5 }
-						pod_combat_assign_enemy_slot_effect = { CHARACTER = scope:enemy_candidate }
-					}
-				}
-			}
-		}
+		var:slot_char = { POD_shapeshift_fera_warform_effect = yes }
 	}
+
+	# -- Per-slot stat / discipline init for every occupied slot --
+	# Deferred from the add_* builders to here so each combatant's
+	# discipline buff reads the final opposing-team leader (scope:combat_pc
+	# / scope:pod_combat_target, both saved above) rather than a partial
+	# roster.
+	pod_combat_init_all_slots_effect = yes
 
 	# -- Calculate hit chances for all combatants --
 	# Formula: base 60 + (own prowess - primary opposing leader's prowess) / 2
@@ -1350,8 +1330,9 @@ pod_combat_group_cleanup_effect = {
 	remove_variable = pod_combat_target_incorporeal_spirit
 	remove_variable = pod_combat_target_can_damage_spirit
 
-	# Global group state
-	remove_variable = pod_combat_mode
+	# Global group state. (pod_combat_mode was retired with the duel
+	# builder — the roster is explicit now, not a 0/1/2/3 shape code — so
+	# there's nothing to remove for it.)
 	remove_variable = pod_combat_enemy_team_size
 	remove_variable = pod_combat_current_actor
 	remove_variable = pod_combat_selected_target
@@ -1968,7 +1949,7 @@ pod_combat_group_end_round_effect = {
 		pod_combat_load_workspace_effect = yes
 		# Explicit PC slot 0 hit-chance recalc — mirrors the proven
 		# pod_combat_select_target SGUI sequence. See the matching
-		# call in pod_combat_initialize_effect for the full rationale.
+		# call in POD_combat_finalize_duel_effect for the full rationale.
 		pod_combat_recalc_pc_hit_chance_effect = yes
 		set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
 		pod_combat_apply_ap_drain_effect = yes
@@ -2067,7 +2048,7 @@ pod_combat_process_pre_pc_turns_effect = {
 		pod_combat_load_workspace_effect = yes
 		# Explicit PC slot 0 hit-chance recalc — mirrors the proven
 		# pod_combat_select_target SGUI sequence. See the matching
-		# call in pod_combat_initialize_effect for the full rationale.
+		# call in POD_combat_finalize_duel_effect for the full rationale.
 		# Especially important on this path because every AI turn that
 		# attacked the PC pushed "PC-vs-that-AI" into slot 0 via
 		# save_workspace; load_workspace's writeback should refresh it
