@@ -272,13 +272,18 @@ PixelShader =
 				p = float2(c*p.x + s*p.y, -s*p.x + c*p.y);
 			}
 
-			float hash(in float2 co) {
-				return frac(sin(dot(co.xy ,float2(12.9898,58.233))) * 13758.5453);
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float hash(in float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
 
 			float2 hash2(float2 p) {
-				p = float2(dot(p,float2(127.1,311.7)), dot(p,float2(269.5,183.3)));
-				return frac(sin(p)*18.5453);
+				float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+				p3 += dot(p3, p3.yzx+33.33);
+				return frac((p3.xx+p3.yz)*p3.zy);
 			}
 
 			float psin(float a) {
