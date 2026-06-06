@@ -106,12 +106,13 @@ POD_execute_combat_move = {
 	}
 
 	# ── 4. CK3 resource costs (PC only) ──────────────────────────
-	# Only slot 0 (the player) pays CK3-side costs. AI combatants get
+	# Only the PC (player/0) pays CK3-side costs. AI combatants get
 	# the move's effect at no CK3 cost (their AI turn is free).
 	if = {
 		limit = {
-			has_variable = pod_combat_current_actor
-			var:pod_combat_current_actor = 0
+			has_variable = pod_combat_current_actor_team
+			var:pod_combat_current_actor_team = flag:player
+			var:pod_combat_current_actor_position = 0
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = gold_cost } }
@@ -644,6 +645,18 @@ POD_execute_combat_move = {
 		set_variable = { name = pod_combat_target_init_bonus value = scope:init_debuff_neg }
 	}
 
+	# ── 14b. Summon a combatant (dispatch on summons_* flags) ────
+	# After all in-place effects (tiers/stances/AP), before retaliation — a
+	# freshly-summoned unit shouldn't retaliate on its summon turn. The
+	# damage/AoE phases (§5b-§10) already ran, so a same-cast AoE never hits
+	# the just-summoned unit; it fights from the NEXT round (the add sets
+	# slot_has_acted = 1). The glue is hidden_effect-wrapped (tooltip-build
+	# safety); caster = var:pod_combat_actor_char on the acting team.
+	if = {
+		limit = { $STORY$ = { has_variable = summons_wraith } }
+		pod_combat_summon_wraith_glue_effect = yes
+	}
+
 	# ── 15. Retaliation check ────────────────────────────────────
 	# After any damage resolves, check if the target had a retaliation
 	# stance set up from a previous turn.
@@ -849,24 +862,24 @@ POD_combat_dispatch_damage_pipeline = {
 ###### AOE DISPATCH (team_enemy + team_ally)
 ######################################################
 # Apply the move's effects across a whole team. "Enemy" vs "ally"
-# resolves RELATIVE to the current actor — slots 0-4 are the player
-# team, 5-9 the enemy team, so an NPC actor in slot 7 treats 0-4 as
-# its enemies and 5-9 as its allies.
+# resolves RELATIVE to the current actor: each slot's combat_team flag
+# is compared against the actor's, so an enemy-team NPC actor treats the
+# player team as its enemies and its own team as its allies.
 #
 # All six AoE dispatchers iterate pod_combat_active_slots filtered by
-# slot_index against the actor's team:
+# each slot's combat_team against the actor's:
 #
-#   team_enemy: actor on player team (current_actor < 5) → hit slots 5-9.
-#               actor on enemy team (current_actor >= 5) → hit slots 0-4.
-#   team_ally:  actor on player team → buff/heal slots 0-4 (includes self).
-#               actor on enemy team → buff/heal slots 5-9.
+#   team_enemy: hits every slot whose combat_team differs from the
+#               actor's (the opposing team).
+#   team_ally:  buffs/heals every slot whose combat_team matches the
+#               actor's (the same team, including self).
 #
 # The team-side decision is encapsulated in two shared triggers:
 #   pod_combat_aoe_team_enemy_filter_trigger
 #   pod_combat_aoe_team_ally_filter_trigger
-# Both read scope:host.var:pod_combat_current_actor and the iterated
-# slot's slot_index. Single source of truth for the team decision so
-# future AoE additions don't re-derive the index split.
+# Both read scope:host.var:pod_combat_current_actor_team and the iterated
+# slot's combat_team. Single source of truth for the team decision so
+# future AoE additions don't re-derive the team test.
 #
 # Damage-side dispatchers also call
 # pod_combat_aoe_check_target_alive_effect after each save_target so
@@ -899,23 +912,21 @@ POD_combat_dispatch_damage_pipeline = {
 # Per-target AoE log push helper. Called from inside each AoE iterator's
 # iteration body to record one log row per target.
 #
-# Stashes the iterated slot's index on the host so push_log records the
-# correct target, increments / initializes the AoE burst index so every
-# per-target row across all AoE phases of a single move gets a unique
-# aoe_iter_burst_index (index 0 = first row of the move's burst — gates
-# the GUI buff-rider visibility so move-level stance / tier lines render
-# once per move instead of repeating on every row), pushes the log row,
-# and clears the per-target transient state.
+# Increments / initializes the AoE burst index so every per-target row
+# across all AoE phases of a single move gets a unique
+# aoe_iter_burst_index (index 0 = first row of the move's burst, which
+# gates the GUI buff-rider visibility so move-level stance / tier lines
+# render once per move instead of repeating on every row), pushes the
+# log row, and clears the per-target transient state. The row's target
+# is the workspace's pod_combat_target_char, loaded per iteration.
 #
 # Caller contract: invoked from the iteration body of an
-# every_in_list = pod_combat_active_slots pass. `prev.var:slot_index`
-# from inside `scope:host = { ... }` resolves to the iterated slot's
-# index. The surrounding effect must have done `save_scope_as = host`.
+# every_in_list = pod_combat_active_slots pass. The surrounding effect
+# must have done `save_scope_as = host`.
 #
 # Param: STORY — the move story being executed (forwarded to push_log).
 pod_combat_aoe_push_per_target_log_effect = {
 	scope:host = {
-		set_variable = { name = pod_combat_aoe_iter_target_slot value = prev.var:slot_index }
 		if = {
 			limit = { has_variable = pod_combat_aoe_phase_pushed_rows }
 			change_variable = { name = pod_combat_aoe_iter_burst_index add = 1 }
@@ -925,7 +936,6 @@ pod_combat_aoe_push_per_target_log_effect = {
 		}
 		set_variable = { name = pod_combat_aoe_phase_pushed_rows value = 1 }
 		pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
-		remove_variable = pod_combat_aoe_iter_target_slot
 		pod_combat_clear_per_target_state_effect = yes
 	}
 }
@@ -944,17 +954,14 @@ POD_combat_apply_team_enemy_hp_damage = {
 	#   1. save_target_to_story — persist the per-target workspace state
 	#      onto the slot story (HP / soak / stances).
 	#   2. aoe_check_target_alive — flip slot_alive if KO / morale-break.
-	#   3. Stash iterated slot_index into pod_combat_aoe_iter_target_slot
-	#      so the AoE burst-index counter can detect which iteration
-	#      this push_log call represents (selected_target stays on the
-	#      move's primary target throughout the AoE iteration).
-	#   4. Set pod_combat_aoe_phase_pushed_rows = 1 so §16 of
+	#   3. Set pod_combat_aoe_phase_pushed_rows = 1 so §16 of
 	#      POD_execute_combat_move knows the AoE already covered this
 	#      move and skips its wrap-up row unless actor-side state fired.
-	#   5. push_log captures the per-target row.
-	#   6. Clear iter-slot temp var + per-target last_* state so the
-	#      next iteration starts fresh (without disturbing the
-	#      pushed-rows flag — see pod_combat_clear_per_target_state_effect).
+	#   4. push_log captures the per-target row (its target is the
+	#      workspace's pod_combat_target_char, loaded per iteration).
+	#   5. Clear per-target last_* state so the next iteration starts
+	#      fresh (without disturbing the pushed-rows flag — see
+	#      pod_combat_clear_per_target_state_effect).
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots

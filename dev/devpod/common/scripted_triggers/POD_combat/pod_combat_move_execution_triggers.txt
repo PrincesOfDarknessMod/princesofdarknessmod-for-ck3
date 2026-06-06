@@ -277,7 +277,7 @@ POD_can_execute_combat_move = {
 	}
 
 	# Targeting validity during the player's turn. The PC has explicitly
-	# picked a slot via pod_combat_pc_target; the move's targeting flag
+	# picked a slot via pod_combat_pc_target_*; the move's targeting flag
 	# dictates which range is acceptable. Outside of the player turn
 	# (AI eval), target selection happens via the AI swap effects AFTER
 	# move choice, so this check is skipped.
@@ -294,17 +294,18 @@ POD_can_execute_combat_move = {
 		# picked an ally slot.
 		#
 		# save_temporary_scope_as captures the host before any_in_list
-		# flips into per-slot iteration; scope:host.var:pod_combat_pc_target
-		# is then visible inside the loop body. Same pattern as
+		# flips into per-slot iteration; the host's pod_combat_pc_target_team
+		# / _position are then visible inside the loop body. Same pattern as
 		# pod_combat_actor_has_alive_team_trigger in pod_combat_triggers.txt.
 		save_temporary_scope_as = host
 		custom_description = {
 			text = pod_combat_targeting_need_enemy_tt
-			has_variable = pod_combat_pc_target
+			has_variable = pod_combat_pc_target_team
 			any_in_list = {
 				variable = pod_combat_active_slots
-				var:slot_index = scope:host.var:pod_combat_pc_target
-				var:slot_index >= 5
+				var:combat_team = scope:host.var:pod_combat_pc_target_team
+				var:team_position = scope:host.var:pod_combat_pc_target_position
+				var:combat_team = flag:enemy
 				var:slot_alive = 1
 			}
 		}
@@ -315,19 +316,21 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_ally }
 		}
-		# Mirror of the single_enemy branch above. slot_index <= 4
-		# narrows to the player team (PC + allies); the equality
-		# check against pc_target picks out the specific selected
-		# ally slot. See above for the save_temporary_scope_as rationale.
+		# Mirror of the single_enemy branch above. combat_team = flag:player
+		# + team_position >= 1 narrows to the ally slots (player team minus
+		# the PC); the equality check against pc_target's team + position
+		# picks out the specific selected ally slot. See above for the
+		# save_temporary_scope_as rationale.
 		save_temporary_scope_as = host
 		custom_description = {
 			text = pod_combat_targeting_need_ally_tt
-			has_variable = pod_combat_pc_target
+			has_variable = pod_combat_pc_target_team
 			any_in_list = {
 				variable = pod_combat_active_slots
-				var:slot_index = scope:host.var:pod_combat_pc_target
-				var:slot_index >= 1
-				var:slot_index <= 4
+				var:combat_team = scope:host.var:pod_combat_pc_target_team
+				var:team_position = scope:host.var:pod_combat_pc_target_position
+				var:combat_team = flag:player
+				var:team_position >= 1
 				var:slot_alive = 1
 			}
 		}
@@ -338,14 +341,14 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_pc }
 		}
-		# Protect-the-PC moves target slot 0 (the player character).
+		# Protect-the-PC moves target player/0 (the player character).
 		# Kept as a direct pointer check because it's a single-slot
-		# probe — any_in_list with slot_index = 0 would be longer
+		# probe — any_in_list on player/0 would be longer
 		# without saving anything.
 		custom_description = {
 			text = pod_combat_targeting_need_pc_alive_tt
-			has_variable = pod_combat_slot_0
-			var:pod_combat_slot_0 = { has_variable = slot_char var:slot_alive = 1 }
+			has_variable = pod_combat_pc_slot
+			var:pod_combat_pc_slot = { has_variable = slot_char var:slot_alive = 1 }
 		}
 	}
 
@@ -359,7 +362,7 @@ POD_can_execute_combat_move = {
 		# all on the slot story itself.
 		any_in_list = {
 			variable = pod_combat_active_slots
-			var:slot_index >= 5
+			var:combat_team = flag:enemy
 			var:slot_alive = 1
 		}
 	}
@@ -573,48 +576,33 @@ pod_combat_rider_condition_passes_trigger = {
 # (every_in_list switches into pod_combat_active_slots entries) and
 # needs to decide "is this slot on the same team as the actor or the
 # opposite team?". Both filters read scope:host (the combat host save
-# the dispatcher establishes) for the actor's slot index and compare
-# against the iterated slot's slot_index.
+# the dispatcher establishes) for the actor's combat_team flag and
+# compare it against the iterated slot's combat_team.
 #
-# Slot layout: indices 0-4 are the player team, 5-9 the enemy team.
-# - Same-team: actor < 5 + slot < 5  OR  actor >= 5 + slot >= 5
-# - Opposite-team: actor < 5 + slot >= 5  OR  actor >= 5 + slot < 5
+# Team membership is the per-slot combat_team flag (flag:player /
+# flag:enemy):
+# - Same-team:     slot combat_team == actor's current_actor_team
+# - Opposite-team: slot combat_team != actor's current_actor_team
 #
 # Both filters live here as a single source of truth so any future
 # AoE addition can reuse the team decision without re-deriving the
-# index split.
+# team test.
 #
 # Caller contract:
-#   - Implicit scope must be the iterated slot story (var:slot_index
+#   - Implicit scope must be the iterated slot story (var:combat_team
 #     lives there).
 #   - scope:host must be saved to the combat host (where
-#     pod_combat_current_actor is read).
+#     pod_combat_current_actor_team is read).
 
 pod_combat_aoe_team_enemy_filter_trigger = {
-	# Slot belongs to the team OPPOSITE the current actor.
-	OR = {
-		AND = {
-			scope:host = { var:pod_combat_current_actor < 5 }
-			var:slot_index >= 5
-		}
-		AND = {
-			scope:host = { var:pod_combat_current_actor >= 5 }
-			var:slot_index < 5
-		}
-	}
+	# Slot belongs to the team OPPOSITE the current actor: its combat_team
+	# flag differs from the actor's pod_combat_current_actor_team.
+	NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
 }
 
 pod_combat_aoe_team_ally_filter_trigger = {
 	# Slot belongs to the SAME team as the current actor (includes the
-	# actor's own slot — team_ally heals/buffs cover self).
-	OR = {
-		AND = {
-			scope:host = { var:pod_combat_current_actor < 5 }
-			var:slot_index < 5
-		}
-		AND = {
-			scope:host = { var:pod_combat_current_actor >= 5 }
-			var:slot_index >= 5
-		}
-	}
+	# actor's own slot — team_ally heals/buffs cover self): its combat_team
+	# flag matches the actor's pod_combat_current_actor_team.
+	var:combat_team = scope:host.var:pod_combat_current_actor_team
 }

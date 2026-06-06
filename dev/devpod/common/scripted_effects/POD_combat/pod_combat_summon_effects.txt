@@ -1,0 +1,169 @@
+﻿######################################################
+######   POD COMBAT — MID-COMBAT COMBATANT ADDITION + SUMMONS
+######################################################
+# Adds combatants to a LIVE fight. The duel builder (create_duel + add_ally/
+# add_enemy + finalize) only runs pre-combat; these effects seat a brand-new
+# combatant after finalize, mid-round, reusing the same per-slot building blocks.
+#
+# Public mechanism (generalized — reusable beyond the wraith test case):
+#   pod_combat_add_ally_midfight_effect  = { CHARACTER }  -> player team
+#   pod_combat_add_enemy_midfight_effect = { CHARACTER }  -> enemy team
+# (Two team-specific entry points rather than one { TEAM } effect: CK3 can't
+#  index the per-team counter / leader pointer / add wrapper by a parse-time
+#  team token, so the team is resolved by the CALLER at runtime.)
+#
+# Test case: pod_combat_summon_wraith_glue_effect creates a combat-ready wraith
+# and seats it on the caster's team; fired from §14b of POD_execute_combat_move
+# when a move carries the summons_wraith flag. Temporary summons are despawned at
+# combat end by pod_combat_group_cleanup_effect (iterating pod_combat_summoned_chars).
+#
+# See COMBAT_REFERENCE.md for the slot / leader-pointer / pod_combat_active_slots
+# model. Each add reuses pod_combat_init_slot_from_character_effect +
+# pod_combat_calc_one_hit_chance_effect exactly as POD_combat_finalize_duel_effect's
+# per-slot loop does.
+
+###################
+###### GENERAL: ADD A COMBATANT MID-FIGHT
+###################
+
+pod_combat_add_ally_midfight_effect = {
+	# $CHARACTER$ = the new combatant (a SAVED SCOPE — init re-evaluates it in the
+	#   character's own scope, so a var: chain would throw). Runs in the combat
+	#   host (PC) scope, mid-fight. Seats $CHARACTER$ as a new PLAYER-team
+	#   non-leader, runs the per-slot init + hit-chance that finalize does, and
+	#   marks slot_has_acted = 1 so it sits out the CURRENT round
+	#   (pod_combat_calculate_initiative_effect rolls it in at the next round start).
+	#   Opposing leader (the discipline CASTER + hit-chance baseline) = the enemy
+	#   leader. Bails if the team-size counter or the enemy-leader pointer is unset
+	#   (also keeps the var reads tooltip-build-safe). POD_combat_duel_add_ally_effect
+	#   self-guards the soft cap; if the cap is hit no slot is created and the
+	#   re-find below no-ops.
+	if = {
+		limit = {
+			has_variable = pod_combat_player_team_size
+			has_variable = pod_combat_enemy_leader_slot
+			var:pod_combat_enemy_leader_slot = { has_variable = slot_char }
+		}
+		# Snapshot the landing position BEFORE the add (add_ally seats at
+		# team_size and bumps it), plus the opposing leader's char + prowess.
+		save_scope_value_as = { name = pod_combat_summon_pos value = var:pod_combat_player_team_size }
+		save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:pod_combat_enemy_leader_slot.var:slot_prowess }
+		var:pod_combat_enemy_leader_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+		POD_combat_duel_add_ally_effect = { CHARACTER = $CHARACTER$ }
+		pod_combat_init_one_midfight_slot_effect = { TEAM = player }
+	}
+}
+
+pod_combat_add_enemy_midfight_effect = {
+	# Enemy-team counterpart of pod_combat_add_ally_midfight_effect. Opposing
+	# leader = the PC (pod_combat_pc_slot). See that effect for the full contract.
+	if = {
+		limit = {
+			has_variable = pod_combat_enemy_team_size
+			has_variable = pod_combat_pc_slot
+			var:pod_combat_pc_slot = { has_variable = slot_char }
+		}
+		save_scope_value_as = { name = pod_combat_summon_pos value = var:pod_combat_enemy_team_size }
+		save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:pod_combat_pc_slot.var:slot_prowess }
+		var:pod_combat_pc_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+		POD_combat_duel_add_enemy_effect = { CHARACTER = $CHARACTER$ }
+		pod_combat_init_one_midfight_slot_effect = { TEAM = enemy }
+	}
+}
+
+pod_combat_init_one_midfight_slot_effect = {
+	# $TEAM$ = player | enemy. Re-finds the slot the just-fired add_ally/add_enemy
+	# created — combat_team = flag:$TEAM$, team_position = scope:pod_combat_summon_pos
+	# (the counter value snapshotted BEFORE the add) — and runs finalize's per-slot
+	# work on it, in order: init from the occupant with the opposing leader as the
+	# discipline CASTER (snapshot var:slot_char to a saved scope first — init
+	# re-evaluates CHARACTER in the char's own scope), compute hit chance vs the
+	# opposing leader's prowess (reads slot_prowess that init just wrote — order
+	# matters), then slot_has_acted = 1 so the unit sits out the current round.
+	# scope:pod_combat_summon_opp_leader / _opp_prowess were snapshotted by the
+	# caller. If the add hit the soft cap (no slot created), the match is empty and
+	# this no-ops. The summoned unit is NOT fera-shapeshifted (finalize's upfront
+	# crinos pass doesn't re-run mid-fight) — fine for non-fera summons.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:combat_team = flag:$TEAM$
+			var:team_position = scope:pod_combat_summon_pos
+		}
+		var:slot_char = { save_scope_as = pod_combat_summon_slot_char }
+		pod_combat_init_slot_from_character_effect = { CHARACTER = scope:pod_combat_summon_slot_char ENEMY_LEADER = scope:pod_combat_summon_opp_leader }
+		pod_combat_calc_one_hit_chance_effect = { OPP_PROWESS = scope:pod_combat_summon_opp_prowess }
+		set_variable = { name = slot_has_acted value = 1 }
+	}
+}
+
+###################
+###### TEST CASE: GIOVANNI NECROMANCY — RAISE WRAITH
+###################
+
+pod_combat_summon_wraith_glue_effect = {
+	# Fired from §14b of POD_execute_combat_move when the move carries
+	# summons_wraith. Runs in combat host scope. Creates a combat-ready wraith and
+	# seats it on the CASTER's team mid-fight, then registers it for end-of-combat
+	# despawn. WHOLE BODY wrapped in hidden_effect: the move's confirm-tooltip walks
+	# the effect tree without applying state, and a bare create_character /
+	# create_story / list-add errors in that preview ("Undefined event target").
+	hidden_effect = {
+		var:pod_combat_actor_char = { save_scope_as = pod_combat_summoner }
+		# Capacity pre-check on the caster's team BEFORE creating anything — a
+		# create-then-fail-to-seat would orphan an un-cleaned character. Same
+		# threshold add_ally/add_enemy use, so a pass here guarantees the seat.
+		if = {
+			limit = {
+				OR = {
+					AND = {
+						var:pod_combat_current_actor_team = flag:player
+						var:pod_combat_player_team_size < pod_combat_max_team_size
+					}
+					AND = {
+						var:pod_combat_current_actor_team = flag:enemy
+						var:pod_combat_enemy_team_size < pod_combat_max_team_size
+					}
+				}
+			}
+			# Lightweight lowborn at the summoner's location. NO template (avoids
+			# template root-scope reads), explicit culture/faith/gender.
+			create_character = {
+				location = scope:pod_combat_summoner.location
+				culture  = scope:pod_combat_summoner.culture
+				faith    = scope:pod_combat_summoner.faith
+				gender_female_chance = 50
+				save_scope_as = pod_combat_new_wraith
+			}
+			# SAFE wraith recipe — NOT POD_wraith_initialization_effect, which
+			# relocates the character to the Shadowlands (POD_send_to_dark_kingdom_effect)
+			# and fires POD_wraith_maintenance.1, both catastrophic for a live slot
+			# occupant. add_trait wraith FIRST so the energy init picks the pathos
+			# pool; POD_arcanoi_initiation_effect grants 3 Arcanoi = real combat moves.
+			scope:pod_combat_new_wraith = {
+				# Deliberate marker (not consumed today): tags every summoned
+				# combatant so an optional on_game_start orphan-sweep could find
+				# and remove any that outlived their fight. The combat-end despawn
+				# (pod_combat_summoned_chars in the cleanup hook) is the primary
+				# path; this flag is the backstop hook for that future sweep.
+				add_character_flag = pod_combat_summoned_temp
+				add_trait = wraith
+				POD_initialize_energy_modifier = yes
+				POD_arcanoi_initiation_effect = yes
+				add_character_flag = had_POD_character_initialization
+			}
+			# Seat on the caster's team (runtime branch on the team flag; the
+			# midfight-add effects are team-specific entry points).
+			if = {
+				limit = { var:pod_combat_current_actor_team = flag:player }
+				pod_combat_add_ally_midfight_effect = { CHARACTER = scope:pod_combat_new_wraith }
+			}
+			else = {
+				pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:pod_combat_new_wraith }
+			}
+			# Announce it + register for despawn at combat end.
+			pod_combat_push_system_log_effect = { MESSAGE_KEY = wraith_summoned }
+			add_to_variable_list = { name = pod_combat_summoned_chars target = scope:pod_combat_new_wraith }
+		}
+	}
+}

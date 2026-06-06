@@ -4,13 +4,13 @@
 
 # Every fight — whatever its roster — uses the same workspace bridge and
 # the generic pod_combat_ai_select_and_execute_move_effect below. A 1v1
-# is just a degenerate NvN with slots 0 and 5 populated; the same
+# is just a degenerate NvN with player/0 and enemy/0 populated; the same
 # workspace-relative move effects handle both.
 #
 # AI model — one combatant's turn:
 #   1. Turn start: pick an initial enemy target via
 #      pod_combat_ai_select_{enemy,player}_target_effect (weighted
-#      random favoring low-HP). Sets pod_combat_selected_target.
+#      random favoring low-HP). Sets pod_combat_selected_target_*.
 #   2. Up to 6 action attempts per turn (a hard cap, not strictly
 #      one per AP — moves can refund AP via ap_gain, but the loop
 #      caps at 6 unrolled calls regardless). Each attempt:
@@ -124,22 +124,23 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 	# original mark, so we don't thrash targeting between every
 	# action of a multi-action turn.
 	#
-	# pod_combat_current_actor < 5 → AI is on the player team
-	# (slots 0-4) and looks for an enemy in 5-9. >= 5 inverts. Same
-	# split pod_combat_execute_ai_turn_effect uses at turn start.
+	# pod_combat_current_actor_team = flag:player means the AI is on the
+	# player team and looks for an enemy; flag:enemy inverts. Same split
+	# pod_combat_execute_ai_turn_effect uses at turn start.
 	#
 	# The "current target is alive" check is an any_in_list: if SOME
-	# active slot's slot_index matches selected_target AND that slot
+	# active slot's team+position matches selected_target AND that slot
 	# is alive, the target is fine and we no-op. NOT(any) = "no live
 	# match found" → re-pick.
 	save_scope_as = host
 	if = {
 		limit = {
-			has_variable = pod_combat_selected_target
+			has_variable = pod_combat_selected_target_team
 			NOT = {
 				any_in_list = {
 					variable = pod_combat_active_slots
-					var:slot_index = scope:host.var:pod_combat_selected_target
+					var:combat_team = scope:host.var:pod_combat_selected_target_team
+					var:team_position = scope:host.var:pod_combat_selected_target_position
 					var:slot_alive = 1
 				}
 			}
@@ -147,7 +148,7 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 		# Re-pick from the appropriate team's live slots and reload
 		# the workspace so the new target's data is in pod_combat_target_*.
 		if = {
-			limit = { has_variable = pod_combat_current_actor var:pod_combat_current_actor <= 4 }
+			limit = { has_variable = pod_combat_current_actor_team var:pod_combat_current_actor_team = flag:player }
 			pod_combat_ai_select_enemy_target_effect = yes
 		}
 		else = {
@@ -963,7 +964,7 @@ POD_combat_ai_restore_after_move = {
 	# $STORY$ = the chosen move
 	# Undoes any swap done by POD_combat_ai_swap_for_story so the next
 	# action starts from the AI's turn-start enemy target. Only swaps
-	# that saved pod_combat_ai_saved_enemy_target need restoration;
+	# that saved pod_combat_ai_saved_enemy_target_* need restoration;
 	# the existing swap effects all save it, so a blanket restore is safe.
 	if = {
 		limit = {
@@ -971,7 +972,7 @@ POD_combat_ai_restore_after_move = {
 				$STORY$ = { var:targeting = flag:single_ally }
 				$STORY$ = { var:targeting = flag:single_pc }
 			}
-			has_variable = pod_combat_ai_saved_enemy_target
+			has_variable = pod_combat_ai_saved_enemy_target_team
 		}
 		pod_combat_ai_restore_enemy_target_effect = yes
 	}
@@ -995,23 +996,27 @@ POD_combat_ai_restore_after_move = {
 pod_combat_ai_swap_to_ally_target_effect = {
 	# Save the current selected_target so pod_combat_ai_restore_enemy_target_effect
 	# can put it back after the single-ally move fires.
-	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
+	set_variable = { name = pod_combat_ai_saved_enemy_target_team     value = var:pod_combat_selected_target_team }
+	set_variable = { name = pod_combat_ai_saved_enemy_target_position value = var:pod_combat_selected_target_position }
 
 	# Pick any alive non-self same-team ally and load them into the
-	# target workspace. Team membership is fixed by slot index: slots
-	# 0-4 are team 0 (player team), 5-9 are team 1 (enemy team), so
-	# "same team as actor" is the AND-of-(actor team, slot team) filter
-	# below.
+	# target workspace. Team membership reads off the slot's combat_team
+	# flag, so "same team as actor" is the single combat_team ==
+	# current_actor_team filter below.
 	save_scope_as = host
 	random_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
 			var:slot_alive = 1
-			NOT = { var:slot_index = scope:host.var:pod_combat_current_actor }
-			OR = {
-				AND = { scope:host = { var:pod_combat_current_actor <= 4 } var:slot_index <= 4 }
-				AND = { scope:host = { var:pod_combat_current_actor >= 5 } var:slot_index >= 5 }
+			# not the actor itself (same team + same position)
+			NOT = {
+				AND = {
+					var:combat_team = scope:host.var:pod_combat_current_actor_team
+					var:team_position = scope:host.var:pod_combat_current_actor_position
+				}
 			}
+			# same team as the actor
+			var:combat_team = scope:host.var:pod_combat_current_actor_team
 		}
 		weight = {
 			base = 1
@@ -1024,7 +1029,8 @@ pod_combat_ai_swap_to_ally_target_effect = {
 	# resolvable for the workspace write.
 	scope:chosen_target ?= {
 		scope:host = {
-			set_variable = { name = pod_combat_selected_target value = scope:chosen_target.var:slot_index }
+			set_variable = { name = pod_combat_selected_target_team     value = scope:chosen_target.var:combat_team }
+			set_variable = { name = pod_combat_selected_target_position value = scope:chosen_target.var:team_position }
 		}
 		pod_combat_load_target_from_story_effect = yes
 	}
@@ -1032,16 +1038,18 @@ pod_combat_ai_swap_to_ally_target_effect = {
 
 pod_combat_ai_swap_to_pc_target_effect = {
 	# Save the current selected_target so restore_enemy_target can put it back
-	set_variable = { name = pod_combat_ai_saved_enemy_target value = var:pod_combat_selected_target }
+	set_variable = { name = pod_combat_ai_saved_enemy_target_team     value = var:pod_combat_selected_target_team }
+	set_variable = { name = pod_combat_ai_saved_enemy_target_position value = var:pod_combat_selected_target_position }
 
-	# Swap to slot 0 (the PC) and load into the target workspace.
+	# Swap to player/0 (the PC) and load into the target workspace.
 	# Snapshot host scope, flip into the slot story, delegate to
 	# pod_combat_load_target_from_story_effect.
 	if = {
-		limit = { has_variable = pod_combat_slot_0 var:pod_combat_slot_0 = { has_variable = slot_char } }
-		set_variable = { name = pod_combat_selected_target value = 0 }
+		limit = { has_variable = pod_combat_pc_slot var:pod_combat_pc_slot = { has_variable = slot_char } }
+		set_variable = { name = pod_combat_selected_target_team     value = flag:player }
+		set_variable = { name = pod_combat_selected_target_position value = 0 }
 		save_scope_as = host
-		var:pod_combat_slot_0 = {
+		var:pod_combat_pc_slot = {
 			pod_combat_load_target_from_story_effect = yes
 		}
 	}
@@ -1061,22 +1069,24 @@ pod_combat_ai_restore_enemy_target_effect = {
 	# the buffed ally. If we reload the enemy slot without saving first, the
 	# buff would be overwritten by the stale slot data and effectively erased.
 	if = {
-		limit = { has_variable = pod_combat_ai_saved_enemy_target }
+		limit = { has_variable = pod_combat_ai_saved_enemy_target_team }
 		save_scope_as = host
 		# Save the ally workspace back to its slot before we reload the enemy
 		every_in_list = {
 			variable = pod_combat_active_slots
-			limit = { var:slot_index = scope:host.var:pod_combat_selected_target }
+			limit = { var:combat_team = scope:host.var:pod_combat_selected_target_team var:team_position = scope:host.var:pod_combat_selected_target_position }
 			pod_combat_save_target_to_story_effect = yes
 		}
 
 		# Now swap selected_target back to the enemy and reload that slot's data
-		set_variable = { name = pod_combat_selected_target value = var:pod_combat_ai_saved_enemy_target }
+		set_variable = { name = pod_combat_selected_target_team     value = var:pod_combat_ai_saved_enemy_target_team }
+		set_variable = { name = pod_combat_selected_target_position value = var:pod_combat_ai_saved_enemy_target_position }
 		every_in_list = {
 			variable = pod_combat_active_slots
-			limit = { var:slot_index = scope:host.var:pod_combat_selected_target }
+			limit = { var:combat_team = scope:host.var:pod_combat_selected_target_team var:team_position = scope:host.var:pod_combat_selected_target_position }
 			pod_combat_load_target_from_story_effect = yes
 		}
-		remove_variable = pod_combat_ai_saved_enemy_target
+		remove_variable = pod_combat_ai_saved_enemy_target_team
+		remove_variable = pod_combat_ai_saved_enemy_target_position
 	}
 }

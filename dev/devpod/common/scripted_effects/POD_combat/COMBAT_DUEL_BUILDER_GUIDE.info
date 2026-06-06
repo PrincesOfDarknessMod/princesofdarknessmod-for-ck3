@@ -1,4 +1,4 @@
-# Combat-PoD Duel Builder Guide
+﻿# Combat-PoD Duel Builder Guide
 
 This guide covers how to start a combat-minigame fight from script --
 the create / add / finalize builder.
@@ -43,35 +43,38 @@ Three steps, five effects:
 ```
 <PC scope> = {
     POD_combat_create_duel_effect    = { ...config... }   # 1. once
-    POD_combat_duel_add_ally_effect  = { CHARACTER = X }  # 2. 0-4 times
-    POD_combat_duel_add_enemy_effect = { CHARACTER = X }  # 2. 1-5 times
+    POD_combat_duel_add_ally_effect  = { CHARACTER = X }  # 2. any number
+    POD_combat_duel_add_enemy_effect = { CHARACTER = X }  # 2. 1+ (>=1 enemy)
     POD_combat_finalize_duel_effect  = yes                # 3. once
 }
 ```
 
 | Effect | When | What it does |
 |---|---|---|
-| `POD_combat_create_duel_effect` | once, first | Scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC in **slot 0** |
-| `POD_combat_duel_add_ally_effect` | 0-4 times | Seats a character in the next free **ally** slot (1-4) |
-| `POD_combat_duel_add_enemy_effect` | 1-5 times | Seats a character in the next free **enemy** slot (5-9); the **first** enemy goes to slot 5 |
+| `POD_combat_create_duel_effect` | once, first | Scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
+| `POD_combat_duel_add_ally_effect` | any number | Appends a character at the next free **player** position (1, 2, 3, …) and bumps `pod_combat_player_team_size` |
+| `POD_combat_duel_add_enemy_effect` | 1+ times | Appends a character at the next free **enemy** position (0, 1, 2, …) and bumps `pod_combat_enemy_team_size`; the **first** enemy goes to enemy position 0 |
 | `POD_combat_finalize_duel_effect` | once, last | Inits every slot, computes hit chances, opens the combat window, starts round 1 |
 
-The slot layout never changes: **PC = slot 0**, allies = 1-4, primary
-opponent + reinforcements = 5-9. Team is derived from the slot index
-(0-4 player, 5-9 enemy) -- there is no "mode" variable any more.
+The roster shape: **PC = player/0**, allies = player/1, player/2, …;
+primary opponent = enemy/0, reinforcements = enemy/1, enemy/2, …. Every
+seat carries an explicit `combat_team` flag (`flag:player` / `flag:enemy`)
+and a `team_position` (an int 0+, position 0 = the team leader) -- team is
+not inferred from a single slot index, and there is no "mode" variable.
+Teams can be arbitrarily large; there is no per-side cap (see rule 5).
 
 ---
 
 ## The golden rules
 
 1. **Run everything in the PC's scope.** The PC is the combat host --
-   all the state hangs off them, and they are slot 0. If your `on_accept`
+   all the state hangs off them, and they are player/0. If your `on_accept`
    has `scope:actor = <the PC>`, wrap the builder in `scope:actor = { ... }`.
 
-2. **Never add the PC.** `create_duel` already seats them in slot 0.
+2. **Never add the PC.** `create_duel` already seats them at player/0.
    Adding them again would burn an ally slot on a duplicate.
 
-3. **The first enemy you add is the "primary opponent" (slot 5).** It's
+3. **The first enemy you add is the "primary opponent" (enemy/0).** It's
    the hit-chance baseline for the whole player team and the PC's default
    target. Add the headline enemy first; reinforcements after.
 
@@ -81,9 +84,13 @@ opponent + reinforcements = 5-9. Team is derived from the slot index
    and throw. Use `save_scope_as` (or an already-saved scope like
    `scope:recipient`) and pass that.
 
-5. **Rosters cap at 5 v 5.** Slots 0-4 (PC + 4 allies) vs 5-9 (5 enemies).
-   Extra `add_*` calls past a full side silently drop -- no error, no
-   overflow.
+5. **No per-side cap -- teams are arbitrarily large.** Each `add_*` call
+   appends a slot at the next free position and increments a per-team
+   counter (`pod_combat_player_team_size` / `pod_combat_enemy_team_size`).
+   Call them as many times as you like; nothing is dropped. The only bound
+   is a soft guardrail constant, `pod_combat_max_team_size` (default 50,
+   trivially raised), there to catch a runaway loop -- it is not a design
+   cap. (Visuals strain at very large counts, but the engine handles any N.)
 
 6. **`finalize` is what opens the window.** Until you call it,
    `pod_combat_active` is not set and the GUI stays hidden. Build the
@@ -131,7 +138,7 @@ POD_combat_create_duel_effect = {
 
 `INITIATOR` / `ATTACKER` / `DEFENDER` are the PoD duel parties, in the
 `sc_*` sense -- they are **independent of slot layout**. The PC can be the
-defender (slot 0) while the attacker sits in slot 5. The post-combat
+defender (seated at player/0) while the attacker sits at enemy/0. The post-combat
 event (`pod_combat.9999`) restores these so win/loss attribution and any
 `scope:sc_victor` logic in your follow-up stay correct. For a fight the
 PC instigates, all three are usually the PC / the PC / the opponent.
@@ -189,8 +196,8 @@ scope:actor = {
 
 ## Worked example 2 -- PC + coterie vs opponent + their knights (NvN)
 
-The headline opponent goes in slot 5; their knights fill 6-9; the PC's
-coterie fills 1-4. This is the NvN debug interaction, trimmed.
+The headline opponent goes at enemy/0; their knights fill enemy/1, 2, …;
+the PC's coterie fills player/1, 2, …. This is the NvN debug interaction, trimmed.
 
 ```
 scope:actor = {
@@ -204,7 +211,7 @@ scope:actor = {
         OUTPUT_EVENT = my_namespace.0001
     }
 
-    # Allies -> slots 1-4
+    # Allies -> player/1, 2, 3, … (one per coterie member, no cap)
     every_relation = {
         type = coterie_member
         limit = { is_alive = yes is_adult = yes NOT = { has_trait = incapable } }
@@ -212,10 +219,10 @@ scope:actor = {
         scope:actor = { POD_combat_duel_add_ally_effect = { CHARACTER = scope:duel_ally } }
     }
 
-    # Primary opponent -> slot 5 (add FIRST so it lands in 5)
+    # Primary opponent -> enemy/0 (add FIRST so it lands at position 0)
     POD_combat_duel_add_enemy_effect = { CHARACTER = scope:recipient }
 
-    # Reinforcements -> slots 6-9 (extra ones past slot 9 just drop)
+    # Reinforcements -> enemy/1, 2, 3, … (one per qualifying knight, no cap)
     scope:recipient = {
         every_knight = {
             limit = {
@@ -248,7 +255,7 @@ scope:actor = {
     POD_combat_create_duel_effect = {
         INITIATOR    = scope:actor
         ATTACKER     = scope:actor
-        DEFENDER     = scope:the_villain   # the slot-5 headliner
+        DEFENDER     = scope:the_villain   # the enemy/0 headliner
         FATALITY     = always
         FIXED        = no
         LOCALE       = throne_room
@@ -258,9 +265,9 @@ scope:actor = {
     POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_champion }
     POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_sorcerer }
 
-    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:the_villain }   # -> slot 5
-    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_a }    # -> slot 6
-    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_b }    # -> slot 7
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:the_villain }   # -> enemy/0
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_a }    # -> enemy/1
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_b }    # -> enemy/2
 
     POD_combat_finalize_duel_effect = yes
 }
@@ -281,7 +288,7 @@ scope:actor = {
   run with broken move-story references.
 - **A defensive cleanup** -- if a previous fight leaked state, it's torn
   down before the new roster is built.
-- **The PC in slot 0.**
+- **The PC seated at player/0.**
 
 You don't have to think about any of it -- just supply the config and the
 roster.
@@ -308,7 +315,7 @@ it as if the duel had run through PoD's normal chain.
 ## Cheat sheet
 
 ```
-# 1. create (once, in PC scope) -- config + PC into slot 0
+# 1. create (once, in PC scope) -- config + PC into player/0
 POD_combat_create_duel_effect = {
     INITIATOR = .. ATTACKER = .. DEFENDER = ..
     FATALITY = no|practice|possible|default|always
@@ -316,12 +323,12 @@ POD_combat_create_duel_effect = {
 }
 
 # 2. add combatants (saved scopes only!)
-POD_combat_duel_add_ally_effect  = { CHARACTER = scope:.. }   # slots 1-4
-POD_combat_duel_add_enemy_effect = { CHARACTER = scope:.. }   # slots 5-9, first -> 5
+POD_combat_duel_add_ally_effect  = { CHARACTER = scope:.. }   # player/1, 2, … (any count)
+POD_combat_duel_add_enemy_effect = { CHARACTER = scope:.. }   # enemy/0, 1, … first -> enemy/0
 
 # 3. go live (once, last)
 POD_combat_finalize_duel_effect = yes
 ```
 
-Rules: PC scope | don't re-add the PC | first enemy = slot 5 | saved
-scopes not var-chains | 5 v 5 cap | finalize opens the window.
+Rules: PC scope | don't re-add the PC | first enemy = enemy/0 | saved
+scopes not var-chains | no per-side cap (soft guard `pod_combat_max_team_size`) | finalize opens the window.

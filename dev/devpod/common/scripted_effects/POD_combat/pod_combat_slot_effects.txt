@@ -1,15 +1,25 @@
 ﻿# Per-slot story_cycle scaffolding for the combat minigame.
 # POD_combat_slot (declared in POD_story_cycle_combat.txt) is the sole
 # data container for per-combatant state. This file holds the lifecycle
-# helpers (populate / clear) and a parametric accessor effect.
+# helpers (populate / clear) and the parametric accessor effects.
 # Caller scope is the combat host; stories live on Charon (POD_wraith_01).
 #
-# Slot stories are LAZILY CREATED on first fill (inside
-# pod_combat_set_slot_char_effect below). Only slot indices the duel
-# builder actually fills get a story_cycle scope on Charon, and the
-# single pod_combat_active_slots variable list tracks them all. There is
-# no separate "all-10-stories" list — the previous pod_combat_slots /
-# pod_combat_active_slots split was retired with the lazy-create switch.
+# Slot addressing — (combat_team, team_position):
+#   Each slot story carries `combat_team` (flag:player / flag:enemy) and
+#   `team_position` (int >= 0, where 0 = the team leader: the PC for the
+#   player team, the primary opponent for the enemy team). Teams are
+#   unbounded — team_position runs 0..(team size - 1). There is NO flat
+#   slot_index; "which team" is read explicitly off combat_team.
+#
+# Slot addressing is by ITERATION: every dispatch / accessor pass walks
+# the single pod_combat_active_slots variable list (on the host) and
+# matches (combat_team, team_position). There are no per-position pointer
+# vars, so a team can hold any number of combatants. The only two pointer
+# vars are the leaders — pod_combat_pc_slot (player/0) and
+# pod_combat_enemy_leader_slot (enemy/0) — derived once at finalize for the
+# many sites that reference a leader directly. Slot stories are created on
+# demand by the duel builder (one per combatant) and end_story-d together
+# at cleanup.
 #
 # For the slot field catalogue, init defaults, the absence-as-signal
 # field list, and the lifecycle hooks see COMBAT_REFERENCE.info §3.
@@ -19,12 +29,15 @@
 ###### CLEANUP
 ###################
 
-# end_story every slot story, then drop the host's pointer vars and
+# end_story every slot story, then drop the two leader pointer vars and
 # clear the list. The end_story call frees the story_cycle objects
 # from Charon's owned-stories list (matching how log entries and
-# sc_context get torn down at combat end). The pointer-var removes
-# at the end are unconditional — they're no-ops for slot indices the
-# duel builder never filled (e.g. slots 1-4 and 6-9 in a 1v1).
+# sc_context get torn down at combat end). Slots are addressed by
+# iterating pod_combat_active_slots and matching (combat_team,
+# team_position); the only per-slot pointer vars are the two leaders
+# (pod_combat_pc_slot = player/0, pod_combat_enemy_leader_slot = enemy/0),
+# derived once at finalize. The removes are unconditional no-ops if a
+# fight somehow never set them.
 #
 # Caller must be in host scope.
 pod_combat_clear_slot_stories_effect = {
@@ -33,188 +46,141 @@ pod_combat_clear_slot_stories_effect = {
 		end_story = yes
 	}
 	clear_variable_list = pod_combat_active_slots
-	remove_variable = pod_combat_slot_0
-	remove_variable = pod_combat_slot_1
-	remove_variable = pod_combat_slot_2
-	remove_variable = pod_combat_slot_3
-	remove_variable = pod_combat_slot_4
-	remove_variable = pod_combat_slot_5
-	remove_variable = pod_combat_slot_6
-	remove_variable = pod_combat_slot_7
-	remove_variable = pod_combat_slot_8
-	remove_variable = pod_combat_slot_9
+	remove_variable = pod_combat_pc_slot
+	remove_variable = pod_combat_enemy_leader_slot
 }
 
 
 ###################
 ###### ACCESSOR HELPERS
 ###################
-# Parametric write helpers, keyed by integer slot index. Each writes
-# to the matching slot story via the host's pod_combat_slot_$N$
-# pointer var. Used by host-scope callers (combat init, AI logic,
-# AoE dispatchers' int-keyed wrappers) where the slot index is a
-# parse-time literal. Iteration-style callers running in slot-story
-# scope do direct `set_variable = { name = slot_X ... }` instead of
-# routing through these helpers, since current scope is already the
-# slot story.
+# Scope-based write helpers: each operates on the CURRENT slot story.
+# Callers are either inside an `every_in_list = pod_combat_active_slots`
+# loop (the dispatch / init passes), or have scope-switched into a leader
+# pointer first (`var:pod_combat_pc_slot = { ... }` /
+# `var:pod_combat_enemy_leader_slot = { ... }` — the `var:` prefix is
+# mandatory; without it CK3 reads the pointer name as an effect and
+# silently drops the block). There is no (team, position)
+# addressing — a slot's identity lives in its own combat_team /
+# team_position vars, reached by iterating the active list.
 
-# Set slot_alive on the slot story. Caller must be in host scope.
-# hidden_effect_new_object wrap — see pod_combat_set_slot_char_effect
-# below and COMBAT_REFERENCE.info §7.
+# Set slot_alive on the current slot story.
 pod_combat_set_slot_alive_effect = {
-	# $SLOT$  = 0..9
 	# $VALUE$ = 0 or 1
-	hidden_effect_new_object = {
-		var:pod_combat_slot_$SLOT$ = {
-			set_variable = { name = slot_alive value = $VALUE$ }
-		}
-	}
+	set_variable = { name = slot_alive value = $VALUE$ }
 }
 
-# Universal slot-var setter: writes a value to a named slot-story
-# field (slot_$NAME$). Caller must be in host scope.
-# hidden_effect_new_object wrap: see pod_combat_set_slot_char_effect
-# below and COMBAT_REFERENCE.info §7.
+# Universal slot-var setter: writes slot_$NAME$ on the current slot story.
 #
 # Parameters:
-#   $SLOT$  = 0..9
 #   $NAME$  = stat short name (morale, prowess, soak, base_soak,
 #             hit_chance, base_hit_chance, ...)
-#   $VALUE$ = value to assign — literal, scope:, or var: reference
-#             (var: references resolve against the caller's scope).
+#   $VALUE$ = value to assign — literal, scope:, or var: reference.
 #
 # Scope-resolution gotcha: $VALUE$ is captured via save_scope_value_as
-# BEFORE flipping into the slot-story scope. Without this dance, callers
-# passing `var:pod_combat_actor_*` would have those references
-# re-resolved against the slot story (which doesn't carry the workspace
-# vars) and fail. The save captures the value in host scope; the saved
-# alias is readable from the nested slot scope.
+# FIRST so scope:/var: references resolve to the caller's intended value
+# before the write lands on the slot story. Callers pass already-saved
+# scope values (e.g. scope:slot_soak captured off the slot's char) or
+# constants, so the capture is scope-safe inside the iteration body.
 pod_combat_set_slot_var_effect = {
-	# Resolve $VALUE$ in the host scope first.
 	save_scope_value_as = { name = pod_combat_slot_var_temp value = $VALUE$ }
-	hidden_effect_new_object = {
-		var:pod_combat_slot_$SLOT$ = {
-			set_variable = { name = slot_$NAME$ value = scope:pod_combat_slot_var_temp }
-		}
-	}
+	set_variable = { name = slot_$NAME$ value = scope:pod_combat_slot_var_temp }
 }
 
 # Universal slot-var remover: counterpart to
 # pod_combat_set_slot_var_effect. Removes the named field from the
-# slot story. Used for absence-as-signal fields where the var's
+# current slot story. Used for absence-as-signal fields where the var's
 # presence carries semantic meaning (stance flags, retaliate vars,
-# init_bonus, ap_drain). Caller must be in host scope.
-# hidden_effect_new_object wrap: see pod_combat_set_slot_char_effect
-# below and COMBAT_REFERENCE.info §7.
+# init_bonus, ap_drain).
 #
 # Parameters:
-#   $SLOT$ = 0..9
 #   $NAME$ = field short name (is_guarding, is_dodging, is_stealthed,
 #            retaliate_hit, retaliate_miss, retaliate_hit_agg,
 #            retaliate_miss_agg, init_bonus, ap_drain, ...)
 pod_combat_remove_slot_var_effect = {
-	hidden_effect_new_object = {
-		var:pod_combat_slot_$SLOT$ = {
-			remove_variable = slot_$NAME$
-		}
-	}
+	remove_variable = slot_$NAME$
 }
 
-# Set slot_char on the slot story, LAZILY CREATING the story on first
-# call if it doesn't exist yet. Story_cycle vars hold scope references
-# the same way character vars do, so $CHARACTER$ stores as a character
-# reference. Used by the duel builder (POD_combat_create_duel_effect for
-# the PC's slot 0, POD_combat_duel_add_ally_effect / _add_enemy_effect for
-# the rest). Slot occupancy elsewhere is tested via
-# `var:pod_combat_slot_$N$ = { has_variable = slot_char }` (the
-# pointer-var presence and slot_char presence are now coextensive —
-# under lazy creation they get set together).
+# Create a fresh slot story for one combatant and register it in
+# pod_combat_active_slots. Story_cycle vars hold scope references the same
+# way character vars do, so $CHARACTER$ stores as a character reference.
+# Used by the duel builder (POD_combat_create_duel_effect for the PC at
+# player/0, POD_combat_duel_add_ally_effect for the player team,
+# POD_combat_duel_add_enemy_effect for the enemy team). The builder only
+# ever APPENDS a new (team, position), never re-fills an existing cell, so
+# this ALWAYS creates: there is no per-position pointer var and no
+# create-guard. `team_position` is written from a RUNTIME value (the team's
+# current size), which is what lets a team hold any number of combatants.
+# Slots are addressed elsewhere by iterating pod_combat_active_slots and
+# matching combat_team / team_position.
 #
-# Caller must be in host scope. The "slot owner" referred to by
-# scope:pod_combat_slot_owner inside the create branch IS the host
-# (the PC) — slot stories belong to Charon (POD_wraith_01) story-wise
-# but the host owns the per-slot pointer vars + the active_slots list.
+# Caller must be in host scope; the new story is added to the host's
+# pod_combat_active_slots list (the single iteration source).
 #
 # hidden_effect_new_object wrap: CK3's tooltip builder walks effect
 # chains symbolically and skips state-mutating calls including
-# create_story — so any later scope:new_slot read errors with
-# "Undefined event target" during tooltip preview. Wrapping the
-# create+save+writes in hidden_effect_new_object lets real execution
-# run normally while tooltip preview skips the new-object-dependent
-# block. Same pattern as PoD's POD_heist_create_node. See
-# COMBAT_REFERENCE.info §7.
+# create_story — so any later scope:new_slot read errors with "Undefined
+# event target" during tooltip preview. Wrapping the create+writes in
+# hidden_effect_new_object lets real execution run normally while tooltip
+# preview skips the new-object-dependent block. Same pattern as PoD's
+# POD_heist_create_node. See COMBAT_REFERENCE.info §7.
 pod_combat_set_slot_char_effect = {
-	# $SLOT$      = 0..9
+	# $TEAM$      = player | enemy  (parse-time literal; only ever 2 teams)
+	# $POSITION$  = team_position to assign (runtime value, 0 = leader)
 	# $CHARACTER$ = character scope to assign to the slot
-	save_scope_as = pod_combat_slot_owner
+	#
+	# Capture $POSITION$ in the host scope BEFORE the new-object block, so
+	# the runtime position (e.g. var:pod_combat_player_team_size) is
+	# readable as a scope value once we flip into the freshly created story.
+	save_scope_value_as = { name = pod_combat_slot_pos_temp value = $POSITION$ }
 	hidden_effect_new_object = {
-		# Create-if-missing prelude. Stories are created lazily on
-		# first fill instead of upfront for all 10 indices, so only
-		# the slots the builder actually filled exist on Charon and
-		# cleanup can iterate pod_combat_active_slots alone.
-		if = {
-			limit = { NOT = { has_variable = pod_combat_slot_$SLOT$ } }
-			character:POD_wraith_01 = {
-				create_story = {
-					type = POD_combat_slot
-					save_scope_as = new_slot
-				}
-			}
-			scope:new_slot = {
-				set_variable = { name = slot_index       value = $SLOT$ }
-				set_variable = { name = slot_alive       value = 1 }
-				# Stat fields zero-defaulted so SV gates can be a single
-				# pointer-var check instead of nested per-field has_variable.
-				# Only the "pure value" stats are pre-init'd; gate-style
-				# fields (slot_base_soak, slot_hit_chance, slot_base_hit_chance,
-				# slot_initiative, slot_init_bonus, slot_ap_drain,
-				# slot_incorporeal_spirit, slot_can_damage_spirit, stances,
-				# tiers) stay absent-until-written.
-				#
-				# slot_morale is initialised to the FULL max instead of 0
-				# because the init-time KO check (in
-				# POD_combat_finalize_duel_effect) treats
-				# `var:slot_morale <= 0` as one of its four
-				# KO predicates. Every current caller pairs this effect
-				# immediately with pod_combat_init_slot_from_character_effect
-				# (which overrides morale to pod_combat_max_morale), so the
-				# 0 default was latent — but a future call site that
-				# forgot the follow-up init would have marked the new
-				# slot dead before the first round. Defaulting to the cap
-				# means a freshly-created slot reads as alive until the
-				# real init writes the live morale value.
-				set_variable = { name = slot_morale      value = pod_combat_max_morale }
-				set_variable = { name = slot_prowess     value = 0 }
-				set_variable = { name = slot_soak        value = 0 }
-				set_variable = { name = slot_energy_used value = 0 }
-				set_variable = { name = slot_has_acted   value = 0 }
-			}
-			scope:pod_combat_slot_owner = {
-				set_variable = { name = pod_combat_slot_$SLOT$ value = scope:new_slot }
-			}
-
-			# Register this slot in pod_combat_active_slots — INSIDE the
-			# create guard so re-filling an already-registered slot can't
-			# double-register it (a duplicate entry would make every
-			# dispatch loop process the slot twice). The GUI datamodel
-			# iterates this list, so unfilled slots are excluded at the
-			# script level instead of at GUI render time — letting the
-			# datamodel item safely set
-			# `datacontext = "[Scope.Var('slot_char').GetCharacter]"`
-			# without risking evaluation on an unfilled slot's null
-			# slot_char (which CK3 reports as "Scoped object of type
-			# 'character' is not valid"). Cleared in
-			# pod_combat_clear_slot_stories_effect.
-			add_to_variable_list = {
-				name = pod_combat_active_slots
-				target = scope:new_slot
+		character:POD_wraith_01 = {
+			create_story = {
+				type = POD_combat_slot
+				save_scope_as = new_slot
 			}
 		}
+		scope:new_slot = {
+			# (combat_team, team_position) — the slot's identity.
+			# combat_team is the source of truth for team membership;
+			# team_position 0 = the team leader.
+			set_variable = { name = combat_team   value = flag:$TEAM$ }
+			set_variable = { name = team_position value = scope:pod_combat_slot_pos_temp }
+			set_variable = { name = slot_alive    value = 1 }
+			# Stat fields zero-defaulted so SV gates can be a single slot
+			# presence check instead of nested per-field has_variable.
+			# Only the "pure value" stats are pre-init'd; gate-style fields
+			# (slot_base_soak, slot_hit_chance, slot_base_hit_chance,
+			# slot_initiative, slot_init_bonus, slot_ap_drain,
+			# slot_incorporeal_spirit, slot_can_damage_spirit, stances,
+			# tiers) stay absent-until-written.
+			#
+			# slot_morale is initialised to the FULL max instead of 0
+			# because the init-time KO check (in
+			# POD_combat_finalize_duel_effect) treats `var:slot_morale <= 0`
+			# as one of its KO predicates. Every caller pairs this with
+			# pod_combat_init_slot_from_character_effect (which overrides
+			# morale to pod_combat_max_morale) at finalize, so the 0 default
+			# was latent — but defaulting to the cap means a freshly-created
+			# slot reads as alive until real init writes the live value.
+			set_variable = { name = slot_morale      value = pod_combat_max_morale }
+			set_variable = { name = slot_prowess     value = 0 }
+			set_variable = { name = slot_soak        value = 0 }
+			set_variable = { name = slot_energy_used value = 0 }
+			set_variable = { name = slot_has_acted   value = 0 }
+			set_variable = { name = slot_char        value = $CHARACTER$ }
+		}
 
-		# Set slot_char on the slot story. OUTSIDE the create guard so a
-		# re-fill (same slot index, new occupant) still updates slot_char.
-		var:pod_combat_slot_$SLOT$ = {
-			set_variable = { name = slot_char value = $CHARACTER$ }
+		# Register this slot in pod_combat_active_slots (on the host — current
+		# scope inside the wrap is still the caller). The GUI datamodel and
+		# every dispatch loop iterate this list, so it holds exactly the
+		# created slots; the datamodel item's
+		# `datacontext = "[Scope.Var('slot_char').GetCharacter]"` is always
+		# evaluated on a slot whose slot_char is set. Cleared in
+		# pod_combat_clear_slot_stories_effect.
+		add_to_variable_list = {
+			name = pod_combat_active_slots
+			target = scope:new_slot
 		}
 	}
 }

@@ -12,11 +12,18 @@ points at.
 
 ## Architecture overview
 
-Group combat uses a **10-slot system** (slots 0-4 = player team, 5-9
-= enemy team). Per-combatant state lives on `POD_combat_slot`
-story_cycle scopes — one story per slot, created at combat init and
-cleaned up at combat end. Pointer variables `pod_combat_slot_0..9`
-on the combat host (the PC) hand back the matching story.
+Group combat uses a **two-team system** with teams of arbitrary
+size (no positional cap — only a soft guardrail constant
+`pod_combat_max_team_size`, default 50). Each combatant is identified
+by a `combat_team` flag (`flag:player` / `flag:enemy`) plus a
+`team_position` (int 0+, position 0 = leader). Per-combatant state
+lives on `POD_combat_slot` story_cycle scopes — one story per slot,
+created at combat init and cleaned up at combat end. The only literal
+slot-pointer variables on the combat host (the PC) are the two team
+leaders: `pod_combat_pc_slot` (player/0) and
+`pod_combat_enemy_leader_slot` (enemy/0). Every non-leader slot is
+reached by iterating the `pod_combat_active_slots` variable list and
+matching `combat_team` + `team_position`.
 
 A transient **action workspace** (`pod_combat_actor_*` /
 `pod_combat_target_*`) holds whichever combatant is acting and
@@ -55,11 +62,11 @@ groups them by *owner* for the "where does this live?" lookup.
 
 | Owner | Scope it lives on | Lifetime | Variables |
 |---|---|---|---|
-| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_round`, `pod_combat_current_actor`, `pod_combat_current_ap`, `pod_combat_enemy_team_size`, `pod_combat_pc_target`, `pod_combat_selected_target`, `pod_combat_slot_0..9` (pointer vars — only set for slot indices the duel builder actually filled), `pod_combat_active_slots` (variable list of every filled slot story, lazily populated as slots fill), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_outcome`, `pod_combat_last_attack_result`, `pod_combat_last_retal_fired`, `pod_combat_last_retal_damage`, `pod_combat_last_retal_agg`, `pod_combat_nonfatal_active` |
-| **Slot** | `POD_combat_slot` story (one per slot, on Charon) | slot creation → slot cleanup | `slot_index`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_base_soak`, `slot_hit_chance`, `slot_base_hit_chance`, `slot_initiative`, `slot_init_bonus`, `slot_ap_drain`, `slot_energy_used`, `slot_turn_order`, `slot_has_acted`, `slot_is_guarding`, `slot_is_dodging`, `slot_is_stealthed`, `slot_retaliate_*`, `slot_incorporeal_spirit`, `slot_can_damage_spirit`, all `slot_{stat}_{direction}_{duration}_tier` vars |
+| **Host** | combat host (PC) character | combat init → combat cleanup | `pod_combat_active`, `pod_combat_is_over`, `pod_combat_round`, `pod_combat_current_actor_team`, `pod_combat_current_actor_position`, `pod_combat_current_ap`, `pod_combat_player_team_size`, `pod_combat_enemy_team_size`, `pod_combat_pc_target_team`, `pod_combat_pc_target_position`, `pod_combat_pc_target_char`, `pod_combat_selected_target_team`, `pod_combat_selected_target_position`, `pod_combat_pc_slot` / `pod_combat_enemy_leader_slot` (the only two literal slot-pointer vars — the player/0 and enemy/0 team leaders), `pod_combat_active_slots` (variable list of every filled slot story, lazily populated as slots fill; every non-leader slot is reached by iterating it and matching `combat_team` + `team_position`), `pod_combat_winner`, `pod_combat_loser`, `pod_combat_last_damage`, `pod_combat_last_heal_amount`, `pod_combat_last_morale_damage_amount`, `pod_combat_last_morale_heal_amount`, `pod_combat_last_outcome`, `pod_combat_last_attack_result`, `pod_combat_last_retal_fired`, `pod_combat_last_retal_damage`, `pod_combat_last_retal_agg`, `pod_combat_nonfatal_active` |
+| **Slot** | `POD_combat_slot` story (one per slot, on Charon) | slot creation → slot cleanup | `combat_team`, `team_position`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_base_soak`, `slot_hit_chance`, `slot_base_hit_chance`, `slot_initiative`, `slot_init_bonus`, `slot_ap_drain`, `slot_energy_used`, `slot_turn_order`, `slot_has_acted`, `slot_is_guarding`, `slot_is_dodging`, `slot_is_stealthed`, `slot_retaliate_*`, `slot_incorporeal_spirit`, `slot_can_damage_spirit`, all `slot_{stat}_{direction}_{duration}_tier` vars |
 | **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` (mirrors of the slot fields above) |
 | **Character (AI)** | the acting AI character | persists per-character across combats until `pod_combat_group_cleanup_effect` clears them | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` (variable list) |
-| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:retal_fired` (three-axis result snapshot — see §4), `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, `entry.var:retal_damage`, `entry.var:retal_agg`, `entry.var:actor_side` (slot index of the acting slot — `0..4` ally / `5..9` enemy / `-1` system entry; the combat-log GUI keys the ally-gold / enemy-red side bar + actor-name tint off this), `entry.var:aoe_burst_index` (set by AoE iterations so the buff rider renders once per move; absent on non-AoE rows), `entry.var:system_message` (only on bookend rows pushed by `pod_combat_push_system_log_effect`), `entry.var:round`, plus the move-context fields the customizable_loc dispatcher reads |
+| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:retal_fired` (three-axis result snapshot — see §4), `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, `entry.var:retal_damage`, `entry.var:retal_agg`, `entry.var:actor_side` (team code of the acting slot — `0` ally/player / `1` enemy / `-1` system entry; the combat-log GUI keys the ally-gold / enemy-red side bar + actor-name tint off this), `entry.var:aoe_burst_index` (set by AoE iterations so the buff rider renders once per move; absent on non-AoE rows), `entry.var:system_message` (only on bookend rows pushed by `pod_combat_push_system_log_effect`), `entry.var:round`, plus the move-context fields the customizable_loc dispatcher reads |
 
 HP is derived live from each slot character's PoD wound vars
 (`POD_empty_damage_boxes` etc.); it is **not** owned by any of the
@@ -76,19 +83,21 @@ contract that gives those vars meaning.
 | `pod_combat_active` | flag: combat is in progress |
 | `pod_combat_is_over` | flag: combat is over (re-entry guard) |
 | `pod_combat_round` | current round number |
-| `pod_combat_current_actor` | slot index of the acting combatant (0-9) |
+| `pod_combat_current_actor_team` / `_position` | the acting combatant's team (`flag:player` / `flag:enemy`) + position within it (int 0+, 0 = leader) |
 | `pod_combat_current_ap` | AP remaining this turn |
-| `pod_combat_enemy_team_size` | count of occupied enemy slots (5-9); incremented as each enemy is seated by `POD_combat_duel_add_enemy_effect` |
-| `pod_combat_pc_target` | the PC's persistent target slot (1-9) |
-| `pod_combat_selected_target` | slot loaded into the target workspace |
-| `pod_combat_slot_0..9` | pointer var per slot; resolves to the slot's `POD_combat_slot` story scope. Unset for unfilled slots. |
-| `pod_combat_active_slots` | variable list of slot stories currently in play (filled slots only, in slot-index ascending order). Iterated by every dispatch loop instead of unrolling 0..9. |
+| `pod_combat_player_team_size` | count of occupied player positions; incremented as each ally is seated by `POD_combat_duel_add_ally_effect` (uncapped — soft guardrail `pod_combat_max_team_size` only) |
+| `pod_combat_enemy_team_size` | count of occupied enemy positions; incremented as each enemy is seated by `POD_combat_duel_add_enemy_effect` (uncapped — soft guardrail `pod_combat_max_team_size` only) |
+| `pod_combat_pc_target_team` / `_position` | the PC's persistent target: team + position (never the PC's own player/0) |
+| `pod_combat_selected_target_team` / `_position` | the slot (team + position) loaded into the target workspace |
+| `pod_combat_pc_slot` / `pod_combat_enemy_leader_slot` | the only two literal slot-pointer vars: the player/0 and enemy/0 team leaders. Each resolves to that leader's `POD_combat_slot` story scope. Non-leader slots have no pointer var — they are found by iterating `pod_combat_active_slots`. |
+| `pod_combat_active_slots` | variable list of slot stories currently in play (filled slots only, in insertion order: player leader then any allies, then enemy leader then the rest). Iterated by every dispatch loop (matching `combat_team` + `team_position` for a specific slot) so the dispatchers scale to any team size with no unrolling. |
 
 ### Per-slot stats (vars on each `POD_combat_slot` story)
 
 | Variable | Meaning |
 |---|---|
-| `slot_index` | 0..9, baked at slot creation |
+| `combat_team` | flag (`flag:player` / `flag:enemy`): the slot's team, baked at creation |
+| `team_position` | int 0+: position within the team (0 = leader), no upper bound, baked at creation |
 | `slot_char` | character ref occupying the slot |
 | `slot_alive` | 1 while in play, 0 when KO'd |
 | `slot_morale` | current Morale |
@@ -104,8 +113,9 @@ contract that gives those vars meaning.
 | `slot_turn_order` | turn-rank within the round (1 = first); stamped by `pod_combat_calc_turn_orders_effect` after initiative roll |
 | `slot_has_acted` | 1 once the slot's turn resolves this round; reset to 0 by `pod_combat_calculate_initiative_effect` at the start of every round |
 
-Team affiliation is computed from `slot_index` (0-4 = player team,
-5-9 = enemy team) — not stored as a per-slot variable.
+Team affiliation is stored explicitly on each slot as the `combat_team`
+flag (`flag:player` / `flag:enemy`); `team_position` (int 0+, 0 = leader)
+gives the position within that team. There is no flat slot index.
 
 **Health is NOT stored on the slot story.** Live script values
 derive HP from each slot character's PoD wound vars. The slot
@@ -256,7 +266,7 @@ load-bearing — reordering will silently break behavior.
 | §1 | AP spend | must precede §6 (committed move) |
 | §2 | Result-flag reset + log metadata | must precede every §3-§15 write |
 | §3 | Energy cost | runs on actor scope (not host) |
-| §4 | CK3 resource costs | PC only (slot 0) |
+| §4 | CK3 resource costs | PC only (player/0) |
 | §5 | Target stance bypass | strips workspace target stances (`bypass_dodge` / `bypass_stealth` / `remove_guard`) before §6 reads |
 | §5b | AoE debuff pre-broadcast | strips slot stances; must precede §6 so per-target damage iteration sees the post-strip state |
 | §6 | HP damage dispatch | reads §5 / §5b stance state. Writes `pod_combat_last_outcome` (=`flag:attack`) and `pod_combat_last_attack_result` on the host (consumed by the rider gates §7 / §8 / §9) |
@@ -269,6 +279,7 @@ load-bearing — reordering will silently break behavior.
 | §12b | AoE buff broadcast | extends §11/§12 to allies on `team_ally` moves; runs after actor's own buffs are written |
 | §13 | Retaliation setup | actor-side; the `retaliate_*` workspace slots written here arm reactions for the NEXT turn's §15 to consume |
 | §14 | Parametric flags (AP gain/drain, `initiative_debuff`) | order-independent |
+| §14b | Summon a combatant | dispatched on a `summons_*` flag (e.g. `summons_wraith`) → `pod_combat_summon_wraith_glue_effect`, which creates a combat-ready character and seats it on the caster's team mid-fight via `pod_combat_add_ally_midfight_effect` / `_add_enemy_midfight_effect`. Runs after the damage/AoE phases and before §15; the summon sits out the cast round and joins initiative next round (`slot_has_acted = 1`). See **Mid-combat add** under §3 |
 | §15 | Reaction phase | fires reactions armed by the PREVIOUS turn's §13. Each reaction is gated by a result-code partition trigger (`pod_combat_result_code_indicates_*`) that reads §6's outcome on this scope. Today: retaliate-on-contact (hp damage / guard blocked / soaked all qualify — thorns semantics) and retaliate-on-evasion (miss / dodge / stealth all qualify — riposte semantics). See **Reaction system** below |
 | §16 | Push log | reads ALL prior flags + amount fields. MUST run last |
 
@@ -298,30 +309,48 @@ live in `pod_combat_slot_effects.txt`:
 
 - **Lazy creation.** `pod_combat_set_slot_char_effect` (the universal
   fill helper) creates the slot story on its first call for a given
-  slot index — there is no separate upfront create pass. Indices the
-  duel builder never fills get no story_cycle scope on Charon and no
-  pointer var on the host. The duel builder drives the fill order:
-  `POD_combat_create_duel_effect` seats the PC in slot 0,
-  `POD_combat_duel_add_ally_effect` fills 1-4, and
-  `POD_combat_duel_add_enemy_effect` fills 5-9 (the first enemy → slot
-  5, the primary opponent). Stat / discipline init is deferred to
+  slot — there is no separate upfront create pass. Cells the
+  duel builder never fills get no story_cycle scope on Charon. The
+  duel builder drives the fill order:
+  `POD_combat_create_duel_effect` seats the PC at player/0,
+  `POD_combat_duel_add_ally_effect` appends each ally at the next
+  player position (player/1, /2, … incrementing
+  `pod_combat_player_team_size`), and `POD_combat_duel_add_enemy_effect`
+  appends each enemy at the next enemy position (the first enemy →
+  enemy/0, the primary opponent, then enemy/1, /2, … incrementing
+  `pod_combat_enemy_team_size`). Both builders are uncapped — only the
+  soft guardrail `pod_combat_max_team_size` bounds them. Stat /
+  discipline init is deferred to
   `POD_combat_finalize_duel_effect` (`pod_combat_init_all_slots_effect`),
   which runs once the full roster is known.
+- **Mid-combat add (summons / reinforcements).** Combatants can also be
+  seated into a LIVE fight, after finalize, via
+  `pod_combat_add_ally_midfight_effect` / `pod_combat_add_enemy_midfight_effect`
+  (in `pod_combat_summon_effects.txt`). Each reuses finalize's per-slot building
+  blocks — `POD_combat_duel_add_*_effect` to append + register the slot, then
+  `pod_combat_init_slot_from_character_effect` + `pod_combat_calc_one_hit_chance_effect`
+  (vs the opposing leader) on just the new slot — and sets `slot_has_acted = 1`
+  so the unit sits out the current round and joins initiative next round-start.
+  GUI panels, victory check, and turn loops pick it up automatically (all
+  iterate `pod_combat_active_slots`); leaders are never recomputed. The move-side
+  entry point is §14b of `POD_execute_combat_move`. Temporary summons are tracked
+  in `pod_combat_summoned_chars` and `death_disappearance`-d at combat end by
+  `pod_combat_group_cleanup_effect`.
 - `pod_combat_clear_slot_stories_effect` runs once at combat end
   from `pod_combat_group_cleanup_effect`. It iterates
   `pod_combat_active_slots` (the only slot list), calls `end_story`
-  on each, clears the list, then unconditionally removes
-  `pod_combat_slot_0..9` pointer vars (no-op for the indices that
-  were never filled). `end_story` takes every slot var with it, so
+  on each, clears the list, then removes the two leader pointer vars
+  `pod_combat_pc_slot` / `pod_combat_enemy_leader_slot`.
+  `end_story` takes every slot var with it, so
   no per-field cleanup pass is needed.
 
 **Caller scope:** the combat host (the PC). All saves / list adds
 happen on the host; the actual stories live on Charon
 (`POD_wraith_01`) like the move catalogue and log entries.
 
-### Walking slots: list iteration vs unrolled 0..9
+### Walking slots: list iteration vs single-slot lookups
 
-There are two slot-walking lists and one unrolled-call pattern in
+There is one slot-walking list and one single-slot lookup pattern in
 this codebase. They are NOT interchangeable — picking the wrong one
 leads to either spurious work, missed slots, or stale-story leaks.
 The rule:
@@ -330,12 +359,12 @@ The rule:
   the canonical slot iteration. `pod_combat_active_slots` is the only
   slot list. Stories are LAZILY created on first
   `pod_combat_set_slot_char_effect` call and added to this list
-  atomically; unfilled slot indices have no story_cycle scope on
-  Charon and no pointer var on the host. KO'd-but-once-filled slots
+  atomically; unfilled (team, position) cells have no story_cycle scope on
+  Charon. KO'd-but-once-filled slots
   stay in the list with `slot_alive = 0`, so add `var:slot_alive = 1`
   to the limit if you only want living combatants. Examples:
   round-end soak revert, victory-check team counts, dispatching to
-  the slot whose `slot_index = pod_combat_current_actor`, AoE damage
+  the slot whose (combat_team, team_position) matches the current actor, AoE damage
   / heal / buff / debuff iteration, post-combat duel teardown,
   post-combat nonfatal wound cap, tier var cleanup, combat-end
   story teardown. Inside the body the iterator's scope IS the slot
@@ -344,14 +373,19 @@ The rule:
   first (`save_scope_as = host` or `save_temporary_scope_as = host`
   for trigger contexts) and reference `scope:host.var:Y`.
 
-- **Unrolled `SLOT = 0..9` parametric calls** — for the slot-init
-  dispatcher `pod_combat_init_all_slots_effect` (10 guarded literal
-  `pod_combat_init_slot_from_character_effect = { SLOT = N ... }` calls;
-  `$SLOT$` is a parse-time macro, so it can't be a runtime loop
-  variable) and for single-slot operations where a specific slot index
-  is intentional (slot 0 = PC, slot 5 = primary opponent). The per-team
-  hit-chance pair-up walk is another example (slot N vs leader, where N
-  is enumerated).
+- **Single-slot lookups** — for operations where a specific slot is
+  intentional. The two team leaders resolve through their literal
+  pointer vars `pod_combat_pc_slot` (player/0 = PC) and
+  `pod_combat_enemy_leader_slot` (enemy/0 = primary opponent); any
+  other named slot is found by iterating `pod_combat_active_slots`
+  and matching `combat_team` + `team_position`. The hit-chance
+  pair-up walk (every non-leader vs its team leader) is itself an
+  `every_in_list` loop over the list.
+
+  All dispatchers — including the slot-init dispatcher
+  `pod_combat_init_all_slots_effect` — are now `every_in_list` loops
+  over `pod_combat_active_slots` rather than unrolled per-position
+  call lists, so they scale to any team size.
 
 The `any_in_list` trigger is the read-only counterpart over
 `pod_combat_active_slots`: use it for "does any slot satisfy X?"
@@ -368,7 +402,8 @@ proceeds to write `slot_char` and add the story to `pod_combat_active_slots`:
 
 | Field | Default | Purpose |
 |---|---|---|
-| `slot_index` | the slot's integer position (0-9) | baked at creation |
+| `combat_team` | `flag:player` / `flag:enemy` | the slot's team, baked at creation |
+| `team_position` | the slot's position within its team (int 0+, 0 = leader) | baked at creation |
 | `slot_alive` | 1 | the slot is "occupied" until KO'd |
 | `slot_morale` | 0 | overwritten from character by `pod_combat_init_slot_from_character_effect` |
 | `slot_prowess` | 0 | same |
@@ -377,8 +412,9 @@ proceeds to write `slot_char` and add the story to `pod_combat_active_slots`:
 | `slot_has_acted` | 0 | same |
 
 These fields are pure values (no absence-as-signal semantics) so a
-default of 0 is safe — readers gate on `has_variable =
-pod_combat_slot_$SLOT$` (the slot exists) and just read the value.
+default of 0 is safe — a slot's presence is established by its
+membership in `pod_combat_active_slots` (the iterator's scope is the
+slot story), and readers just read the value.
 
 ### Fields NOT pre-initialized (deliberately absence-as-signal)
 
@@ -489,17 +525,18 @@ dispatcher-side intent fallback. The four AoE iterators
 `_morale_damage` / `POD_combat_apply_team_ally_hp_heal` /
 `_morale_heal`) each call `pod_combat_push_log_effect` inside the
 loop after the per-target effect resolves, capturing the per-target
-outcome / attack_result / damage / target_side onto the new log
+outcome / attack_result / damage / target onto the new log
 entry. Per-target state is cleared between iterations via
 `pod_combat_clear_per_target_state_effect` (which preserves the
 `pod_combat_aoe_phase_pushed_rows` tripwire flag — distinct from
 the full `pod_combat_clear_last_result_vars_effect` used at §2 /
 push_log post-capture / cleanup).
 
-`target_side` capture uses a temporary `pod_combat_aoe_iter_target_slot`
-host var set by the iterator before each push (read with priority
-by push_log's target_side branch). The host's
-`pod_combat_selected_target` stays on the move's primary target
+Each per-target row records its target from the workspace's
+`pod_combat_target_char` (the iterator loads each target into the
+workspace before its push), so there is no separate target_side
+capture. The host's `pod_combat_selected_target_team` /
+`pod_combat_selected_target_position` stay on the move's primary target
 throughout the AoE iteration so it can be restored cleanly by the
 post-loop `pod_combat_load_workspace_effect`.
 
@@ -605,7 +642,9 @@ Stat is `soak` or `hit`, direction is `buff` or `debuff`, duration is
 
 ### When to edit `pod_combat_tier_effects.txt` directly
 
-- The number of slots changes (currently 10).
+- The slot-walking mechanism changes (the recalc loops over
+  `pod_combat_active_slots`, so it already scales to any team size —
+  no per-slot count is baked in).
 - The tier stat categories change (currently `soak`, `hit`).
 - Tier magnitudes change (the ±10/20/30 small/medium/large values).
   These are hardcoded in lockstep across THREE files — CK3 `@`-constants
@@ -774,7 +813,7 @@ mirror it on both sides (one line in each helper).
 - Round-end / turn-order / initiative recalc — these are slot-native
 - Cleanup paths
 - Customizable_loc dispatchers (read log-entry vars, not workspace)
-- GUI script values (read `slot_*` directly via `pod_combat_slot_$N$` pointer)
+- GUI script values (read `slot_*` directly — leader slots via the `pod_combat_pc_slot` / `pod_combat_enemy_leader_slot` pointers, every other slot by iterating `pod_combat_active_slots` and matching `combat_team` + `team_position`)
 
 ### AoE: workspace round-trip for damage/heal, direct-slot for buff/debuff
 
@@ -799,7 +838,7 @@ Each target is loaded into the target workspace slot, the existing
 single-target damage pipeline runs (it reads / writes `pod_combat_target_*`),
 the result is flushed back, and the pre-AoE actor/target pair is
 restored at the end. The cost is ~30 var copies per target — non-trivial
-on a 5-target enemy wipe — but the damage pipeline is built on top of
+on a large-team enemy wipe — but the damage pipeline is built on top of
 workspace reads (soak roll, hit chance, stance bypass, spirit gate,
 result-flag writes), so a slot-direct rewrite would require duplicating
 or parameterising the entire damage chain.
