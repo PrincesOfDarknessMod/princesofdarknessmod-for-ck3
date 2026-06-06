@@ -1,63 +1,36 @@
 ﻿######################################################
 ######   POD COMBAT — SC-CONTEXT RESTORE HELPERS
 ######################################################
-# Helpers consumed by pod_combat.9999 (the duel-finalize follow-up event)
-# to restore the launcher's POD_combat_sc_context story_cycle into the
-# scope shape the original PoD duel pipeline expected. Each helper owns
-# one finalization phase; pod_combat.9999 is a thin orchestrator calling
-# them in order.
-#
-# All helpers run in the same scope: the immediate block of
-# pod_combat.9999, fired on the combat host (PC). They expect the PC
-# to carry a `var:pod_combat_sc_context` pointer to the launcher's
-# context story.
-#
-# Restore order (called by pod_combat.9999):
-#   1. POD_combat_restore_sc_context_effect       — sc_initiator / attacker /
-#                                                   defender + aliases + sc_victor / loser
-#   2. pod_combat_sc_restore_parent_aliases_effect — 24 custom parent-event scopes
-#   3. POD_combat_restore_sc_rule_flags_effect    — fatality / fixed / locale +
-#                                                   sc_finished / victory_type
-#   4. POD_combat_apply_duel_finalization_effect  — engaged flags, artifact_duel_var,
-#                                                   death-only outcomes
-#   5. POD_combat_fire_sc_followup_effect         — follow-up event with the
-#                                                   initiator → defender → attacker
-#                                                   fallback chain
-#   6. pod_combat_cleanup_effect                  — end the context story, clear
-#                                                   the pointer var (existing helper)
+# Restore the launcher's POD_combat_sc_context story_cycle into the scope
+# shape the original PoD duel pipeline expects. All helpers run in
+# pod_combat.9999's immediate, on the combat host (PC), which must carry a
+# `var:pod_combat_sc_context` pointer to the launcher's context story.
 
 ##############################################################################
 # 1. Restore sc_initiator / sc_attacker / sc_defender + their aliases
 ##############################################################################
 
-# Reads through `var:pod_combat_sc_context` on the PC and reconstructs the
-# canonical character scopes vanilla / PoD callers expect (sc_initiator,
-# sc_attacker, sc_defender), plus the alias scopes the duel system writes
-# during launcher setup (victim / recipient / defender / target / adversary
-# for the loser side; attacker / challenger for the attacker side).
-#
-# Also reads `pod_combat_winner` / `pod_combat_loser` from the PC into
-# sc_victor / sc_loser when present (absent for draws / mutual KOs).
+# Reconstructs the canonical character scopes + the alias scopes the duel
+# system writes during launcher setup. Victor/loser are absent for draws /
+# mutual KOs, hence the guard.
 POD_combat_restore_sc_context_effect = {
 	var:pod_combat_sc_context = { save_scope_as = sc_ctx }
 
-	# Canonical character scopes
 	scope:sc_ctx.var:initiator = { save_scope_as = sc_initiator }
 	scope:sc_ctx.var:attacker  = { save_scope_as = sc_attacker }
 	scope:sc_ctx.var:defender  = { save_scope_as = sc_defender }
 
-	# Defender aliases (covers victim, recipient, defender, target, adversary)
+	# Defender aliases
 	scope:sc_ctx.var:defender = { save_scope_as = victim }
 	scope:sc_ctx.var:defender = { save_scope_as = recipient }
 	scope:sc_ctx.var:defender = { save_scope_as = defender }
 	scope:sc_ctx.var:defender = { save_scope_as = target }
 	scope:sc_ctx.var:defender = { save_scope_as = adversary }
 
-	# Attacker aliases (covers attacker, challenger)
+	# Attacker aliases
 	scope:sc_ctx.var:attacker = { save_scope_as = attacker }
 	scope:sc_ctx.var:attacker = { save_scope_as = challenger }
 
-	# Victor / loser from minigame result (absent for draws / mutual KOs)
 	if = {
 		limit = {
 			has_variable = pod_combat_winner
@@ -73,13 +46,9 @@ POD_combat_restore_sc_context_effect = {
 # 2. Restore custom parent-event aliases
 ##############################################################################
 
-# Rebuilds the parent-event-specific scope aliases (scope:spirit,
-# scope:actor, scope:my_rival, etc.) that the parent event saved before
-# handing off to the minigame. Stash is populated by
-# pod_combat_sc_stash_parent_aliases_effect in the launcher; this
-# helper is its read-side twin. The whitelist must stay in lockstep
-# between the two helpers — adding an alias to one without the other
-# breaks the follow-up scope chain silently.
+# Read-side twin of pod_combat_sc_stash_parent_aliases_effect in the
+# launcher. The whitelist must stay in lockstep between the two — adding an
+# alias to one without the other breaks the follow-up scope chain silently.
 pod_combat_sc_restore_parent_aliases_effect = {
 	scope:sc_ctx.var:alias_spirit           ?= { save_scope_as = spirit }
 	scope:sc_ctx.var:alias_alastor          ?= { save_scope_as = alastor }
@@ -112,30 +81,15 @@ pod_combat_sc_restore_parent_aliases_effect = {
 # 3. Reconstruct rule-flag scope values
 ##############################################################################
 
-# Round-trips the duel rule flags (fatality, fixed, locale) from
-# variable-backed flags on sc_ctx into saved-scope flag values that the
-# follow-up event handler reads.
+# Why the enum chains: save_scope_value_as takes a literal flag value
+# (`flag:X`) but rejects a flag-typed variable as its `value` — it evaluates
+# value as a script-value expression and errors "Got value of type 'flag'".
+# So every flag round-trips through an if/else_if chain against each known
+# literal. Vanilla's `00_single_combat_effects.txt` writes them the same way.
 #
-# Why the enum chains: save_scope_value_as accepts literal flag values
-# (`flag:X`) but does NOT accept a flag-typed variable as its `value`
-# it evaluates value as a script-value expression and rejects the flag
-# with "Got value of type 'flag'". So every flag has to round-trip
-# through an enumerated if/else_if chain comparing the stored variable
-# against each known literal. Vanilla's `00_single_combat_effects.txt`
-# writes the flags this way too; we just have to read them back the
-# same way we'd write them.
-#
-# Locale enum must stay synchronised with PoD's
-# single_combat_events.txt background overrides; missing locales fall
-# through to battlefield and lose the original visual context.
-#
-# NOTE on `fixed`: round-tripped for follow-up event compatibility (any
-# handler reading scope:fixed sees what the parent event passed).
-# Reaching this restore path always means scope:fixed = flag:no. The
-# configure_start_*_combat_effect overrides route FIXED = sc_attacker /
-# sc_defender duels around the minigame entirely. Restoring the value
-# here keeps the follow-up event reading a consistent rule set
-# regardless of which path resolved the duel.
+# `fixed` always resolves to flag:no here — configure_start_*_combat_effect
+# routes FIXED duels around the minigame entirely. Round-tripped only so the
+# follow-up handler reads a consistent rule set whatever path resolved the duel.
 POD_combat_restore_sc_rule_flags_effect = {
 	# Fatality
 	if = {
@@ -253,16 +207,13 @@ POD_combat_restore_sc_rule_flags_effect = {
 		save_scope_value_as = { name = locale value = flag:duel_locale }
 	}
 	else = {
-		# Unrecognised / unset locale — fall back to battlefield, the
-		# safe default that every duel template handles. Keep this list
-		# synchronised with PoD's single_combat_events.txt background
-		# overrides; missing locales fall through to battlefield and
-		# lose the original visual context.
+		# Keep this enum synced with PoD's single_combat_events.txt background
+		# overrides — an unlisted locale falls through here and loses its
+		# original visual context. battlefield is the safe universal default.
 		save_scope_value_as = { name = locale value = flag:battlefield }
 	}
 
-	# If the locale uses terrain_scope, follow PoD's pattern of saving
-	# the defender's location as the background.
+	# terrain_scope backgrounds: PoD reads the defender's location.
 	if = {
 		limit = { scope:locale = flag:terrain_scope }
 		scope:sc_defender.location = { save_scope_as = background_terrain_scope }
@@ -278,14 +229,8 @@ POD_combat_restore_sc_rule_flags_effect = {
 # 4. Apply duel-end finalization side-effects
 ##############################################################################
 
-# Three side-effect phases:
-#   - Release the engaged-in-single-combat flag from both combatants
-#     (alive guard prevents log spam on corpses).
-#   - Bump the victor's primary armament artifact_duel_var (verbatim
-#     port from PoD's finalise_combat_results_effect — without porting
-#     this, intercepted-duel victors silently lose artifact duel-count
-#     progression even though the rest of the result pipeline works).
-#   - Apply death-only outcomes based on fatality mode.
+# Three side-effect phases: release engaged flags, bump the victor's
+# artifact_duel_var, apply death-only outcomes. See each block below.
 POD_combat_apply_duel_finalization_effect = {
 	# ── Release engaged flags ──
 	scope:sc_attacker = {
@@ -302,27 +247,17 @@ POD_combat_apply_duel_finalization_effect = {
 	}
 
 	# ── Victor weapon: artifact_duel_var increment ──
-	# Tracks how many duels the victor's primary armament has won,
-	# feeding the artifact.4080 narrative chain ("your weapon has fought
-	# N duels" lore events). First win on a given artifact sets the var
-	# to 1; subsequent wins increment.
+	# Feeds the artifact.4080 "your weapon has fought N duels" chain.
 	#
 	# Verbatim port from PoD's finalise_combat_results_effect
-	# (POD Reference/events/single_combat_events.txt ~line 2622), which
-	# the minigame intercepts and replaces — without porting this block,
-	# intercepted-duel victors silently lose artifact duel-count
-	# progression even when the rest of the result pipeline (fera
-	# ferocity, fatality death, follow-up) fires correctly.
+	# (POD Reference/events/single_combat_events.txt ~line 2622), which the
+	# minigame intercepts and replaces — without it, intercepted-duel victors
+	# silently lose artifact duel-count progression while the rest of the
+	# result pipeline fires correctly.
 	#
-	# Two-branch structure handles "first duel for this artifact" (sets
-	# the var to 1) vs "subsequent duel" (change_variable add = 1).
-	# random_character_artifact picks a single weapon when the victor
-	# has multiple equipped primary armaments — mirrors vanilla rather
-	# than incrementing every weapon.
-	#
-	# Defensive `exists = scope:sc_victor` guard matches the death-
-	# outcomes block below: a draw / mutual KO leaves sc_victor unset,
-	# in which case no artifact gets the progression bump.
+	# random_character_artifact picks a single weapon when the victor has
+	# multiple equipped primary armaments — mirrors vanilla rather than
+	# bumping every weapon.
 	if = {
 		limit = { exists = scope:sc_victor }
 		scope:sc_victor = {
@@ -370,21 +305,13 @@ POD_combat_apply_duel_finalization_effect = {
 	}
 
 	# ── Apply death-only outcomes ──
-	# NOTE: Wound damage was written to PoD health tracks live during
-	# move execution (the damage helpers in pod_combat_effects.txt call
-	# POD_increase_wounds_* immediately, not deferred). PoD's wound
-	# pipeline invokes POD_health_death_check_effect inline whenever
-	# wounds land — see POD_apply_wound_boxes in PoD's
-	# POD_health_track_effects.txt and the override note at the top of
-	# pod_combat_death_gate_overrides.txt — so a lethal hit kills the
-	# loser the moment it resolves, subject to the
-	# pod_combat_nonfatal_active gate for non-fatal duels. Re-applying
-	# POD_increase_wounds_hostile_effect here would double-damage the
-	# loser and risk a duplicate death trigger.
-	#
-	# For fatality modes that guarantee a kill (always, default-tribal),
-	# we still call pod_death directly so the outcome is deterministic
-	# even when the wound math fell short of the death threshold.
+	# Move execution already wrote wound damage live (POD_increase_wounds_*),
+	# and PoD's pipeline runs POD_health_death_check_effect inline as wounds
+	# land — so a lethal hit already killed the loser by now (gated by
+	# pod_combat_nonfatal_active for non-fatal duels). Hence NO re-application
+	# of damage here: it would double-hit and risk a duplicate death trigger.
+	# We only force pod_death for guaranteed-kill modes (always, default-tribal)
+	# so the outcome is deterministic when wound math fell short.
 	if = {
 		limit = { exists = scope:sc_victor }
 
@@ -392,15 +319,9 @@ POD_combat_apply_duel_finalization_effect = {
 			limit = { scope:fatality = flag:practice }
 		}
 		else = {
-			# POD_fera_add_renown_effect grants renown to its execution
-			# scope (see PoD's POD_fera_renown_effects.txt). PoD's own
-			# duel finalizer fires this inside the attacker context;
-			# pod_combat.9999 enters from the PC combat host instead,
-			# so without the scope:sc_victor wrap the bare call lands
-			# the ferocity reward on the player even when an AI won.
-			# Wrap into the actual victor — fera ferocity tracks the
-			# combatant who closed the kill, regardless of which side
-			# initiated.
+			# POD_fera_add_renown_effect rewards its execution scope. We enter
+			# from the PC combat host, so the bare call would land ferocity on
+			# the player even when an AI won — wrap into the actual victor.
 			scope:sc_victor = {
 				POD_fera_add_renown_effect = { TYPE = ferocity }
 			}
@@ -441,14 +362,10 @@ POD_combat_apply_duel_finalization_effect = {
 						}
 					}
 				}
-				# is_alive guard: under fatality = no this branch can't
-				# fire (the path is gated on `else_if` against
-				# flag:default), but live minigame damage can still kill
-				# the loser during fatality = default tribal fights —
-				# re-calling pod_death on a corpse spams the error log
-				# and risks duplicate downstream effects (kinslayer,
-				# doctrine triggers). Same pattern at the flag:always
-				# branch below.
+				# is_alive guard: live minigame damage may already have killed
+				# the loser, and re-calling pod_death on a corpse spams the
+				# error log and risks duplicate downstream effects (kinslayer,
+				# doctrine triggers). Same pattern at the flag:always branch.
 				if = {
 					limit = { scope:sc_loser = { is_alive = yes } }
 					scope:sc_loser = {
@@ -473,11 +390,7 @@ POD_combat_apply_duel_finalization_effect = {
 					add_kinslayer_trait_or_nothing_effect = { VICTIM = scope:sc_loser }
 				}
 			}
-			# is_alive guard — see comment on the tribal-default branch
-			# above. fatality = always can still race with in-combat
-			# lethal damage (especially with the nonfatal round-end strip
-			# now fixed); the loser may already be down by the time
-			# pod_combat.9999 fires.
+			# is_alive guard — see tribal-default branch above.
 			if = {
 				limit = { scope:sc_loser = { is_alive = yes } }
 				scope:sc_loser = {
@@ -499,22 +412,13 @@ POD_combat_apply_duel_finalization_effect = {
 # 5. Fire the follow-up event with the initiator → defender → attacker fallback chain
 ##############################################################################
 
-# Matches vanilla's three-step fallback chain (see
-# events/single_combat_events.txt for the canonical pattern) so the
-# follow-up's `root` is the same character vanilla would have used.
-#
-# The intercept gate only requires the PC to be one of {sc_attacker,
-# sc_defender}. It does NOT require PC = sc_initiator. AI-initiated
-# interactions targeting the PC (Sabbat alastor challenges, spirit
-# attacks, etc.) fire with sc_initiator = AI even though PC is the
-# defender, so the fallback chain matters.
-#
-# Fallback chain: initiator → defender → attacker. The chain exists
-# because trigger_event silently no-ops if the host character is dead,
-# and combatants in this duel may have died. Vanilla's comment is
-# explicit: "Doesn't hugely matter technically, since the output event
-# should be from a neutral scope, but if they're dead then the event
-# won't fire and the chain silently invalidates."
+# Matches vanilla's initiator → defender → attacker fallback chain (see
+# events/single_combat_events.txt) so the follow-up's `root` is the character
+# vanilla would have used. The chain matters because trigger_event silently
+# no-ops on a dead host and combatants here may have died — and because the
+# intercept gate only requires PC ∈ {sc_attacker, sc_defender}, NOT
+# PC = sc_initiator: AI-initiated attacks on the PC (alastor challenges,
+# spirit attacks) fire with sc_initiator = AI while the PC is the defender.
 POD_combat_fire_sc_followup_effect = {
 	if = {
 		limit = { scope:sc_initiator = { is_alive = yes } }

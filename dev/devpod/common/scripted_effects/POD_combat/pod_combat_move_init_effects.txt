@@ -1,38 +1,20 @@
 ﻿######################################################
 ######   POD COMBAT MOVE INIT EFFECTS
 ######################################################
-# Modular setter effects + the POD_init_combat_move constructor used
-# by POD_initialize_combat_moves in pod_combat_move_list_effects.txt.
-# Together these are the "authoring layer" for defining a combat move
-# as a story_cycle with a handful of variables.
+# Authoring layer for combat moves: the POD_init_combat_move
+# constructor + modular POD_combat_move_set_* setters, driven by
+# POD_initialize_combat_moves (pod_combat_move_list_effects.txt).
+# A move is a POD_combat_move story_cycle whose variables the
+# execution engine (pod_combat_move_effects.txt) reads at runtime.
 #
-# Data flow:
-#   1. on_game_start fires POD_initialize_combat_moves.
-#   2. That effect calls POD_init_combat_move per move, creating a
-#      POD_combat_move story on Charon, adding it to the global list
-#      POD_combat_moves, and setting mandatory variables.
-#   3. Inside scope:new_combat_move, optional setters (POD_combat_move_set_*)
-#      are called for attributes that apply to that specific move.
-#   4. At execution, POD_execute_combat_move reads the story's variables
-#      and applies consequences. POD_can_execute_combat_move validates.
-#
-# All setters run inside the story scope. Presence of a variable on the
-# story means the attribute applies; absence means skip.
-#
-# Reserved authoring surface: some setters in this file are currently
-# unreferenced by any move row but have full runtime support in 
-# `pod_combat_move_effects.txt` (the execution engine reads the
-# matching vars). 
-
+# All setters run inside the story scope; presence of a variable =
+# attribute applies, absence = skip. Some setters are unreferenced by
+# any current move row but retain full runtime support.
 
 ###################
 ###### CONSTRUCTOR
 ###################
 
-# Creates one combat-move story_cycle on Charon, sets mandatory vars,
-# adds it to the global list, and saves it on Charon by its decision
-# name for the data_binding macro to find.
-#
 # Parameters:
 #   DECISION   — the hidden decision holding this move's unlock reqs
 #   SKILL_KEY  — unique identifier flag (e.g. strike)
@@ -42,8 +24,7 @@
 #   AI_WEIGHT  — base AI selection weight
 #   TARGETING  — single_enemy | single_ally | single_pc | self | team_enemy | team_ally
 POD_init_combat_move = {
-	# Use Charon as the off-map anchor. He's immortal, hidden, and alive
-	# in every bookmark
+	# Charon: immortal, hidden, alive in every bookmark — off-map anchor.
 	character:POD_wraith_01 = {
 		create_story = {
 			type = POD_combat_move
@@ -60,41 +41,27 @@ POD_init_combat_move = {
 			set_variable = { name = targeting       value = flag:$TARGETING$ }
 		}
 
-		# Add to the global catalogue (used by GUI + AI selection)
+		# GUI + AI selection read this.
 		add_to_global_variable_list = {
 			name   = POD_combat_moves
 			target = scope:new_combat_move
 		}
 
-		# Also save by decision name so PODCombatMoveDesc macro can find it
+		# Keyed by decision name so the PODCombatMoveDesc macro can find it.
 		set_variable = {
 			name  = $DECISION$
 			value = scope:new_combat_move
 		}
 
-		# Per-move parametric validator suppression. Only the four
-		# `$X$` flag uses below stay here. They reference per-move
-		# macro substitutions ($SKILL_KEY$ / $CATEGORY$ / $CONFIG$ /
-		# $TARGETING$) that can ONLY resolve in this scope. The
-		# remaining literal flag suppressions (single_enemy, ATK,
-		# fire, on_hp_damage, etc.) live in
-		# pod_combat_error_suppression_effects.txt §5 — a single
-		# `this = flag:X` per literal covers every move at once.
-		#
-		# The has_variable = $DECISION$ check inside the limit below
-		# suppresses the "POD_combat_move_X is set but never used"
-		# warnings the analyzer raises for the per-move pointer
-		# variable stashed just above (the
-		# `set_variable = { name = $DECISION$ ... }` block). The actual
-		# read happens through the PODCombatMoveDesc macro chain
-		# (Var(combatmove).Story.MakeScope), which the analyzer can't
-		# trace — without this never-run read it would log one warning
-		# per registered move every game start. Same rationale for the
-		# scope:new_combat_move readers (skill_key / combat_category /
-		# config_section / targeting) — the analyzer can't pair the
-		# parametric `flag:$X$` SETs with the literal `var:X = flag:Y`
-		# reads in the runtime engine without an explicit per-move
-		# read site.
+		# Dead (always = no) read site that exists only to silence the
+		# analyzer's "set but never used" warnings — one per move per
+		# game start otherwise. The real reads happen through the
+		# PODCombatMoveDesc macro chain (Var(combatmove).Story.MakeScope)
+		# and the runtime engine's literal `var:X = flag:Y` reads, which
+		# the analyzer can't pair with the parametric `flag:$X$` SETs here.
+		# Only the four parametric `$X$` flag suppressions belong in this
+		# scope (they need the per-move macro substitution); literal-flag
+		# suppressions live in pod_combat_error_suppression_effects.txt §5.
 		if = {
 			limit = {
 				always = no
@@ -120,10 +87,8 @@ POD_init_combat_move = {
 ###### RESOURCE-COST SETTERS
 ###################
 
-# $VALUE$ = energy amount (splat-agnostic unit; 2 ≈ 1 blood).
-# The actor's splat is inferred at runtime by PoD's splat-agnostic
-# energy accessor — the move's required_trait gate (enforced in the
-# hidden decision) guarantees the actor has a matching pool.
+# $VALUE$ = energy amount (splat-agnostic unit; 2 ≈ 1 blood). Splat is
+# resolved at runtime; the move's required_trait gate guarantees a pool.
 POD_combat_move_set_energy_cost = {
 	set_variable = { name = energy_cost value = $VALUE$ }
 }
@@ -149,19 +114,16 @@ POD_combat_move_set_piety_cost = {
 ###### DAMAGE & HEALING SETTERS
 ###################
 
-# $VALUE$ = damage-source flag name.
-# Damage-source flavor → maps to a PoD death_reason suffix via the
-# combat dispatcher. Allowed values:
+# $VALUE$ = damage-source flag, mapped to a PoD death_reason suffix by
+# the dispatcher. One of:
 #   fire | cold | lightning | sun | silver | gold | holy | balefire
-# (REASON = duel, subject to soak, not aggravated unless
-# damage_type = aggravated overrides).
+# (REASON = duel, soakable, not aggravated unless damage_type overrides).
 POD_combat_move_set_damage_source = {
 	set_variable = { name = damage_source value = flag:$VALUE$ }
 }
 
-# $VALUE$ = tier / raw damage amount. hp_damage defaults to
-# superficial; override with POD_combat_move_set_damage_type_aggravated
-# if the move deals forcibly-aggravated damage regardless of source.
+# $VALUE$ = tier / raw damage amount. Defaults to superficial; override
+# with POD_combat_move_set_damage_type_aggravated for forced-aggravated.
 POD_combat_move_set_hp_damage = {
 	set_variable = { name = hp_damage   value = $VALUE$ }
 	set_variable = { name = damage_type value = flag:superficial }
@@ -180,8 +142,7 @@ POD_combat_move_set_self_damage = {
 }
 
 # $VALUE$ = hp restored
-# $TYPE$  = superficial | aggravated (controls which heal effect fires —
-#          aggravated heal reduces the agg_damage counter too)
+# $TYPE$  = superficial | aggravated (aggravated also reduces agg_damage)
 POD_combat_move_set_hp_heal = {
 	set_variable = { name = hp_heal      value = $VALUE$ }
 	set_variable = { name = heal_type    value = flag:$TYPE$ }
@@ -195,21 +156,11 @@ POD_combat_move_set_morale_heal = {
 ###################
 ###### RIDER CONDITION SETTERS
 ###################
-# Gate flags that control when rider effects (heal / morale damage /
-# self-damage) fire based on the §6 HP-damage outcome. The runtime
-# trigger pod_combat_rider_condition_passes_trigger reads these via
-# trigger_else_if branches and consults pod_combat_last_outcome /
-# pod_combat_last_attack_result on the host. See that trigger's
-# header for the full rider-condition → partition mapping (always /
-# on_hp_damage / on_contact / on_miss).
-#
-# Setter is only called when the move overrides the runtime default
-# (always); no setter → runtime treats the absent variable
-# as "always" via the trigger's first branch.
-#
-# $VALUE$ must be one of: always | on_hp_damage | on_contact | on_miss.
-# The generator validates against RIDER_CONDITIONS so unknown values
-# never reach runtime.
+# Gate when a rider (heal / morale damage / self-damage) fires, off the
+# attack outcome. $VALUE$ = always | on_hp_damage | on_contact | on_miss;
+# absent var defaults to "always". Setter is only emitted on override.
+# Full condition → partition mapping lives in the header of
+# pod_combat_rider_condition_passes_trigger (the runtime reader).
 POD_combat_move_set_heal_condition = {
 	set_variable = { name = heal_condition value = flag:$VALUE$ }
 }
@@ -226,10 +177,9 @@ POD_combat_move_set_self_damage_condition = {
 ###################
 ###### TIER BUFF / DEBUFF SETTERS
 ###################
-# Each tuple (stat × direction × duration) gets its own variable so the
-# execution engine can branch on has_variable. Values 1/2/3 match
-# small/medium/large (magnitudes +10/+20/+30 are in pod_combat_tier_effects.txt).
-# One setter call per token parsed from the move's `special` field.
+# Per (stat × direction × duration) variable so the engine can branch on
+# has_variable. $TIER$ 1/2/3 = small/medium/large; magnitudes in
+# pod_combat_tier_effects.txt.
 
 POD_combat_move_set_soak_buff_round      = { set_variable = { name = soak_buff_round_tier      value = $TIER$ } }
 POD_combat_move_set_soak_buff_combat     = { set_variable = { name = soak_buff_combat_tier     value = $TIER$ } }
@@ -257,8 +207,8 @@ POD_combat_move_set_initiative_debuff = {
 	set_variable = { name = initiative_debuff value = $VALUE$ }
 }
 
-# $VALUE$ = retaliate damage amount
-# If the move has aggravated retaliation, also call POD_combat_move_set_retaliate_agg.
+# $VALUE$ = retaliate damage amount. For aggravated retaliation also
+# call POD_combat_move_set_retaliate_agg.
 POD_combat_move_set_retaliate_damage = {
 	set_variable = { name = retaliate_damage value = $VALUE$ }
 }
@@ -271,11 +221,10 @@ POD_combat_move_set_retaliate_agg = {
 ###################
 ###### PRESENCE-FLAG SETTER
 ###################
-# Generic setter for any non-tier, presence-only attribute:
+# Generic setter for any non-tier, presence-only attribute. $NAME$:
 #   set_guard, dodge, stealth, bypass_guard, bypass_dodge, bypass_stealth,
 #   remove_guard, retaliate_if_hit, retaliate_if_missed,
 #   is_starter_move, drain
-# One POD_combat_move_set_flag = { NAME = X } call per present flag.
 POD_combat_move_set_flag = {
 	set_variable = $NAME$
 }
@@ -284,18 +233,11 @@ POD_combat_move_set_flag = {
 ###################
 ###### DEFAULT LOADOUT SEEDER
 ###################
-# Equip every move with is_starter_move set. Called from the configure
-# decision and from combat init when a character has no loadout yet.
-# Works for any character (PC or AI); up to 8 moves carry is_starter_move.
+# Seed the loadout from every is_starter_move move (the editor's
+# customisable starting point). Any character; ~8 starter moves.
 POD_apply_default_combat_loadout = {
-	# PC-side default: seed the moves tagged with is_starter_move.
-	# Intended as a starting point the player then customises via
-	# the loadout editor.
-	#
-	# Inside every_in_global_list the scope becomes the current entry
-	# (the story), so add_to_variable_list would target the story's
-	# own list instead of the loadout owner's. Save the owner scope
-	# before iterating and switch back explicitly to write the list.
+	# every_in_global_list re-scopes to the iterated story, so save the
+	# owner first and switch back explicitly to write its list.
 	save_scope_as = pod_combat_loadout_owner
 	clear_variable_list = pod_combat_loadout
 	every_in_global_list = {
@@ -312,28 +254,16 @@ POD_apply_default_combat_loadout = {
 
 
 POD_apply_ai_full_loadout = {
-	# AI-side seed: dump every move the actor QUALIFIES FOR into their
-	# pod_combat_loadout. Per-pick filtering still runs through
-	# POD_can_execute_combat_move for the DYNAMIC checks (AP, energy,
-	# stance dupes — those change every turn), but the STATIC gate
-	# (trait / splat / perk requirements via can_execute_decision against
-	# the move's hidden decision) is applied here at seed time so it
-	# only runs once per AI per combat instead of once per move per pick.
+	# Seed every move the AI statically qualifies for. The STATIC gate
+	# (trait / splat / perk via can_execute_decision) runs here once per
+	# AI per combat; DYNAMIC checks (AP, energy, stance dupes) stay at
+	# pick time in POD_can_execute_combat_move.
 	#
-	# Limit clause details:
-	#   - every_in_global_list puts current scope = the iterated move
-	#     story; the saved scope:pod_combat_loadout_owner is the actor.
-	#   - The trigger flips into the actor scope so can_execute_decision
-	#     evaluates against their traits/splat. `prev.var:decision` from
-	#     inside that flip reaches back to the move story (the scope
-	#     that surrounded scope:pod_combat_loadout_owner = { ... }).
-	#   - can_execute_decision tolerates a scope.var-referenced decision
-	#     name — same pattern POD_can_execute_combat_move uses at pick
-	#     time, so semantics match.
-	#
-	# Called lazily from pod_combat_ai_ensure_loadout_effect when the
-	# AI walks into combat with an empty loadout. Works for any
-	# character.
+	# Scope jank in the limit: every_in_global_list scopes to the move
+	# story; flipping into scope:pod_combat_loadout_owner evaluates
+	# can_execute_decision against the actor, and `prev.var:decision`
+	# reaches back out to the move story for the decision name (same
+	# pattern as POD_can_execute_combat_move).
 	save_scope_as = pod_combat_loadout_owner
 	clear_variable_list = pod_combat_loadout
 	every_in_global_list = {
@@ -356,24 +286,14 @@ POD_apply_ai_full_loadout = {
 ###################
 ###### VERSION-MISMATCH RELOAD
 ###################
-# Called when the catalogue version on the save doesn't match the
-# script-side POD_current_combat_version constant. Two call sites
-# both perform the mismatch check before delegating here:
-#   * pod_combat_configure_skills decision (editor-entry path)
-#   * POD_combat_create_duel_effect (combat-entry path — catches
-#     fights that start before the player opens the editor)
-# Clears every character's loadout and the global catalogue, then
-# rebuilds from scratch. Saved starter-flagged moves are re-equipped
-# by the subsequent default-loadout pass in the configure effect.
+# Catalogue rebuild on POD_combat_version != POD_current_combat_version.
+# Both call sites (pod_combat_configure_skills decision,
+# POD_combat_create_duel_effect) do the mismatch check before delegating.
 #
-# AI loadout cleanup: every_living_character iterates ALL characters,
-# not just human players, so any NPC that fought before the version
-# bump gets their stale pod_combat_loadout cleared too. Without this,
-# AI characters retained refs to the old (now end_story-d) move
-# catalogue and the next time they fought their selector would try
-# to pick from dangling story references. Slot-init also clears AI
-# loadouts when they enter combat, so this reload-time clear is
-# belt-and-suspenders cleanup that reduces save bloat between fights.
+# every_living_character (not every_player) so NPCs that fought before the
+# bump don't keep loadout refs to the now-end_story'd old catalogue —
+# their selector would otherwise pick from dangling stories. Slot-init
+# also clears AI loadouts at combat entry, so this is belt-and-suspenders.
 POD_reload_combat_moves = {
 	every_living_character = {
 		clear_variable_list = pod_combat_loadout
@@ -384,9 +304,7 @@ POD_reload_combat_moves = {
 	}
 	clear_global_variable_list = POD_combat_moves
 	POD_initialize_combat_moves = yes
-	# Re-seed PC starter loadouts. NPCs are seeded lazily at fight
-	# start (slot init clears + first AI turn re-seeds), so they
-	# don't need a re-seed pass here.
+	# NPCs re-seed lazily at fight start, so only PCs need it here.
 	every_player = {
 		POD_apply_default_combat_loadout = yes
 	}

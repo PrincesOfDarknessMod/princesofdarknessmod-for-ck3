@@ -1,55 +1,27 @@
 ﻿######################################################
 ######   POD COMBAT MOVE EXECUTION TRIGGERS
 ######################################################
-# The single generic trigger that validates ANY combat move by reading
-# attributes off its story_cycle scope, replacing the per-move
-# `pod_combat_can_use_{key}_trigger` pattern.
-#
-# Called from:
-#   - pod_combat_execute_move SGUI `is_valid` — mid-combat PC action
-#     button enable gate; full runtime check (unlock + AP + energy +
-#     targeting + per-resource).
-#   - pod_combat_ai_select_and_execute_move_effect — AI move selector;
-#     used as the `trigger` filter inside the random_in_list weight
-#     block so weighted-but-unaffordable picks are excluded. The
-#     selector uses random_in_list (proportional weighted pick), NOT
-#     ordered_in_list — see the comment in pod_combat_ai_effects.txt
-#     for the rationale.
-# NOT called from the loadout-editor SGUIs: pod_combat_loadout_option
-# / pod_combat_loadout_toggle gate VISIBILITY and CLICKABILITY on
-# `can_execute_decision = scope:story.var:decision` directly, which is
-# a narrower unlock-only subset of this trigger (no AP / energy /
-# targeting checks — those don't apply outside an active combat).
-#
-# Called on character scope (the combat host, where the workspace
-# lives). The ACTOR parameter specifies which character's traits the
-# unlock check runs against — for the PC this is the same character,
-# but for AI turns the combat host is still the PC while the actor is
-# the AI NPC.
+# Generic move-validation trigger: reads move attributes off the
+# story_cycle scope. Called on the combat-host (PC) scope from the
+# execute_move SGUI is_valid and the AI move selector. The loadout
+# editor does NOT call this — it gates on can_execute_decision alone
+# (unlock-only subset; no AP/energy/targeting outside live combat).
 
 
 POD_can_execute_combat_move = {
 	# $STORY$ = the POD_combat_move story_cycle
-	# $ACTOR$ = the character whose splat / trait / perk must satisfy
-	#          the hidden decision's unlock gate. Workspace reads
-	#          (AP, energy) resolve against the caller's root scope
-	#          (the combat host — may differ from the actor on AI
-	#          turns).
+	# $ACTOR$ = character whose unlock gate (splat/trait/perk) is tested.
+	#          On AI turns this differs from the host (PC); workspace
+	#          reads (AP, energy) still resolve against root = the host.
 
-	# Combat must not already be resolved.
 	NOT = { pod_combat_is_over_trigger = yes }
 
-	# Unlock/splat/trait/perk gate. Run against the actor, NOT the
-	# combat host — during AI turns the host is the PC but the unlock
-	# requirements live on the AI NPC (their traits, their perks).
-	# Without this scope switch every trait-gated move was silently
-	# rejected for every AI actor because the check was evaluating
-	# the PC's traits instead of the AI's.
+	# Unlock gate runs against the actor, not the host: on AI turns the
+	# host is the PC but the unlock requirements live on the AI NPC.
 	$ACTOR$ = {
 		can_execute_decision = $STORY$.var:decision
 	}
 
-	# AP affordability. Reads the workspace-side current AP value.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = ap_cost }
@@ -57,15 +29,9 @@ POD_can_execute_combat_move = {
 		pod_combat_can_afford_ap_trigger = { COST = $STORY$.var:ap_cost }
 	}
 
-	# Energy affordability. PoD's splat-agnostic trigger figures out
-	# which pool (blood/gnosis/pathos/angst/resolve/glamour/dread/
-	# willpower) applies and compares it to the current reserve — but
-	# ONLY on the scope it's evaluated against. Combat host = PC, so
-	# calling it bare would check the PC's pool for every AI turn.
-	# Wrap in $ACTOR$ so the reserve comparison hits the acting
-	# character. The move's required_trait gate (enforced above via
-	# can_execute_decision) guarantees the actor has a matching pool,
-	# so this comparison is always meaningful.
+	# Energy: the splat-agnostic reserve check resolves against the scope
+	# it runs on, so wrap in $ACTOR$ to hit the acting character's pool
+	# (bare it would read the host/PC pool on AI turns).
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = energy_cost }
@@ -75,9 +41,8 @@ POD_can_execute_combat_move = {
 		}
 	}
 
-	# CK3 resource costs are PC-only — only slot 0 (the player) spends
-	# these. AI combatants get the move for free on the CK3 side; the
-	# trigger reflects this by gating these checks on the player turn.
+	# CK3 resource costs are PC-only — AI combatants spend nothing, so
+	# gold/piety/prestige gates apply only on the player turn.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = gold_cost }
@@ -104,14 +69,10 @@ POD_can_execute_combat_move = {
 
 	# stress_cost adds stress on execution — it's always "affordable"
 
-	# Duplicate-stance / reaction guard — reject moves that try to
-	# apply a stance / reaction the actor already has. Mirrors the
-	# AI selector's NAND block in pod_combat_ai_effects.txt; without
-	# the matching guard on the PC side, the player could spam stealth
-	# while already stealthed and double-bake the +30 hit-chance bonus
-	# (slot_hit_chance saved with +30, second stealth adds another +30,
-	# now the actor sits at baseline+60 until two separate consumes
-	# revert it).
+	# Duplicate-stance / reaction guard — reject re-applying a stance the
+	# actor already holds (mirrors the AI selector's NAND block in
+	# pod_combat_ai_effects.txt). Without it the bonus double-bakes and
+	# needs two separate consumes to revert.
 	NAND = {
 		$STORY$ = { has_variable = set_guard }
 		has_variable = pod_combat_actor_is_guarding
@@ -133,25 +94,15 @@ POD_can_execute_combat_move = {
 		has_variable = pod_combat_actor_retaliate_miss
 	}
 
-	# Tier-redundancy guard — reject moves that would apply a tier
-	# buff/debuff at or below the actor/target's current tier. Mirrors
-	# the AI selector's redundancy gate in pod_combat_ai_effects.txt
-	# §random_in_list/limit so PC move buttons match the AI's
-	# "upgrade-only" selection contract. Without this, a tier-1 buff
-	# move stays clickable after a tier-3 buff of the same stat
-	# landed; firing it downgrades the actor's tier instead of being
-	# a no-op.
-	#
-	# Each gate is a single trigger_if (not NAND) so the variable read
-	# only happens when both the move attribute AND the workspace var
-	# exist — saves a "variable not set" warning when either is absent.
-	# Strict `<` matches the AI guard (a tier-2 candidate against a
-	# tier-2 current is rejected; same-tier reapplication is wasted AP).
-	#
-	# Coverage: workspace single-target tiers only (actor's self buffs
-	# and target's debuffs). AoE moves can still downgrade a non-actor
-	# slot whose tier is higher than the move's. Handled at write time
-	# inside POD_combat_apply_team_ally_buffs / _team_enemy_debuffs.
+	# Tier-redundancy guard — reject a tier buff/debuff at or below the
+	# current tier (upgrade-only contract; see the §11 rationale in
+	# pod_combat_move_effects.txt). Strict `<` matches the AI guard.
+	# Each gate is a single trigger_if (not NAND) so the var reads only
+	# happen when both the move attribute and the workspace var exist —
+	# avoids a "variable not set" warning when either is absent.
+	# Covers workspace single-target tiers only; AoE downgrades are
+	# guarded at write time in POD_combat_apply_team_ally_buffs /
+	# _team_enemy_debuffs.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = soak_buff_round_tier }
@@ -209,24 +160,13 @@ POD_can_execute_combat_move = {
 		var:pod_combat_target_hit_debuff_combat_tier < $STORY$.var:hit_debuff_combat_tier
 	}
 
-	# Heal-utility gate — block heal-only moves (hp_heal/morale_heal
-	# with no hp_damage / morale_damage rider) that would no-op because
-	# the actor is already at the cap the heal can't exceed. Mirrors the
-	# AI selector's matching trigger_if in pod_combat_ai_effects.txt
-	# (~line 364) so PC move buttons follow the same "would this do
-	# anything useful?" gate the AI's pick already enforces. Without
-	# this the PC could spend a full turn casting Mend on themselves
-	# at maxed HP, getting back zero wounds and the same blank "—" log
-	#
-	# Scoped to var:targeting = flag:self (and heal moves with no
-	# targeting var, generator-defaulted to actor-self). Single_ally
-	# and team_ally heals stay clickable — the actor's HP isn't the
-	# heal's intended target, and the player may intentionally cast
-	# on a wounded ally even when the actor is full. The AI path now
-	# handles single_ally heals correctly: the actor-state redundancy
-	# gate in pod_combat_ai_effects.txt skips them, and the AI-side
-	# single_ally heal gate below requires an ally that actually needs
-	# the heal (pod_combat_ai_has_ally_needing_heal_trigger).
+	# Heal-utility gate — block self-targeted heal-only moves (no damage
+	# rider) when the actor is already at the cap the heal can't exceed
+	# (mirrors the AI selector's gate in pod_combat_ai_effects.txt).
+	# Scoped to targeting = flag:self (and untargeted heals, which the
+	# generator defaults to actor-self). single_ally / team_ally heals
+	# stay clickable — the actor's HP isn't the target, and the player
+	# may intentionally heal a wounded ally while full.
 	trigger_if = {
 		limit = {
 			$STORY$ = {
@@ -245,11 +185,9 @@ POD_can_execute_combat_move = {
 		custom_description = {
 			text = pod_combat_cant_heal_already_full_desc
 			OR = {
-				# Superficial hp_heal — useful while live HP is below
-				# the cap aggravated wounds impose (max_hp − agg_boxes).
-				# Aggravated wounds pin the top of the track so a
-				# superficial heal can't fill past sup_ceiling even
-				# when hp < max_hp.
+				# Superficial heals stop at sup_ceiling (= max_hp −
+				# agg_boxes): aggravated wounds pin the track top, so
+				# this can be a no-op even while hp < max_hp.
 				AND = {
 					$STORY$ = {
 						has_variable = hp_heal
@@ -257,9 +195,7 @@ POD_can_execute_combat_move = {
 					}
 					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
 				}
-				# Aggravated hp_heal — useful for any wound (heals
-				# aggravated first, spills into superficial if no
-				# aggravated remain), capped at max_hp.
+				# Aggravated heals any wound (aggravated first), capped at max_hp.
 				AND = {
 					$STORY$ = {
 						has_variable = hp_heal
@@ -267,7 +203,6 @@ POD_can_execute_combat_move = {
 					}
 					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
 				}
-				# Morale heal — useful below the morale cap.
 				AND = {
 					$STORY$ = { has_variable = morale_heal }
 					var:pod_combat_actor_morale < pod_combat_max_morale
@@ -276,26 +211,19 @@ POD_can_execute_combat_move = {
 		}
 	}
 
-	# Targeting validity during the player's turn. The PC has explicitly
-	# picked a slot via pod_combat_pc_target_*; the move's targeting flag
-	# dictates which range is acceptable. Outside of the player turn
-	# (AI eval), target selection happens via the AI swap effects AFTER
-	# move choice, so this check is skipped.
+	# Targeting validity, player turn only — the PC picked a slot via
+	# pod_combat_pc_target_*. AI eval skips this (the AI swap effects
+	# choose the target after move choice).
 	trigger_if = {
 		limit = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_enemy }
 		}
-		# Player must have an alive enemy currently selected via the
-		# combat window's portrait-pick. custom_description swap-in
-		# means the disabled-button tooltip renders "Select an enemy
-		# target" instead of the raw trigger text — useful when every
-		# equipped move greys out because the player accidentally
-		# picked an ally slot.
-		#
+		# custom_description swaps the disabled-button tooltip to "Select
+		# an enemy target" instead of raw trigger text.
 		# save_temporary_scope_as captures the host before any_in_list
-		# flips into per-slot iteration; the host's pod_combat_pc_target_team
-		# / _position are then visible inside the loop body. Same pattern as
+		# flips scope into per-slot iteration, so pod_combat_pc_target_*
+		# stays readable in the loop body. Same pattern as
 		# pod_combat_actor_has_alive_team_trigger in pod_combat_triggers.txt.
 		save_temporary_scope_as = host
 		custom_description = {
@@ -305,8 +233,8 @@ POD_can_execute_combat_move = {
 				variable = pod_combat_active_slots
 				var:combat_team = scope:host.var:pod_combat_pc_target_team
 				var:team_position = scope:host.var:pod_combat_pc_target_position
-				var:combat_team = flag:enemy
-				var:slot_alive = 1
+				pod_combat_slot_is_enemy_trigger = yes
+				pod_combat_slot_is_alive_trigger = yes
 			}
 		}
 	}
@@ -316,11 +244,8 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_ally }
 		}
-		# Mirror of the single_enemy branch above. combat_team = flag:player
-		# + team_position >= 1 narrows to the ally slots (player team minus
-		# the PC); the equality check against pc_target's team + position
-		# picks out the specific selected ally slot. See above for the
-		# save_temporary_scope_as rationale.
+		# Mirror of the single_enemy branch above; team_position >= 1
+		# narrows to ally slots (player team minus the PC).
 		save_temporary_scope_as = host
 		custom_description = {
 			text = pod_combat_targeting_need_ally_tt
@@ -329,9 +254,9 @@ POD_can_execute_combat_move = {
 				variable = pod_combat_active_slots
 				var:combat_team = scope:host.var:pod_combat_pc_target_team
 				var:team_position = scope:host.var:pod_combat_pc_target_position
-				var:combat_team = flag:player
+				pod_combat_slot_is_player_team_trigger = yes
 				var:team_position >= 1
-				var:slot_alive = 1
+				pod_combat_slot_is_alive_trigger = yes
 			}
 		}
 	}
@@ -341,14 +266,12 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_pc }
 		}
-		# Protect-the-PC moves target player/0 (the player character).
-		# Kept as a direct pointer check because it's a single-slot
-		# probe — any_in_list on player/0 would be longer
-		# without saving anything.
+		# Protect-the-PC moves target player/0 — direct pointer check
+		# rather than any_in_list, since it's a single-slot probe.
 		custom_description = {
 			text = pod_combat_targeting_need_pc_alive_tt
 			has_variable = pod_combat_pc_slot
-			var:pod_combat_pc_slot = { has_variable = slot_char var:slot_alive = 1 }
+			var:pod_combat_pc_slot = { has_variable = slot_char pod_combat_slot_is_alive_trigger = yes }
 		}
 	}
 
@@ -357,24 +280,18 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:team_enemy }
 		}
-		# At least one alive enemy slot. No pc_target dependency, so
-		# no scope save needed — the iteration body's filters are
-		# all on the slot story itself.
+		# At least one alive enemy slot. No pc_target dependency → no
+		# scope save (all filters are on the slot story itself).
 		any_in_list = {
 			variable = pod_combat_active_slots
-			var:combat_team = flag:enemy
-			var:slot_alive = 1
+			pod_combat_slot_is_enemy_trigger = yes
+			pod_combat_slot_is_alive_trigger = yes
 		}
 	}
 
-	# AI-side single_ally gate. Without this, an AI with a single_ally
-	# heal/buff move equipped (e.g. an enemy NPC who unlocks a clan
-	# heal) and no alive same-team allies (1v1, or all allies KO'd)
-	# would still pass selection. The ally-swap effect's if/else_if
-	# chain wouldn't find a match, the workspace would stay on the
-	# enemy target, and the heal/buff would land on the PC. This
-	# gate makes single_ally moves visible to the AI selector only
-	# when there's actually an ally to target.
+	# AI-side single_ally gate: only offer a single_ally move when an
+	# ally exists to target. Without it the ally-swap finds no match,
+	# the workspace stays on the enemy, and the heal/buff lands on the PC.
 	trigger_if = {
 		limit = {
 			NOT = { pod_combat_is_player_turn_trigger = yes }
@@ -383,16 +300,12 @@ POD_can_execute_combat_move = {
 		pod_combat_ai_has_available_ally_trigger = yes
 	}
 
-	# AI-side single_ally HEAL need-gate. Beyond "an ally exists to target"
-	# (above), a single_ally heal is only worth picking if some ally would
-	# actually benefit — otherwise the AI casts it on a full-HP / full-
-	# morale ally (the ally-swap picks flat among living allies). The
-	# actor's own state is irrelevant to an ally-targeted heal, so this
-	# can't live in the actor-keyed redundancy gate in
-	# pod_combat_ai_effects.txt (which now skips single_ally for exactly
-	# this reason); it's checked against ally state here instead.
-	# Heal-bearing single_ally moves only — pure-buff single_ally moves
-	# stay gated solely by the "ally exists" check above.
+	# AI-side single_ally HEAL need-gate: beyond "an ally exists", only
+	# pick a single_ally heal if some ally actually needs it (the
+	# ally-swap picks flat among living allies). Checked against ally
+	# state here rather than the actor-keyed redundancy gate in
+	# pod_combat_ai_effects.txt, since the actor's own state is
+	# irrelevant to an ally-targeted heal. Heal-bearing moves only.
 	trigger_if = {
 		limit = {
 			NOT = { pod_combat_is_player_turn_trigger = yes }
@@ -407,35 +320,25 @@ POD_can_execute_combat_move = {
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
 
-	# team_ally and self are always satisfiable during the player turn —
-	# team_ally includes the acting PC (slot 0 is always alive during
-	# their own turn), and self is the actor. Same on the AI
-	# side: team_ally always includes the acting AI itself, and
-	# self is self. single_enemy is vacuously satisfied because
-	# combat ends (victory check) when no enemies remain, so the AI
-	# never reaches selection without at least one valid enemy.
+	# team_ally and self need no gate (both always include the live
+	# actor). single_enemy is vacuous for the AI too: the victory check
+	# ends combat when no enemies remain, so selection never runs
+	# without a valid enemy.
 }
 
 
 ######################################################
 ###### RESULT-CODE CONDITION TRIGGERS
 ######################################################
-# Three primitive triggers that read pod_combat_last_outcome and
-# pod_combat_last_attack_result on the host scope and partition the
-# attack_result flag values by outcome class. Both the rider
-# condition gate and the retaliation gate compose against these so
-# the outcome → partition mapping lives in one place.
-#
-# Partition membership (see COMBAT_REFERENCE.info §4 for the full map):
-#   "hp_damage" — outcome=attack + attack_result=hp_damage
-#   "contact"   — outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked)
-#   "miss"      — outcome=attack + attack_result ∈ (missed, dodged, stealthed)
-# Outcomes outside the attack axis (outcome=heal / morale_damage /
-# morale_healed / utility) fail every attack-axis partition by
-# design — the attack_result var is only meaningful when outcome=attack.
-#
-# Each partition gates on `outcome = flag:attack` first to ensure
-# attack_result is meaningful before checking specific flag values.
+# Primitive partitions of attack_result by outcome class, read off the
+# host scope. The rider-condition and retaliation gates compose against
+# these so the mapping lives in one place (canonical map:
+# COMBAT_REFERENCE.info §4):
+#   "hp_damage" — attack_result=hp_damage
+#   "contact"   — attack_result ∈ (hp_damage, guard_blocked, soaked)
+#   "miss"      — attack_result ∈ (missed, dodged, stealthed)
+# Each gates on outcome=attack first — attack_result is only meaningful
+# then, so non-attack outcomes fail every partition by design.
 
 # The attack landed real wound boxes on the target.
 pod_combat_result_code_indicates_hp_damage_trigger = {
@@ -445,10 +348,8 @@ pod_combat_result_code_indicates_hp_damage_trigger = {
 	var:pod_combat_last_attack_result = flag:hp_damage
 }
 
-# Anything that made physical contact: hp_damage plus blocked /
-# soaked. Lets designers author "fires on touch even if absorbed"
-# riders (e.g. a poison that delivers on the strike whether or not
-# wounds were inflicted).
+# Physical contact: hp_damage plus blocked / soaked. For "fires on
+# touch even if absorbed" riders (e.g. poison delivered on the strike).
 pod_combat_result_code_indicates_contact_trigger = {
 	has_variable = pod_combat_last_outcome
 	var:pod_combat_last_outcome = flag:attack
@@ -460,10 +361,8 @@ pod_combat_result_code_indicates_contact_trigger = {
 	}
 }
 
-# Anything that evaded the attack — straight miss, dodge consumed,
-# stealth auto-miss. Used by retaliate_if_missed and by
-# rider_condition = on_miss (e.g. a clumsy whiff that wounds the
-# actor on the overswing).
+# Evaded the attack — miss, dodge consumed, stealth auto-miss. Used by
+# retaliate_if_missed and rider_condition = on_miss.
 pod_combat_result_code_indicates_miss_trigger = {
 	has_variable = pod_combat_last_outcome
 	var:pod_combat_last_outcome = flag:attack
@@ -475,25 +374,18 @@ pod_combat_result_code_indicates_miss_trigger = {
 	}
 }
 
-# Superset of the miss partition plus guard_blocked: every outcome
-# where the attack delivered ZERO damage. Used by the combat-log
-# damage-source icon visibility (suppress the elemental marker on
-# rows where no elemental damage actually landed — fire icon next
-# to a "Blocked" row is noise, not flavour).
+# Miss partition plus guard_blocked: every zero-damage outcome. Gates
+# the combat-log damage-source icon (no elemental marker where nothing
+# landed).
 #
-# Excludes `soaked` deliberately. Soak typically reduces damage but
-# doesn't always zero it (and even on full-soak rows we want the
-# source flavour because something WAS rolled and survived as
-# residue / aura interaction). If a future attack_result flag joins
-# the zero-damage set (e.g. "incorporeal_no_effect"), update this
-# trigger and every consumer picks it up automatically.
+# Excludes `soaked` deliberately: soak doesn't always zero damage, and
+# even on full-soak rows we keep the source flavour (something WAS
+# rolled and survived as residue / aura).
 #
-# Parametric on $RESULT_VAR$ because two call sites read the same
-# attack_result enum on different vars:
-#   - host scope (during move execution) — RESULT_VAR = pod_combat_last_attack_result
-#   - log-entry scope (post-action GUI)  — RESULT_VAR = attack_result
-# Without the parameter the enum would have to be duplicated across
-# the two scopes.
+# Parametric on $RESULT_VAR$ — two call sites read the enum off
+# different vars:
+#   - host scope (move execution)  — RESULT_VAR = pod_combat_last_attack_result
+#   - log-entry scope (post-action) — RESULT_VAR = attack_result
 pod_combat_result_indicates_no_damage_dealt_trigger = {
 	has_variable = $RESULT_VAR$
 	OR = {
@@ -508,31 +400,15 @@ pod_combat_result_indicates_no_damage_dealt_trigger = {
 ######################################################
 ###### RIDER CONDITION GATE
 ######################################################
-# Generic gate for rider effects (heal / morale damage / self-damage).
-# A "rider" is a payload that piggybacks on the move's primary HP-damage
-# step — e.g. a vampire bite that heals when it lands, a brutal swing
-# that damages morale alongside HP, or a reckless charge that wounds
-# the actor only on miss. Each rider lives behind its own condition var
-# on the move story (heal_condition / morale_damage_condition /
-# self_damage_condition). The §6 attack outcome (read off
-# pod_combat_last_outcome / pod_combat_last_attack_result on the host)
-# decides whether the rider fires.
+# Generic gate for rider effects (heal / morale damage / self-damage)
+# that piggyback on a move's HP-damage step — e.g. a bite that heals on
+# a landed hit. Each rider's condition var on the move story holds one
+# of: always (default when unset), on_hp_damage, on_contact, on_miss —
+# resolved against the partition triggers above. Caller scope = host.
 #
-# Recognized condition flags (must match RIDER_CONDITIONS in the
-# generator):
-#   always       — fire unconditionally (default when var unset)
-#   on_hp_damage — outcome=attack + attack_result=hp_damage
-#   on_contact   — outcome=attack + attack_result ∈ (hp_damage, guard_blocked, soaked)
-#   on_miss      — outcome=attack + attack_result ∈ (missed, dodged, stealthed)
-#
-# Caller scope: the combat host (where pod_combat_last_outcome lives).
-# $STORY$ is the move story; $RIDER_VAR$ is the variable name on the
-# story that holds the condition flag.
-#
-# Drain moves: the generator emits heal_condition = on_hp_damage for
-# any move with the `drain` token in its `special` column, so the
-# runtime gate handles "only heal on a landed hit" through the same
-# rider machinery as every other condition rather than a special case.
+# Drain moves: the generator emits heal_condition = on_hp_damage for any
+# `drain`-token move, so "heal only on a landed hit" flows through this
+# rider machinery rather than a special case.
 pod_combat_rider_condition_passes_trigger = {
 	# $STORY$     = the POD_combat_move story_cycle
 	# $RIDER_VAR$ = the condition variable name on the story (e.g. heal_condition)
@@ -558,10 +434,8 @@ pod_combat_rider_condition_passes_trigger = {
 		limit = { $STORY$ = { var:$RIDER_VAR$ = flag:on_miss } }
 		pod_combat_result_code_indicates_miss_trigger = yes
 	}
-	# Unknown flag value — fail safely. Generator validates rider-
-	# condition values against RIDER_CONDITIONS so unknown flags should
-	# never reach runtime, but the closing trigger_else avoids a silent
-	# pass on misconfigured data.
+	# Unknown flag value — fail closed. The generator validates against
+	# RIDER_CONDITIONS, so this guards only misconfigured data.
 	trigger_else = {
 		always = no
 	}
@@ -571,22 +445,8 @@ pod_combat_rider_condition_passes_trigger = {
 ######################################################
 ###### AOE TEAM-SIDE FILTERS
 ######################################################
-# Slot-membership filters used by the AoE dispatchers in
-# pod_combat_move_effects.txt. Each iterator runs in slot-story scope
-# (every_in_list switches into pod_combat_active_slots entries) and
-# needs to decide "is this slot on the same team as the actor or the
-# opposite team?". Both filters read scope:host (the combat host save
-# the dispatcher establishes) for the actor's combat_team flag and
-# compare it against the iterated slot's combat_team.
-#
-# Team membership is the per-slot combat_team flag (flag:player /
-# flag:enemy):
-# - Same-team:     slot combat_team == actor's current_actor_team
-# - Opposite-team: slot combat_team != actor's current_actor_team
-#
-# Both filters live here as a single source of truth so any future
-# AoE addition can reuse the team decision without re-deriving the
-# team test.
+# Same-team / opposite-team slot filters for the AoE dispatchers in
+# pod_combat_move_effects.txt.
 #
 # Caller contract:
 #   - Implicit scope must be the iterated slot story (var:combat_team
@@ -595,14 +455,10 @@ pod_combat_rider_condition_passes_trigger = {
 #     pod_combat_current_actor_team is read).
 
 pod_combat_aoe_team_enemy_filter_trigger = {
-	# Slot belongs to the team OPPOSITE the current actor: its combat_team
-	# flag differs from the actor's pod_combat_current_actor_team.
 	NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
 }
 
 pod_combat_aoe_team_ally_filter_trigger = {
-	# Slot belongs to the SAME team as the current actor (includes the
-	# actor's own slot — team_ally heals/buffs cover self): its combat_team
-	# flag matches the actor's pod_combat_current_actor_team.
+	# Includes the actor's own slot — team_ally heals/buffs cover self.
 	var:combat_team = scope:host.var:pod_combat_current_actor_team
 }

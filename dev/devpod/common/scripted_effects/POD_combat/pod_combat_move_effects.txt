@@ -1,17 +1,14 @@
 ﻿######################################################
 ######   POD COMBAT MOVE EXECUTION ENGINE
 ######################################################
-# Single generic effect that executes any combat move by reading the
-# attributes off its story_cycle. Called from the
-# pod_combat_execute_move SGUI (PC) and pod_combat_ai_select_and_execute_move_effect
-# (AI). Caller scope is the combat host; the workspace is assumed loaded.
-# Damage / soak / retaliation helpers live in pod_combat_effects.txt;
-# tier recalc in pod_combat_tier_effects.txt; slot load/save in
-# pod_combat_group_effects.txt. This file just dispatches.
+# Generic dispatcher: executes any combat move by reading attributes off its
+# story_cycle. Called from pod_combat_execute_move SGUI (PC) and
+# pod_combat_ai_select_and_execute_move_effect (AI). Caller scope = combat host.
+# Helpers live in pod_combat_effects.txt (damage/soak/retaliation),
+# pod_combat_tier_effects.txt (tier recalc), pod_combat_group_effects.txt (slot load/save).
 #
-# Phase contract (§0 setup → §16 push log) and the load-bearing
-# anti-invariants live in COMBAT_REFERENCE.info §2. Read that before
-# reordering anything.
+# Phase contract (§0 → §16) and load-bearing anti-invariants: COMBAT_REFERENCE.info §2.
+# Read that before reordering anything.
 
 
 ######################################################
@@ -22,18 +19,12 @@ POD_execute_combat_move = {
 	# $STORY$ = the POD_combat_move story_cycle
 
 	# ── 0. Capture combat host as a saved scope ──────────────────
-	# Downstream damage routing (pod_combat_route_to_pod_damage)
-	# needs scope:combat_host to find the workspace owner from
-	# inside per-target scope-switches. The PC button-click path
-	# enters this effect with root = PC = combat host, and the AI
-	# path enters with root = combat host (the AI driver scope-
-	# switches back to the host before this call). Saving it here
-	# once means the AoE iteration helpers don't need their own
-	# `root = { save_scope_as = combat_host }` dance — that
-	# dance was crashing the AI AoE chain because the AoE inner
-	# scope-switches make the engine treat root as unset when the
-	# save executes, blowing up scope:combat_host before the
-	# per-target damage call could read it.
+	# Downstream damage routing (pod_combat_route_to_pod_damage) needs
+	# scope:combat_host from inside per-target scope-switches. Saving it once
+	# here (root = host on both PC and AI entry) avoids a per-iteration
+	# `root = { save_scope_as = combat_host }`, which CRASHED the AI AoE chain:
+	# the AoE inner scope-switches make the engine treat root as unset when the
+	# save runs, blowing up scope:combat_host before the per-target damage read.
 	save_scope_as = combat_host
 
 	# ── 1. AP spend ──────────────────────────────────────────────
@@ -43,38 +34,15 @@ POD_execute_combat_move = {
 	}
 
 	# ── 2. Result reset + log metadata ───────────────────────────
-	# Remove every stale `pod_combat_last_*` transient from the previous
-	# move so absence = "no outcome yet" for this move's pipeline.
-	# Damage / heal / stance helpers along §3-§14 write the outcome
-	# flag and the appropriate amount field as they fire; push_log
-	# (§16) reads them and falls back to `flag:utility` when nothing
-	# wrote a result.
-	#
-	# The clear list lives in the helper rather than spread inline
-	# here so adding a new "last" field is a one-line edit in
-	# pod_combat_clear_last_result_vars_effect (used here AND in
-	# push_log's post-capture clear AND in combat-end cleanup
-	# all three sites stay in sync automatically).
+	# Clear stale pod_combat_last_* so absence = "no outcome yet". Clear list
+	# lives in the helper so adding a "last" field is one edit shared across
+	# here, push_log's post-capture clear, and combat-end cleanup.
 	pod_combat_clear_last_result_vars_effect = yes
-	# Default last_damage = 0 so utility moves log cleanly; damage
-	# helpers overwrite this when they fire. The clear helper above
-	# unsets the var entirely, so without this re-seed push_log would
-	# read it as missing and the log row would default to "0" anyway,
-	# but explicit 0 makes the intent obvious in the loc dispatch.
 	set_variable = { name = pod_combat_last_damage value = 0 }
 
-	# Move ref is threaded explicitly through pod_combat_push_log_effect's
-	# MOVE_STORY parameter at §16 — no host-var handoff required, no
-	# shared mutable state between caller and callee.
-
 	# ── 3. Energy cost (splat-agnostic) ──────────────────────────
-	# PoD's splat-agnostic accessor routes to blood/gnosis/pathos/angst/
-	# resolve/glamour/dread/willpower depending on the CURRENT scope's
-	# splat. So, we MUST scope-switch to the actor before calling it.
-	# Workspace state (incl. pod_combat_actor_char) is stored on
-	# combat_host (PC), but the actor is set to the acting NPC for AI
-	# turns and to PC itself for PC turns. Without the switch, every
-	# AI cast would drain the PC's pool.
+	# POD_splat_agnostic_energy_cost routes to the CURRENT scope's splat pool, so
+	# MUST scope-switch to the actor first — else every AI cast drains the PC pool.
 	if = {
 		limit = { $STORY$ = { has_variable = energy_cost } }
 		if = {
@@ -84,18 +52,11 @@ POD_execute_combat_move = {
 			}
 		}
 		else = {
-			# pod_combat_actor_char isn't set yet; happens when a move
-			# fires before pod_combat_load_workspace_effect has stamped
-			# the actor pointer. Fall back to paying on the current
-			# scope, which is the actor in those flows by construction.
+			# actor_char not stamped yet (move fired before load_workspace);
+			# current scope is the actor in those flows by construction.
 			POD_splat_agnostic_energy_cost = { COUNT = $STORY$.var:energy_cost }
 		}
-		# AI attrition counter stays on combat_host because the selection
-		# weight reads it from there when the next AI turn picks a move.
-		# pod_combat_actor_energy_used tracks "the current actor used
-		# an energy-cost move" — true for PC and AI alike — and the
-		# energy-attrition weighting in the AI selector keys off the
-		# acting character's history.
+		# AI energy-attrition counter, read by the selector on the next AI turn.
 		if = {
 			limit = { has_variable = pod_combat_actor_energy_used }
 			change_variable = { name = pod_combat_actor_energy_used add = 1 }
@@ -139,56 +100,32 @@ POD_execute_combat_move = {
 	}
 
 	# ── 5. Target stance bypass ──────────────────────────────────
-	# Strip the target's dodge/stealth stances BEFORE damage resolves so
-	# the damage pipeline treats the target as unprotected. bypass_guard
-	# has no runtime variable — the generator OMITS the checks_guard
-	# capability flag for moves with bypass_guard in `special`, and the
-	# contact resolver reads that omission directly. No separate
-	# dispatcher branch is needed here.
+	# Strip target dodge/stealth BEFORE damage resolves. bypass_guard has no
+	# runtime var — the generator omits the checks_guard capability flag and the
+	# contact resolver reads that omission directly.
 	if = {
 		limit = { $STORY$ = { has_variable = bypass_dodge } }
 		remove_variable = pod_combat_target_is_dodging
 	}
 	if = {
 		limit = { $STORY$ = { has_variable = bypass_stealth } }
-		# Tear down both the flag AND the +30 hit-chance bonus the
-		# target's stealth granted. Without subtracting the bonus, a
-		# bypass_stealth'd target keeps the +30 baked into their slot's
-		# saved hit_chance and gets a phantom offensive boost on their
-		# next attack. Helper is idempotent — no-op if target isn't
-		# stealthed.
+		# Must also subtract the +30 stealth hit bonus baked into saved
+		# hit_chance, else the target keeps a phantom offensive boost. Idempotent.
 		pod_combat_break_stealth_workspace_effect = { SIDE = target }
 	}
 
 	# ── 5b. AoE debuff pre-damage broadcast ──────────────────────
-	# For team_enemy moves, broadcast tier debuffs + stance-strip
-	# flags to ALL enemy slots BEFORE the damage iteration so each
-	# hit in the AoE respects bypass_dodge / bypass_stealth /
-	# remove_guard on its own target (the workspace strip in
-	# section 5 only touches the pre-AoE designated target's
-	# workspace copy, which each AoE iteration overwrites when it
-	# loads a new slot). Tier debuffs (soak_debuff / hit_debuff)
-	# broadcast here persist on every enemy slot, not just the
-	# pre-AoE target's workspace. Section 11/12's target-side
-	# writes still run post-damage but are redundant for
-	# team_enemy — the authoritative debuff state is on slot vars
-	# set here.
+	# team_enemy: broadcast tier debuffs + stance-strips to ALL enemy slots
+	# BEFORE the damage iteration, so each hit respects them on its own target.
+	# §5's workspace strip only touches the pre-AoE target, which each iteration
+	# overwrites. §11/§12 target-writes still run but are redundant for team_enemy.
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:team_enemy } }
 		POD_combat_apply_team_enemy_debuffs = { STORY = $STORY$ }
 	}
 
 	# ── 6. HP damage dispatch ────────────────────────────────────
-	# Routes by source × type × targeting through POD_combat_apply_single_hp_damage
-	# (or its team_enemy AoE wrapper). The single-target path saves the
-	# move story as scope:current_move and forwards to
-	# POD_combat_dispatch_damage_pipeline, which runs the unified
-	# pod_combat_resolve_contact_effect (capability-flag-driven contact
-	# resolution) followed by pod_combat_apply_damage_payload_effect on
-	# hit. Pipeline behavior (hit roll / guard check / spirit gate) is
-	# selected by the move's capability flags rather than by branching
-	# to a dedicated effect. See pod_combat_effects.txt's UNIFIED
-	# CONTACT RESOLVER block for the implementation.
+	# Routes single_enemy vs team_enemy AoE. See HP DAMAGE DISPATCH header below.
 	if = {
 		limit = { $STORY$ = { has_variable = hp_damage } }
 		if = {
@@ -196,21 +133,16 @@ POD_execute_combat_move = {
 			POD_combat_apply_team_enemy_hp_damage = { STORY = $STORY$ }
 		}
 		else = {
-			# single_enemy (default and most common case)
+			# single_enemy (default, most common)
 			POD_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = target }
 		}
 	}
 
 	# ── 7. Morale damage ─────────────────────────────────────────
-	# Morale damage uses its own pipeline (auto-hit, no guard, no soak,
-	# dodge still works). Source is informational — routed the same way
-	# regardless of damage_source.
-	#
-	# Rider gate: default fires unconditionally; designers can author
-	# "morale damage only on hit" / "only on miss" / "only on contact"
-	# by setting morale_damage_condition on the move. Trigger reads
-	# the §6 outcome via pod_combat_last_outcome /
-	# pod_combat_last_attack_result on the host (this scope).
+	# Own pipeline: auto-hit, no guard, no soak, dodge still works.
+	# Rider gate (here and §8/§9): a *_condition var on the move makes the
+	# payload fire only on hit/miss/contact, read off §6's outcome on the host.
+	# Default (no condition) = fires unconditionally.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = morale_damage }
@@ -229,19 +161,9 @@ POD_execute_combat_move = {
 	}
 
 	# ── 8. Self-damage ───────────────────────────────────────────
-	# Route self-damage through the same PoD pipeline as regular hits
-	# so wound state stays in lockstep. Uses REASON=duel (superficial,
-	# soakable) rather than self_mutilation — reckless-charge-style
-	# self damage is physical overextension, not a permanent wound.
-	# Soak still applies, so armor/fortitude can mitigate it. The
-	# bypass_guard helper skips the guard check since self-damage
-	# doesn't care about stances.
-	#
-	# Rider gate: default fires unconditionally; designers
-	# can author "self-damage on miss" (reckless overswings) or
-	# "self-damage on hit" (blood payment for landing the strike) by
-	# setting self_damage_condition on the move. Trigger reads §6's
-	# outcome / attack_result on this scope (the combat host).
+	# Routed through the PoD pipeline like a real hit so wound state stays in
+	# lockstep. REASON=duel (superficial, soakable) not self_mutilation —
+	# overextension, not a permanent wound. Rider-gated (see §7).
 	if = {
 		limit = {
 			$STORY$ = { has_variable = self_damage }
@@ -255,28 +177,16 @@ POD_execute_combat_move = {
 			AMOUNT      = $STORY$.var:self_damage
 			REASON      = duel
 		}
-		# scope:damage_dealt and scope:attack_result_flag are
-		# intentionally discarded — self-damage is a rider on the
-		# main attack, not its own log row. If a future change wants
-		# to render a self-damage line, lift scope:damage_dealt into a
-		# dedicated pod_combat_last_self_damage field here.
+		# scope:damage_dealt / scope:attack_result_flag intentionally discarded
+		# — self-damage is a rider, not its own log row. For a self-damage line,
+		# lift scope:damage_dealt into a pod_combat_last_self_damage field here.
 	}
 
 	# ── 9. HP heal ───────────────────────────────────────────────
-	# heal_type (flag:aggravated) routes to the aggravated heal variant
-	# which also reduces the agg_damage counter. Otherwise uses the
-	# superficial heal (caps at max_hp − agg_damage).
-	# team_ally heals iterate the actor's whole team via AoE dispatch;
-	# single-target heals (and self heals via targeting=self) just run
-	# on the player-side workspace.
-	#
-	# Rider gate: heal_condition controls whether the heal fires based
-	# on §6's outcome. Default = always (utility heals). Drain heals
-	# (vampire bite, spectre soul-drain, etc.) get heal_condition =
-	# on_hp_damage emitted automatically by the generator when the
-	# move has the `drain` token in `special`, so "only heal on a
-	# landed hit" runs through the same machinery as every other
-	# rider condition.
+	# heal_type=aggravated routes to the aggravated variant (also reduces
+	# agg_damage); else superficial (caps at max_hp − agg_damage).
+	# Rider-gated (see §7) on heal_condition — drain heals get
+	# heal_condition=on_hp_damage auto-emitted by the generator's `drain` token.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_heal }
@@ -290,12 +200,8 @@ POD_execute_combat_move = {
 			POD_combat_apply_team_ally_hp_heal = { STORY = $STORY$ }
 		}
 		else_if = {
-			# single_ally heal — the selected ally is loaded into the
-			# target workspace by pod_combat_load_target_from_story_effect
-			# during the standard workspace load (and re-verified by
-			# can_execute's ally-target gate), so routing the heal with
-			# SIDE=target operates on the chosen ally instead of the
-			# acting character.
+			# single_ally — chosen ally is loaded into the target workspace, so
+			# SIDE=target heals them instead of the actor.
 			limit = { $STORY$ = { var:targeting = flag:single_ally } }
 			if = {
 				limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
@@ -322,10 +228,7 @@ POD_execute_combat_move = {
 			POD_combat_apply_team_ally_morale_heal = { STORY = $STORY$ }
 		}
 		else_if = {
-			# single_ally morale heal — symmetric to the single_ally HP
-			# heal branch above. SIDE=target restores morale on the
-			# selected ally's workspace mirror; save_workspace then
-			# flushes the change back to their slot story.
+			# single_ally — see §9's single_ally branch.
 			limit = { $STORY$ = { var:targeting = flag:single_ally } }
 			pod_combat_restore_morale_effect = { SIDE = target AMOUNT = $STORY$.var:morale_heal }
 		}
@@ -335,35 +238,17 @@ POD_execute_combat_move = {
 	}
 
 	# ── 11. Tier buffs/debuffs ───────────────────────────────────
-	# Buffs land on the actor (pod_combat_actor_*), debuffs on the
-	# target (pod_combat_target_*). Values 1/2/3 map to +/-10/20/30
-	# in recalc.
+	# Buffs → actor (pod_combat_actor_*), debuffs → target (pod_combat_target_*).
+	# Soak tiers ALSO bridge to the character as pod_combat_tier_soak_* vars, read
+	# by POD_soak_chance (POD_health_track_values.txt) so wound rolls pick them up;
+	# workspace copies feed the hit-chance side.
 	#
-	# Soak tiers ALSO propagate to the acting/targeted character as
-	# pod_combat_tier_soak_{buff,debuff}_{round,combat} variables.
-	# PoD's POD_soak_chance SV (overridden in
-	# POD_health_track_values.txt) reads these character vars so the
-	# damage roll picks up the combat tier bonus. Workspace
-	# copies stay for the hit-chance side (which still
-	# runs through combat's own pipeline).
-	#
-	# Upgrade-only gating: each write is wrapped in an OR-guard that
-	# fires when the workspace has no current tier (first application)
-	# OR the new tier is strictly higher than the existing one. Without
-	# this, a tier-1 buff/debuff would silently DOWNGRADE a stacked
-	# tier-3 effect already on the actor / target — e.g. an actor with
-	# Toughness (combat soak buff tier 3) using a low-tier defensive
-	# move would lose two tiers of soak. The AI selector and PC
-	# can_execute filters reject downgrade picks during normal play,
-	# but the gate here makes §11 itself defensive against console
-	# commands, future test actions, or any path that bypasses the
-	# selection layer. Mirrors the same `OR = { NOT = { has_variable }
-	# var:... < $STORY$.var:... }` pattern used by
-	# POD_combat_apply_team_ally_buffs (single source of truth for the
-	# upgrade-only semantic). Recalc-after at the bottom of §11 fires
-	# unchanged on story-has-var rather than on write-actually-happened
-	# — a skipped write just leaves the higher existing tier in place
-	# and the recalc rebuilds against it, no extra branching needed.
+	# CANONICAL upgrade-only gating (mirrored by the team appliers + trigger file):
+	# each write's OR-guard fires only on first application or a strictly-higher
+	# tier, so a low-tier move can't silently DOWNGRADE a stacked tier-3 effect.
+	# Selection filters already reject downgrades; this guards bypass paths
+	# (console, test actions). Recalc fires on story-has-var, not write-happened —
+	# a skipped write leaves the higher tier and recalc rebuilds against it.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = soak_buff_round_tier }
@@ -517,12 +402,7 @@ POD_execute_combat_move = {
 	}
 	if = {
 		limit = { $STORY$ = { has_variable = stealth } }
-		# Idempotent stealth applicator — guards on the existing flag
-		# so a duplicate stealth move from a stealthed actor doesn't
-		# double-bake the +30. The PC-side `POD_can_execute_combat_move`
-		# also rejects stealth-while-stealthed, but the helper guard
-		# keeps the slot-stealth invariant if any future path applies
-		# stealth without going through can_execute.
+		# Idempotent — guards the flag so a re-cast doesn't double-bake the +30.
 		pod_combat_apply_stealth_workspace_effect = { SIDE = actor }
 	}
 	if = {
@@ -531,45 +411,24 @@ POD_execute_combat_move = {
 	}
 
 	# ── 12b. AoE buff broadcast ──────────────────────────────────
-	# For team_ally moves, extend the actor-workspace buff writes
-	# in sections 11 + 12 to ALL ally slots so every teammate
-	# carries the tier buffs (soak/hit) and stance flags
-	# (set_guard / dodge / stealth). The actor's own slot gets
-	# written here; save_actor_to_slot at end of turn writes the
-	# same values back from workspace, so there's no conflict.
-	# Soak tier bridge vars are also set on each ally's character
-	# so POD_soak_chance override picks up the buff right
-	# away (not just after their next turn loads workspace).
+	# team_ally: extend §11/§12's actor buffs (tiers + stance flags) to ALL ally
+	# slots, plus the soak bridge var on each ally's char so POD_soak_chance picks
+	# it up immediately rather than only on their next turn.
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:team_ally } }
 		POD_combat_apply_team_ally_buffs = { STORY = $STORY$ }
 	}
 
 	# ── 13. Retaliation stances ──────────────────────────────────
-	# Setting up a retaliation — arms a reaction that fires next turn
-	# in §15 when the actor is attacked.
-	#   retaliate_if_hit    — fires on contact (outcome=attack +
-	#                         attack_result ∈ hp_damage / guard_blocked /
-	#                         soaked). Thorns / spite semantics: any
-	#                         attack that physically reaches the
-	#                         defender triggers the counter, even if
-	#                         the defender's soak or guard absorbed it.
-	#   retaliate_if_missed — fires on evasion (outcome=attack +
-	#                         attack_result ∈ missed / dodged /
-	#                         stealthed). Riposte semantics: the
-	#                         attacker overcommitted on a whiff.
-	# retaliate_damage gives the counter amount; otherwise the move's
-	# hp_damage value is reused. retaliate_agg marks it as aggravated.
-
-	# Amount fallback chain: explicit retaliate_damage → move's
-	# hp_damage → final fallback of 1. The final `else` defaults
-	# matter only when a move sets retaliate_if_hit / _missed without
-	# either retaliate_damage OR hp_damage. Without the
-	# fallback the workspace var stays unset and
-	# pod_combat_apply_reaction_if_triggered_effect's
-	# `has_variable = pod_combat_actor_retaliate_hit` gate fails
-	# the retaliation silently doesn't fire even though the move
-	# armed it.
+	# Arms a reaction that fires in §15 next turn when the actor is attacked.
+	#   retaliate_if_hit    — fires on contact (hp_damage/guard_blocked/soaked).
+	#                         Thorns: any attack reaching the defender counters,
+	#                         even if soak/guard absorbed it.
+	#   retaliate_if_missed — fires on evasion (missed/dodged/stealthed). Riposte.
+	# Amount fallback: retaliate_damage → hp_damage → 1. The final 1 matters only
+	# when a move arms retaliation with neither var set — otherwise the workspace
+	# var stays unset and the §15 has_variable gate silently swallows the reaction.
+	# retaliate_agg marks the counter aggravated.
 	if = {
 		limit = { $STORY$ = { has_variable = retaliate_if_hit } }
 		if = {
@@ -581,10 +440,6 @@ POD_execute_combat_move = {
 			set_variable = { name = pod_combat_actor_retaliate_hit value = $STORY$.var:hp_damage }
 		}
 		else = {
-			# No explicit amount and no hp_damage to reuse; default
-			# to 1 so the reaction at least fires. Designer can
-			# author a real amount via retaliate_damage when this
-			# starts mattering.
 			set_variable = { name = pod_combat_actor_retaliate_hit value = 1 }
 		}
 		if = {
@@ -616,19 +471,11 @@ POD_execute_combat_move = {
 		limit = { $STORY$ = { has_variable = ap_gain } }
 		change_variable = { name = pod_combat_current_ap add = $STORY$.var:ap_gain }
 	}
-	# AP-drain and initiative-debuff target writes go through the
-	# workspace target mirrors (pod_combat_target_ap_drain /
-	# pod_combat_target_init_bonus). save_target_to_story_effect at the
-	# end of the action pushes both to the target slot's slot_ap_drain /
-	# slot_init_bonus, where:
-	#   * slot_ap_drain is consumed at the target's NEXT TURN start by
-	#     pod_combat_apply_ap_drain_effect (via the actor mirror after
-	#     the target loads as the next-turn actor).
-	#   * slot_init_bonus is consumed at ROUND END by
-	#     pod_combat_calculate_initiative_effect reading the slot
-	#     directly (outside any workspace lifecycle).
-	# Routing through workspace keeps the load/save shape symmetric on
-	# both sides (the save_target writeback pushes these to the slot).
+	# AP-drain / init-debuff write the target workspace mirrors; save_target
+	# pushes them to the slot. Consumed at different times:
+	#   * slot_ap_drain — target's NEXT TURN start (pod_combat_apply_ap_drain_effect).
+	#   * slot_init_bonus — ROUND END, read off the slot directly by
+	#     pod_combat_calculate_initiative_effect (outside the workspace lifecycle).
 	if = {
 		limit = { $STORY$ = { has_variable = ap_drain } }
 		set_variable = { name = pod_combat_target_ap_drain value = $STORY$.var:ap_drain }
@@ -658,16 +505,9 @@ POD_execute_combat_move = {
 	}
 
 	# ── 15. Retaliation check ────────────────────────────────────
-	# After any damage resolves, check if the target had a retaliation
-	# stance set up from a previous turn.
-	#
-	# Gated on single-target damage: team_enemy AoE moves don't
-	# trigger retaliation. The retaliation effect can only fire on
-	# ONE target at a time (the workspace target, which the AoE
-	# path restores to the pre-AoE designated target). Firing it
-	# there would unfairly single out the designated target out of
-	# all 5 AoE victims. Skipping retaliation for AoE is the
-	# simplest consistent behavior.
+	# Fire any retaliation the target armed on a previous turn.
+	# Skipped for team_enemy AoE: retaliation can only fire on one workspace
+	# target, so firing it would arbitrarily single out the pre-AoE target.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_damage }
@@ -677,26 +517,11 @@ POD_execute_combat_move = {
 	}
 
 	# ── 16. Push combat log entry ────────────────────────────────
-	# Move story passed explicitly so push_log doesn't depend on a
-	# host-var handoff.
-	#
-	# AoE-aware gate: §6-§10 AoE iterators each push a per-target
-	# row inside their iteration and set pod_combat_aoe_phase_pushed_rows
-	# as a tripwire. When that flag is set we skip the §16 wrap-up
-	# row UNLESS the move also fired actor-side state that wouldn't
-	# have been captured in the per-target rows:
-	#   - pod_combat_last_heal_amount       (self-heal on a non-team_ally move)
-	#   - pod_combat_last_morale_heal_amount (self-morale-heal on non-team_ally)
-	#   - pod_combat_last_retal_fired       (retaliation overlay armed in §15)
-	# In any of those cases the wrap-up row carries the actor-side
-	# rider lines (heal / morale_heal / retal) without duplicating
-	# the per-target damage already shown. Pure AoE damage / heal
-	# moves with no actor-side state get NO wrap-up row. The
-	# per-target rows are the whole log entry for the move.
-	#
-	# Non-AoE moves take the original always-push path (the flag is
-	# never set by the single-target damage / heal paths, so the
-	# NOT-has_variable branch fires).
+	# AoE-aware gate: AoE iterators push per-target rows and set the
+	# pod_combat_aoe_phase_pushed_rows tripwire. When set, skip the wrap-up row
+	# UNLESS actor-side state fired that the per-target rows missed (self-heal /
+	# self-morale-heal / retal overlay) — then the wrap-up carries just those
+	# riders. Non-AoE paths never set the tripwire, so they always push.
 	if = {
 		limit = {
 			OR = {
@@ -722,73 +547,34 @@ POD_execute_combat_move = {
 #   3. POD_combat_dispatch_damage_pipeline  — runs the unified
 #      pod_combat_resolve_contact_effect (capability-flag-driven) and
 #      fires pod_combat_apply_damage_payload_effect on hit.
-#
-# Capability flags drive what the resolver does: requires_hit_roll /
-# checks_guard / checks_stance / checks_spirit_gate. The resolver IS
-# the pipeline and branching happens via flag
-# presence on scope:current_move.
 
 POD_combat_apply_single_hp_damage = {
 	# $STORY$ = move story
 	# $TARGET_SIDE$ = "target" (the workspace side that takes the damage)
 	#
-	# attack_type (physical / supernatural / mental) and damage_source
-	# (fire / silver / sun / ...) are independent dimensions:
-	#   attack_type → capability flags (requires_hit_roll, checks_guard,
-	#                  checks_stance, checks_spirit_gate). Resolved at
-	#                  generation time and stamped on the story by
-	#                  POD_init_combat_move.
-	#   damage_source → PoD death_reason suffix. Mapped at runtime by
-	#                  POD_combat_dispatch_by_source.
-	#   damage_type = aggravated forces REASON = duel_aggravated,
-	#                  overriding any source-specific aggravation rule.
+	# Two independent dimensions:
+	#   attack_type → capability flags (stamped at init by POD_init_combat_move).
+	#   damage_source → PoD death_reason suffix (mapped at runtime by dispatch_by_source).
+	#   damage_type=aggravated forces REASON=duel_aggravated, overriding source.
 	#
-	# Save the move story as scope:current_move so the contact resolver
-	# (and any other downstream helper) can read its capability flags
-	# without each one threading $STORY$ through its signature.
-	# CK3 saved scopes propagate down the call stack. The dispatch
-	# chain (apply_single → dispatch_by_source → dispatch_damage_pipeline
-	# → resolve_contact / apply_payload) all see the same scope:current_move.
+	# Save the move as scope:current_move so the resolver (and the whole dispatch
+	# chain below it) reads capability flags without re-threading $STORY$.
 	$STORY$ = { save_scope_as = current_move }
 
-	# Aggravated override: damage_type = aggravated forces the
-	# wound to be aggravated regardless of source or target splat.
-	# Delegates straight to the unified dispatcher with the canonical
-	# duel_aggravated reason — capability flags on the move story
-	# (set at init from attack_type defaults) drive pipeline behavior.
 	if = {
 		limit = { $STORY$ = { has_variable = damage_type var:damage_type = flag:aggravated } }
 		POD_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel_aggravated }
 	}
-
-	# Damage-source dispatch — delegated to POD_combat_dispatch_by_source
-	# which maps the move's damage_source flag to a PoD death_reason
-	# suffix and routes through POD_combat_dispatch_damage_pipeline.
-	# Add a new damage source by extending that helper alone; this
-	# branch stays untouched.
 	else = {
 		POD_combat_dispatch_by_source = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ }
 	}
 }
 
-# Damage-source → death_reason dispatcher. Maps the move's
-# var:damage_source (flag) to the PoD death_reason suffix expected by
-# POD_damage_type_is_aggravated / POD_wound_multiplier_from_splat_weaknesses,
-# then forwards to POD_combat_dispatch_damage_pipeline (which runs the
-# unified contact resolver — pipeline behavior is read from capability
-# flags on scope:current_move, not selected here).
-#
-# The flag IS the REASON suffix in 7 of 8 cases (identity mapping).
-# `holy` is the lone exception — it maps to PoD's death_reason
-# `true_faith` rather than `holy_damage` because PoD's wound system
-# already keys aggravated promotion against true_faith for vampires
-# and other faith-vulnerable splats.
-#
-# To add a new damage source:
-#   1. Set the move's damage_source flag
-#   2. Add a new else_if branch below mapping the flag to its REASON.
-#   3. Update the loc / icon set in pod_combat_static_l_english.yml
-#      and pod_combat_log_custom_loc.txt's PODCombatDamageSourceMarker.
+# Maps var:damage_source (flag) to a PoD death_reason suffix, then forwards to
+# the pipeline. Identity mapping in 7 of 8 cases; `holy` → `true_faith` (not
+# holy_damage) because PoD keys aggravated promotion against true_faith.
+# Add a source: new else_if here + loc/icon in pod_combat_static_l_english.yml
+# and pod_combat_log_custom_loc.txt's PODCombatDamageSourceMarker.
 POD_combat_dispatch_by_source = {
 	# $STORY$ = move story
 	# $TARGET_SIDE$ = "actor" or "target"
@@ -811,8 +597,6 @@ POD_combat_dispatch_by_source = {
 		POD_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = gold }
 	}
 	else_if = { limit = { $STORY$ = { has_variable = damage_source var:damage_source = flag:holy } }
-		# Only non-identity mapping — PoD keys aggravated promotion
-		# against true_faith, not holy.
 		POD_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = true_faith }
 	}
 	else_if = { limit = { $STORY$ = { has_variable = damage_source var:damage_source = flag:balefire } }
@@ -828,17 +612,8 @@ POD_combat_dispatch_damage_pipeline = {
 	# $STORY$ = move story
 	# $TARGET_SIDE$ = "actor" or "target"
 	# $REASON$ = PoD death_reason suffix (passed through to the payload)
-	#
-	# Unified contact-resolver + damage-payload flow. Capability flags
-	# on the executing move drive branching inside
-	# pod_combat_resolve_contact_effect. The dispatcher no longer
-	# selects a pipeline; it just runs the resolver, fires the payload
-	# on hit, and consumes the actor's stealth.
-	#
-	# scope:current_move is set by POD_combat_apply_single_hp_damage at
-	# entry so the resolver can read the move's capability flags
-	# (checks_spirit_gate / requires_hit_roll / checks_guard /
-	# checks_stance) without each call site re-saving the scope.
+	# Runs the resolver, fires the payload on hit, consumes actor stealth.
+	# Relies on scope:current_move (saved in POD_combat_apply_single_hp_damage).
 	pod_combat_resolve_contact_effect = {
 		TARGET_SIDE = $TARGET_SIDE$
 		ACTOR_SIDE  = actor
@@ -851,9 +626,8 @@ POD_combat_dispatch_damage_pipeline = {
 			REASON      = $REASON$
 		}
 	}
-	# Actor stealth always consumed once the move resolves, regardless
-	# of contact outcome — moving / committing the action breaks stealth
-	# even on a miss.
+	# Consumed regardless of contact outcome — committing the action breaks
+	# stealth even on a miss.
 	pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
 }
 
@@ -861,70 +635,30 @@ POD_combat_dispatch_damage_pipeline = {
 ######################################################
 ###### AOE DISPATCH (team_enemy + team_ally)
 ######################################################
-# Apply the move's effects across a whole team. "Enemy" vs "ally"
-# resolves RELATIVE to the current actor: each slot's combat_team flag
-# is compared against the actor's, so an enemy-team NPC actor treats the
-# player team as its enemies and its own team as its allies.
-#
-# All six AoE dispatchers iterate pod_combat_active_slots filtered by
-# each slot's combat_team against the actor's:
-#
-#   team_enemy: hits every slot whose combat_team differs from the
-#               actor's (the opposing team).
-#   team_ally:  buffs/heals every slot whose combat_team matches the
-#               actor's (the same team, including self).
-#
-# The team-side decision is encapsulated in two shared triggers:
-#   pod_combat_aoe_team_enemy_filter_trigger
-#   pod_combat_aoe_team_ally_filter_trigger
-# Both read scope:host.var:pod_combat_current_actor_team and the iterated
-# slot's combat_team. Single source of truth for the team decision so
-# future AoE additions don't re-derive the team test.
-#
-# Damage-side dispatchers also call
-# pod_combat_aoe_check_target_alive_effect after each save_target so
-# the four KO clauses (death / incapacitation / morale-break /
-# wound-track-full) live in one place. See that effect's header for
-# the full clause list and ordering rationale.
+# Apply a move across a whole team. enemy/ally resolves RELATIVE to the actor
+# (slot combat_team vs actor's) via the two shared filter triggers
+# (pod_combat_aoe_team_{enemy,ally}_filter_trigger — see their header). Damage
+# dispatchers also run pod_combat_aoe_check_target_alive_effect after each
+# save_target (KO clauses centralised there).
 #
 # ── Scope handling ──────────────────────────────────────────────
-# Every AoE dispatcher (and push_log) opens with `save_scope_as = host`
-# because every_in_list switches the body's scope to the iterated slot
-# story — `root` and host vars aren't reachable otherwise. Inside the
-# body: var:slot_X targets the slot directly; `scope:host = { ... }`
-# re-enters host scope for workspace reads / character-scope helpers;
-# pod_combat_(load|save)_target_from/to_story_effect bridge the two.
+# every_in_list switches the body to the iterated slot story, so each dispatcher
+# opens `save_scope_as = host` to keep host vars reachable; `scope:host = { }`
+# re-enters host for workspace/character helpers. Two names for the host char:
+# scope:combat_host (saved at §0, long-lived for nested damage routing) vs
+# scope:host (iterator-local, survives the scope switch even when combat_host
+# isn't the outer scope — e.g. push_log reached mid-switch).
 #
-# Two names for the same combat-host character: scope:combat_host
-# (saved once at §0 of POD_execute_combat_move, long-lived for
-# deeply-nested damage routing) vs scope:host (iterator-local save,
-# survives the every_in_list scope switch even when combat_host isn't
-# the outer scope — e.g. push_log reached mid-switch).
-#
-# Damage / heal AoEs use the workspace round-trip (load target → run
-# single-target pipeline → save back → restore). Buff / debuff AoEs
-# write the slot's tier / stance vars directly, skipping the round-trip
-# (pure-write payloads have no roll / death check). Full rationale in
-# COMBAT_REFERENCE.info §7 "AoE: workspace round-trip for damage/heal,
-# direct-slot for buff/debuff".
+# Damage/heal AoEs use the workspace round-trip; buff/debuff AoEs write slot
+# vars directly (no roll/death check). Rationale: COMBAT_REFERENCE.info §7.
 
 
-# Per-target AoE log push helper. Called from inside each AoE iterator's
-# iteration body to record one log row per target.
+# One log row per AoE target. Bumps aoe_iter_burst_index (index 0 = first row
+# of the move's burst, which gates GUI buff-rider visibility so move-level
+# tier/stance lines render once, not per row), pushes the row, clears transient.
 #
-# Increments / initializes the AoE burst index so every per-target row
-# across all AoE phases of a single move gets a unique
-# aoe_iter_burst_index (index 0 = first row of the move's burst, which
-# gates the GUI buff-rider visibility so move-level stance / tier lines
-# render once per move instead of repeating on every row), pushes the
-# log row, and clears the per-target transient state. The row's target
-# is the workspace's pod_combat_target_char, loaded per iteration.
-#
-# Caller contract: invoked from the iteration body of an
-# every_in_list = pod_combat_active_slots pass. The surrounding effect
-# must have done `save_scope_as = host`.
-#
-# Param: STORY — the move story being executed (forwarded to push_log).
+# Caller contract: from an every_in_list = pod_combat_active_slots body that has
+# already done `save_scope_as = host`. Param STORY → forwarded to push_log.
 pod_combat_aoe_push_per_target_log_effect = {
 	scope:host = {
 		if = {
@@ -943,30 +677,20 @@ pod_combat_aoe_push_per_target_log_effect = {
 
 POD_combat_apply_team_enemy_hp_damage = {
 	# $STORY$ = move story
-	#
-	# Pushes one log row per target as the iteration progresses.
-	# Each row carries clean per-target state; outcome / attack_result /
-	# damage / target. So the log honestly reflects what happened to
-	# each enemy instead of leaving the row to capture only the last
-	# target's outcome.
-	#
-	# Per-iteration push sequence after the damage call resolves:
-	#   1. save_target_to_story — persist the per-target workspace state
-	#      onto the slot story (HP / soak / stances).
-	#   2. aoe_check_target_alive — flip slot_alive if KO / morale-break.
-	#   3. Set pod_combat_aoe_phase_pushed_rows = 1 so §16 of
-	#      POD_execute_combat_move knows the AoE already covered this
-	#      move and skips its wrap-up row unless actor-side state fired.
-	#   4. push_log captures the per-target row (its target is the
-	#      workspace's pod_combat_target_char, loaded per iteration).
-	#   5. Clear per-target last_* state so the next iteration starts
-	#      fresh (without disturbing the pushed-rows flag — see
-	#      pod_combat_clear_per_target_state_effect).
+	# Pushes one log row per target so the log reflects each enemy's outcome,
+	# not just the last. Canonical AoE per-iteration sequence (other AoE
+	# dispatchers reference this one):
+	#   1. save_target_to_story — persist per-target workspace state to the slot.
+	#   2. aoe_check_target_alive — flip slot_alive on KO / morale-break.
+	#   3. (inside push helper) set pod_combat_aoe_phase_pushed_rows so §16 skips
+	#      its wrap-up row unless actor-side state fired.
+	#   4. push_log — the per-target row.
+	#   5. clear per-target last_* (keeps the pushed-rows flag).
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}
 		pod_combat_load_target_from_story_effect = yes
@@ -974,13 +698,7 @@ POD_combat_apply_team_enemy_hp_damage = {
 			POD_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = target }
 		}
 		pod_combat_save_target_to_story_effect = yes
-		# Post-hit alive flip (death / incapacitation / morale break /
-		# wound-track full). Centralised in
-		# pod_combat_aoe_check_target_alive_effect — see its header
-		# for the full clause list.
 		pod_combat_aoe_check_target_alive_effect = yes
-		# Per-target log row — see pod_combat_aoe_push_per_target_log_effect
-		# definition above for burst-index semantics and GUI rider gating.
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
 	scope:host = { pod_combat_load_workspace_effect = yes }
@@ -994,7 +712,7 @@ POD_combat_apply_team_enemy_morale_damage = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}
 		pod_combat_load_target_from_story_effect = yes
@@ -1002,11 +720,7 @@ POD_combat_apply_team_enemy_morale_damage = {
 			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
 		}
 		pod_combat_save_target_to_story_effect = yes
-		# Same post-hit alive flip as the HP-damage iterator; the
-		# morale clause is what makes this matter for the morale path.
 		pod_combat_aoe_check_target_alive_effect = yes
-		# Per-target log row — see pod_combat_aoe_push_per_target_log_effect
-		# definition above for burst-index semantics and GUI rider gating.
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
 	scope:host = { pod_combat_load_workspace_effect = yes }
@@ -1016,31 +730,19 @@ POD_combat_apply_team_enemy_morale_damage = {
 ######################################################
 ###### AOE HEAL DISPATCH (team_ally)
 ######################################################
-# Apply HP / morale healing across the actor's entire team. Loads
-# each ally into the TARGET workspace slot (not actor) so
-# pod_combat_restore_hp_*_effect / pod_combat_restore_morale_effect
-# can run with SIDE=target without clobbering the actor's own
-# buffs, morale, hit chance, etc. pod_combat_load_workspace_effect
-# at the end restores the pre-AoE pair.
+# HP / morale heal across the actor's team. Loads each ally into the TARGET
+# workspace slot (not actor) so SIDE=target heals don't clobber the actor's own
+# buffs/morale/hit. load_workspace at the end restores the pre-AoE pair.
 
 POD_combat_apply_team_ally_hp_heal = {
-	# $STORY$ = move story
-	# Skip KO'd allies — no point healing a dead slot; wound state on
-	# the char is inaccessible once is_alive = no anyway. Also skip
-	# allies already at full HP (empty wound boxes = full track length):
-	# the PoD heal call is a no-op on a full track, but the iteration
-	# body still pushes a per-target log row through the AoE pipeline,
-	# which renders as visual noise ("Ally healed 0 ▢") and burns a
-	# load_target/save_target round trip. The empty<length guard skips
-	# the whole iteration for full-HP allies.
-	#
-	# Per-target log row pattern — see POD_combat_apply_team_enemy_hp_damage.
-	# Same shape, ally-heal payload instead of enemy HP damage.
+	# $STORY$ = move story. See POD_combat_apply_team_enemy_hp_damage for the row pattern.
+	# The empty<length limit skips full-HP allies: the heal is a no-op there but
+	# the body would still push a noise row ("healed 0") and burn a round trip.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_ally_filter_trigger = yes
 			var:slot_char = {
 				POD_empty_damage_boxes < POD_health_track_length
@@ -1057,26 +759,19 @@ POD_combat_apply_team_ally_hp_heal = {
 			}
 		}
 		pod_combat_save_target_to_story_effect = yes
-		# Per-target log row — see pod_combat_aoe_push_per_target_log_effect
-		# definition above for burst-index semantics and GUI rider gating.
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
 	scope:host = { pod_combat_load_workspace_effect = yes }
 }
 
 POD_combat_apply_team_ally_morale_heal = {
-	# $STORY$ = move story
-	# Per-target log row pattern — see POD_combat_apply_team_enemy_hp_damage.
-	# Same shape, ally morale-heal payload. Skip allies already at full
-	# morale (mirrors the full-HP skip in POD_combat_apply_team_ally_hp_heal):
-	# restore_morale is a no-op at the cap, but the iteration body would still
-	# push a per-target log row ("Ally morale +0"), so the < cap guard skips
-	# the whole iteration for full-morale allies.
+	# $STORY$ = move story. See POD_combat_apply_team_ally_hp_heal — same shape,
+	# morale payload; the < cap limit skips full-morale allies for the same reason.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_ally_filter_trigger = yes
 			var:slot_morale < pod_combat_max_morale
 		}
@@ -1085,8 +780,6 @@ POD_combat_apply_team_ally_morale_heal = {
 			pod_combat_restore_morale_effect = { SIDE = target AMOUNT = $STORY$.var:morale_heal }
 		}
 		pod_combat_save_target_to_story_effect = yes
-		# Per-target log row — see pod_combat_aoe_push_per_target_log_effect
-		# definition above for burst-index semantics and GUI rider gating.
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
 	scope:host = { pod_combat_load_workspace_effect = yes }
@@ -1096,45 +789,25 @@ POD_combat_apply_team_ally_morale_heal = {
 ######################################################
 ###### AOE BUFF DISPATCH (team_ally / team_enemy)
 ######################################################
-# Broadcast tier buffs / stance flags across a whole team. Unlike the
-# damage + heal AoE paths, these don't touch the workspace — they
-# write per-slot tier / flag vars + (for soak) the character-scope
-# bridge var directly, so all teammates carry the buff regardless of
-# who the current actor is.
-#
-# The single-target tier section in POD_execute_combat_move has
-# ALREADY written the buffs onto the actor's workspace + char. These
-# team broadcasts just extend that write to the actor's teammates
-# (team_ally) or the other enemies (team_enemy). Calling the broadcast
-# on a targeting=self or targeting=single_* move is a no-op.
-# The POD_execute_combat_move dispatcher gates it on targeting.
-#
-# Slot soak / hit display won't visually update until the affected
-# ally/enemy next loads into workspace (their next turn). The
-# character-bridge var for soak IS live immediately, so mid-combat
-# damage rolls pick up the buff right away.
+# Broadcast tier buffs / stance flags across a team. Unlike damage/heal AoE,
+# these skip the workspace — they write per-slot tier/flag vars + (for soak) the
+# character bridge var directly, so all teammates carry the buff. Slot soak/hit
+# display lags until the ally/enemy next loads workspace, but the soak bridge var
+# is live immediately so mid-combat damage rolls pick it up.
 
 POD_combat_apply_team_ally_buffs = {
-	# $STORY$ = move story
-	# Iteration body runs in slot-story scope so `set_variable = { name = slot_X ... }`
-	# writes the slot story directly and `var:slot_char` flips into the
-	# participant character for the soak-tier bridge var write.
+	# $STORY$ = move story. Body runs in slot-story scope (set_variable writes the
+	# slot directly; var:slot_char flips to the char for the soak bridge write).
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_ally_filter_trigger = yes
 		}
-		# Tier soak buffs: slot var + char var (PoD soak bridge).
-		# Upgrade-only — the OR guard fires when the slot has no
-		# current tier (first application) OR the new tier is strictly
-		# higher than the existing one. Without this, a team_ally
-		# buff with tier-1 lands on an ally who already had tier-3
-		# from an earlier move and downgrades them. Mirrors the AI
-		# selector's strict-< redundancy semantic but applied
-		# per-slot at write time (the selection gate only checks the
-		# actor's workspace tier, not every iterated ally's slot).
+		# Tier soak buffs: slot var + char bridge var. Upgrade-only guard
+		# (see §11 of POD_execute_combat_move), here per-slot at write time —
+		# the selection gate only checks the actor's tier, not each iterated ally's.
 		if = {
 			limit = {
 				$STORY$ = { has_variable = soak_buff_round_tier }
@@ -1161,9 +834,7 @@ POD_combat_apply_team_ally_buffs = {
 				set_variable = { name = pod_combat_tier_soak_buff_combat value = $STORY$.var:soak_buff_combat_tier }
 			}
 		}
-		# Tier hit buffs: slot var only (hit chance is workspace-local,
-		# will be picked up when the ally next loads). Same upgrade-only
-		# guard as the soak buffs above.
+		# Tier hit buffs: slot var only (hit chance is workspace-local).
 		if = {
 			limit = {
 				$STORY$ = { has_variable = hit_buff_round_tier }
@@ -1184,7 +855,7 @@ POD_combat_apply_team_ally_buffs = {
 			}
 			set_variable = { name = slot_hit_buff_combat_tier value = $STORY$.var:hit_buff_combat_tier }
 		}
-		# Stance flags: set_guard / dodge / stealth broadcast to each ally.
+		# Stance flags broadcast to each ally.
 		if = {
 			limit = { $STORY$ = { has_variable = set_guard } }
 			set_variable = { name = slot_is_guarding  value = yes }
@@ -1195,9 +866,7 @@ POD_combat_apply_team_ally_buffs = {
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = stealth } }
-			# Centralised slot-stealth applicator — flag + +30
-			# hit_chance, idempotent. Same helper used downstream by
-			# any future slot-direct stealth path.
+			# Idempotent slot-stealth applicator (flag + +30 hit_chance).
 			pod_combat_apply_stealth_slot_effect = yes
 		}
 	}
@@ -1211,13 +880,10 @@ POD_combat_apply_team_enemy_debuffs = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 		}
-		# Upgrade-only — see the symmetric comment in
-		# POD_combat_apply_team_ally_buffs above. A tier-1 debuff
-		# move shouldn't "heal" an enemy who already had a tier-3
-		# debuff from an earlier hit.
+		# Upgrade-only — see POD_combat_apply_team_ally_buffs.
 		if = {
 			limit = {
 				$STORY$ = { has_variable = soak_debuff_round_tier }
@@ -1271,11 +937,9 @@ POD_combat_apply_team_enemy_debuffs = {
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = bypass_stealth } }
-			# Centralised slot-stealth teardown — removes
-			# slot_is_stealthed and calls the slot recalc so the +30
-			# hit-chance bonus (folded into the recalc per the stealth
-			# branch in pod_combat_tier_effects.txt) drops with the
-			# flag. Idempotent.
+			# Idempotent slot-stealth teardown — drops slot_is_stealthed and
+			# recalcs so the +30 (folded into the recalc in
+			# pod_combat_tier_effects.txt) drops with the flag.
 			pod_combat_break_stealth_slot_effect = yes
 		}
 		if = {

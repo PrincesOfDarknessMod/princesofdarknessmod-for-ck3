@@ -2,41 +2,16 @@
 ######   POD COMBAT AI EFFECTS   ######
 ##########################################
 
-# Every fight — whatever its roster — uses the same workspace bridge and
-# the generic pod_combat_ai_select_and_execute_move_effect below. A 1v1
-# is just a degenerate NvN with player/0 and enemy/0 populated; the same
-# workspace-relative move effects handle both.
-#
-# AI model — one combatant's turn:
-#   1. Turn start: pick an initial enemy target via
-#      pod_combat_ai_select_{enemy,player}_target_effect (weighted
-#      random favoring low-HP). Sets pod_combat_selected_target_*.
-#   2. Up to 6 action attempts per turn (a hard cap, not strictly
-#      one per AP — moves can refund AP via ap_gain, but the loop
-#      caps at 6 unrolled calls regardless). Each attempt:
-#        a. refresh_target_if_dead — re-pick if previous action KO'd
-#           the original target; no-op when still alive.
-#        b. select_and_execute_move — random_in_list over the actor's
-#           loadout, weighted by base ai_weight + situational modifiers
-#           (anti-repetition, energy attrition, target HP / morale
-#           finish bonuses, hit-chance penalties, round-buff anti-spam
-#           and late-turn hit-buff penalties). Moves failing
-#           POD_can_execute_combat_move are filtered out.
-#        c. swap_for_story — flip workspace to single_ally / single_pc
-#           slot if the move's targeting demands; restore after.
-#        d. save_workspace — propagate mutations and run victory check
-#           (early exit if combat ended this action).
+# 1v1 is a degenerate NvN (player/0 + enemy/0); same workspace-relative
+# move effects handle every roster.
 
 
 # ─────────────────────────────────────────────────────────────
 # AI TUNING CONSTANTS — edit these to tweak AI behaviour
 # ─────────────────────────────────────────────────────────────
-# CK3 `@name = value` parse-time numeric literals, referenced
-# from the weight block in
-# pod_combat_ai_select_and_execute_move_effect below. Designer-
-# facing summary of how the modifiers combine lives in
-# AI_LOGIC_GUIDE.md. Weight deltas come first, grouped by
-# purpose; comparison thresholds are gathered at the bottom.
+# `@name = value` parse-time literals read by the weight block in
+# pod_combat_ai_select_and_execute_move_effect. Weight deltas first
+# (grouped by purpose), comparison thresholds at the bottom.
 
 # Anti-repetition (three-deep history).
 @ai_repeat_last         = -35
@@ -53,16 +28,9 @@
 @ai_round_buff_spam     = -8   # generic round-duration buff (any stat)
 @ai_round_buff_lateap   = -20  # round hit-buff specifically, low AP remaining
 
-# Tier-size preference — bias toward larger tiers when the AI has
-# both small and large versions of the same buff (or debuff) in its
-# loadout. The runtime tier magnitudes scale 10 / 20 / 30 percent
-# for small / medium / large; tier 3 buys 3× the effect for the
-# same AP cost, so the AI should default toward it when both are
-# available. Tier 2 sits at exactly 0 so the random_list treats it
-# as the neutral baseline — bumping that constant ± shifts the
-# whole tier preference curve without touching dispatch logic.
-# Applies to BOTH buffs and debuffs (the same scaling argument
-# holds for hit-debuff -10% / -20% / -30% as for soak-buff +%).
+# Tier-size preference (buffs AND debuffs) — tier 3 buys 3× the
+# effect for the same AP cost, so bias toward it. Tier 2 is pinned
+# at 0 as the neutral baseline; shifting it slides the whole curve.
 @ai_tier_small          = -5   # tier 1 (small  / 10%)
 @ai_tier_medium         = 0    # tier 2 (medium / 20%) — neutral baseline
 @ai_tier_large          = 10   # tier 3 (large  / 30%)
@@ -116,22 +84,9 @@
 
 
 pod_combat_ai_refresh_target_if_dead_effect = {
-	# Re-pick the AI's selected_target if the slot it currently points
-	# at isn't alive anymore (most often: the previous try_action's
-	# move just KO'd the original target and pod_combat_save_workspace_effect
-	# flipped its _alive flag in the same try). When the current
-	# target is still alive this no-ops and keeps the AI on its
-	# original mark, so we don't thrash targeting between every
-	# action of a multi-action turn.
-	#
-	# pod_combat_current_actor_team = flag:player means the AI is on the
-	# player team and looks for an enemy; flag:enemy inverts. Same split
-	# pod_combat_execute_ai_turn_effect uses at turn start.
-	#
-	# The "current target is alive" check is an any_in_list: if SOME
-	# active slot's team+position matches selected_target AND that slot
-	# is alive, the target is fine and we no-op. NOT(any) = "no live
-	# match found" → re-pick.
+	# Re-pick selected_target only if it's no longer alive (usually the
+	# prior try_action KO'd it). No-op while alive, so the AI stays on
+	# its mark across a multi-action turn instead of thrashing targets.
 	save_scope_as = host
 	if = {
 		limit = {
@@ -141,7 +96,7 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 					variable = pod_combat_active_slots
 					var:combat_team = scope:host.var:pod_combat_selected_target_team
 					var:team_position = scope:host.var:pod_combat_selected_target_position
-					var:slot_alive = 1
+					pod_combat_slot_is_alive_trigger = yes
 				}
 			}
 		}
@@ -160,11 +115,9 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 
 
 pod_combat_ai_take_turn_effect = {
-	# Hard cap of 6 action attempts per turn — six unrolled try_action
-	# calls, each gated by `pod_combat_current_ap >= 1`. AP refunds
-	# via ap_gain CAN raise current AP mid-turn, but they can't
-	# unlock a seventh attempt. Each call is a no-op when AP < 1 or
-	# combat is over.
+	# Hard cap of 6 attempts/turn (unrolled). ap_gain refunds can raise
+	# AP mid-turn but can't unlock a seventh call. Each is a no-op when
+	# AP < 1 or combat is over.
 	pod_combat_ai_try_action_effect = yes
 	pod_combat_ai_try_action_effect = yes
 	pod_combat_ai_try_action_effect = yes
@@ -179,84 +132,43 @@ pod_combat_ai_try_action_effect = {
 			pod_combat_current_ap_value >= 1
 			NOT = { pod_combat_is_over_trigger = yes }
 		}
-		# Refresh the AI's selected_target if the previous try killed
-		# whoever was originally chosen. Without this, the second/third
-		# action of a multi-action turn keeps firing single-enemy moves
-		# at a corpse. The helper is a no-op when the current target
-		# is still alive — so this only thrashes targeting when it has
-		# to.
+		# (refresh helper is a no-op while the current target still lives)
 		pod_combat_ai_refresh_target_if_dead_effect = yes
 
 		pod_combat_ai_select_and_execute_move_effect = yes
 
-		# Persist this action's mutations to the slots and run the
-		# victory check inside save_workspace_effect. Two consequences
-		# the post-loop save in pod_combat_execute_ai_turn_effect
-		# couldn't deliver on its own:
-		#   1. Slot _alive flags get updated immediately, so the next
-		#      try_action's AI swap effects + selector see the KO'd
-		#      slot as dead instead of attacking a corpse.
-		#   2. pod_combat_check_group_victory_effect fires (it's
-		#      chained at the tail of save_workspace_effect), so if
-		#      this hit ended combat the next try's
-		#      `NOT = { pod_combat_is_over_trigger = yes }` gate
-		#      short-circuits and the remaining try_action calls
-		#      no-op.
+		# Save per-action (not once post-loop): flips slot _alive flags so
+		# the next try sees a KO'd target as dead, and runs the victory
+		# check at its tail so a fight-ending hit trips the remaining
+		# tries' is_over gate.
 		pod_combat_save_workspace_effect = yes
 	}
 }
 
 pod_combat_ai_select_and_execute_move_effect = {
-	# AI picks a move from its own pod_combat_loadout list using
-	# random_in_list — selection is proportional to the move's
-	# computed weight (story's ai_weight + situational modifiers).
-	# Higher-weight moves win more often but lower-weight moves can
-	# still come up. 
-	#
-	# The move's trait/perk gate is evaluated through the generic
-	# POD_can_execute_combat_move trigger in the limit clause.
-	#
-	# After selection, POD_combat_ai_swap_for_story dispatches to the
-	# matching target-swap effect, POD_execute_combat_move runs the
-	# body, and POD_combat_ai_restore_after_move puts the turn-start
-	# target back.
-
-	# Seed a default loadout for AI NPCs that never opened the configure
-	# window. pod_combat_actor_char is the character scope for the acting
-	# combatant (written by pod_combat_group_effects.txt before this fires).
+	# Weighted random_in_list over the loadout, then swap / execute /
+	# restore. pod_combat_actor_char (the acting combatant) is written by
+	# pod_combat_group_effects.txt before this fires.
 	pod_combat_ai_ensure_loadout_effect = yes
 
 	if = {
 		limit = { has_variable = pod_combat_actor_char }
 
-		# Two scopes matter in this effect:
-		#   scope:combat_host  — the PC character where combat state and
-		#                        the workspace mirror vars live
-		#                        (pod_combat_current_ap,
-		#                        pod_combat_actor_*, pod_combat_target_*,
-		#                        loaded from the acting slot each turn;
-		#                        HP itself derives live from the slot
-		#                        character's PoD wound vars, not cached
-		#                        on the workspace). Required for
-		#                        POD_execute_combat_move and all
-		#                        affordability checks.
-		#   scope:ai_actor     — the acting AI character, where the
-		#                        AI's pod_combat_loadout list and
-		#                        pod_combat_ai_last_move live.
-		#                        Required for list iteration and
-		#                        anti-repetition tracking.
+		# Two scopes used below:
+		#   scope:combat_host — PC holding the workspace mirror vars; needed
+		#                       for POD_execute_combat_move + affordability.
+		#   scope:ai_actor    — acting AI; holds the loadout list and the
+		#                       anti-repetition history.
 		save_scope_as = combat_host
 
 		var:pod_combat_actor_char = {
 			save_scope_as = ai_actor
 
-			# Iteration scope = story. The trigger needs named scope
-			# references for both story and actor so its internal trait
-			# check ($ACTOR$ = { ... }) and its workspace checks can't
-			# get confused about which `prev` each piece refers to.
-			# save_temporary_scope_as inside the limit binds the
-			# current iteration scope (the story) so the trigger can
-			# still reach it after switching into scope:combat_host.
+			# Iteration scope = the candidate story. save_temporary_scope_as
+			# binds it as ai_candidate_move so the trigger can still reach it
+			# after we switch into scope:combat_host — named refs for both
+			# story and actor keep its trait/workspace checks from confusing
+			# which `prev` each piece means.
 			random_in_list = {
 				variable = pod_combat_loadout
 				limit = {
@@ -267,27 +179,13 @@ pod_combat_ai_select_and_execute_move_effect = {
 							ACTOR = scope:ai_actor
 						}
 
-						# Redundancy guard — skip moves whose buff /
-						# debuff is already at or above the level it
-						# would apply, or whose stance flag is
-						# already active. Without this the AI
-						# happily re-applies the same Toughness or
-						# Vanish every turn, burning AP for no
-						# state change. Currently no damaging move
-						# carries a tier or stance rider, so a
-						# blanket exclude on pure buff/debuff/stance
-						# moves doesn't strand any partially-useful
-						# action. Tier checks use strict `<` so a
-						# Tier-2 buff can still upgrade a Tier-1
-						# stack but a Tier-1 buff can't downgrade a
-						# Tier-2.
-						#
-						# All checks read against the workspace
-						# (pod_combat_actor_* = acting AI,
-						# pod_combat_target_* = selected target).
-						# Self-targeted buffs go through
-						# pod_combat_actor_*; target-side debuffs
-						# through pod_combat_target_*.
+						# Redundancy guard — skip a buff/debuff/stance
+						# move whose effect is already active at or above
+						# what it would apply (else the AI re-casts it for
+						# no state change). Strict `<` so a higher tier can
+						# still upgrade a lower stack but not vice-versa. No
+						# damaging move carries a tier/stance rider, so
+						# excluding pure buff/debuff/stance strands nothing.
 						trigger_if = {
 							limit = {
 								scope:ai_candidate_move = { has_variable = soak_buff_round_tier }
@@ -347,21 +245,11 @@ pod_combat_ai_select_and_execute_move_effect = {
 							}
 							var:pod_combat_target_hit_debuff_combat_tier < scope:ai_candidate_move.var:hit_debuff_combat_tier
 						}
-						# Pure-heal redundancy — exclude heal-only moves
-						# whose effects are wasted on the actor's current
-						# state. A move is "heal-only" when it has hp_heal
-						# or morale_heal but neither hp_damage nor
-						# morale_damage; lifesteal-style hybrids stay
-						# eligible because their damage portion still earns
-						# the AP. The keep-condition mirrors the +30
-						# heal-when-hurt weight modifiers below — superficial
-						# heals need room below sup_ceiling, aggravated heals
-						# need room below max_hp, morale heals need morale
-						# below cap. If NONE of the move's heals can do
-						# anything useful, drop the candidate before
-						# weighting. Without this gate the AI sometimes
-						# burned a turn casting a 3-AP regen on itself at
-						# full HP — wasted AP and a confusing log entry.
+						# Pure-heal redundancy — drop a heal-only move (heal
+						# but no damage; lifesteal hybrids stay) when none of
+						# its heals can do anything on the actor's current
+						# state. Keep-condition mirrors the heal-when-hurt
+						# weight modifiers below.
 						trigger_if = {
 							limit = {
 								scope:ai_candidate_move = {
@@ -371,20 +259,14 @@ pod_combat_ai_select_and_execute_move_effect = {
 									}
 									NOT = { has_variable = hp_damage }
 									NOT = { has_variable = morale_damage }
-									# single_ally heals are EXCLUDED from this
-									# actor-state prune: their benefit depends on
-									# the ALLY's state, not the actor's. They gate
-									# on ally-need in POD_can_execute_combat_move
-									# (pod_combat_ai_has_ally_needing_heal_trigger).
+									# single_ally heals depend on the ALLY's state, not
+									# the actor's — they gate on ally-need in
+									# POD_can_execute_combat_move instead.
 									NOT = { var:targeting = flag:single_ally }
 								}
 							}
 							OR = {
-								# Superficial hp_heal — useful below
-								# sup_ceiling (= max_hp − aggravated_boxes;
-								# aggravated wounds pin the top of the
-								# track, capping a superficial heal's
-								# usefulness even when hp < max_hp).
+								# Superficial — useful below sup_ceiling.
 								AND = {
 									scope:ai_candidate_move = {
 										has_variable = hp_heal
@@ -392,10 +274,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 									}
 									pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
 								}
-								# Aggravated hp_heal — useful for any wound,
-								# capped at max_hp. PoD's aggravated heal
-								# effect heals aggravated first and spills
-								# into superficial when no aggravated remain.
+								# Aggravated — useful for any wound (capped at max_hp).
 								AND = {
 									scope:ai_candidate_move = {
 										has_variable = hp_heal
@@ -459,23 +338,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 						this = scope:ai_actor.var:pod_combat_ai_prev2_move
 					}
 
-					# Heal when hurt — workspace on combat_host. Split by
-					# heal_type so the +30 only fires when the move can
-					# actually restore damage on the actor:
-					#   flag:superficial — useful only when there's room
-					#     below pod_combat_actor_sup_ceiling_value
-					#     (= max_hp − aggravated_boxes). Aggravated wounds
-					#     pin the top of the track, so a superficial heal
-					#     whose ceiling has already been reached is a
-					#     no-op even if hp < max_hp (wounds are all
-					#     aggravated).
-					#   flag:aggravated  — useful for any wound. PoD's
-					#     aggravated heal effect heals aggravated first
-					#     and spills into superficial when no aggravated
-					#     remain, so hp < max_hp is the right gate.
-					# A heal move with hp_heal but no heal_type set
-					# triggers neither branch and stays at base weight,
-					# which is the safe failure mode.
+					# Heal when hurt, split by heal_type so +30 only fires
+					# where the heal can do something: superficial caps at
+					# sup_ceiling, aggravated caps at max_hp. A heal with no
+					# heal_type fires neither branch (safe default).
 					modifier = {
 						add = @ai_heal_needed
 						has_variable = hp_heal
@@ -535,13 +401,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
 						}
 					}
-					# Hit buff when hit chance is low — offensive tier
-					# buffs become valuable when the actor's hit chance
-					# against the current workspace target is poor.
-					# Threshold 50 catches "noticeably below the 60-base
-					# parity case." Like the soak version, the
-					# tier-redundancy guard upstream filters non-upgrades
-					# so any candidate here is a meaningful tier raise.
+					# Hit buff when hit chance is low (≤50, below 60-base
+					# parity). Upstream tier-redundancy guard already
+					# ensures any candidate here is a real tier raise.
 					modifier = {
 						add = @ai_hitbuff_low_acc
 						OR = {
@@ -552,13 +414,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 							var:pod_combat_actor_hit_chance <= @ai_thresh_hit_buff_band
 						}
 					}
-					# Round-buff anti-spam penalty — round-duration tier
-					# buffs expire at end of round so the actor gets at
-					# most one follow-up action to benefit. A flat -8
-					# keeps them out of the default rotation while leaving
-					# the +15 buff-when-needed bonuses above able to win
-					# the tie (net +7) in situations where the buff
-					# actually solves a problem. 
+					# Round-buff anti-spam — round buffs expire end-of-round
+					# (≤1 follow-up action). -8 keeps them out of the default
+					# rotation while still losing to a +15 buff-when-needed
+					# bonus (net +7) when the buff actually solves a problem.
 					modifier = {
 						add = @ai_round_buff_spam
 						OR = {
@@ -566,12 +425,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 							has_variable = hit_buff_round_tier
 						}
 					}
-					# Late-turn hit-buff penalty — a round hit buff with
-					# no AP left to attack is pure waste; the buff vanishes
-					# at end of round without ever being applied to a hit
-					# roll. Threshold = base AP (6) − 1, so the modifier
-					# fires the moment current_ap drops below the starting
-					# allowance. 
+					# Late-turn hit-buff penalty — a round hit buff with no AP
+					# left to spend is wasted (expires unused). Threshold =
+					# base AP − 1, i.e. anything past the first action.
 					modifier = {
 						add = @ai_round_buff_lateap
 						has_variable = hit_buff_round_tier
@@ -579,12 +435,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 
 					# ── Tier-size preference ───────────────────────
-					# Bias the AI toward higher-tier buffs / debuffs
-					# when its loadout carries multiple sizes of the
-					# same effect. Each move's tier vars hold integer
-					# magnitudes 1 / 2 / 3 (small / medium / large)
-					# applied per stat × direction × duration tuple by
-					# pod_combat_move_init_effects.txt's tier setters.
+					# Bias toward higher-tier buffs/debuffs. Tier vars hold
+					# magnitude 1/2/3 (small/medium/large).
 					modifier = {
 						add = @ai_tier_small
 						OR = {
@@ -638,12 +490,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 
 					# ── Target-aware modifiers ──────────────────────
-					# Read workspace target state. Gated to single_enemy
-					# moves because the workspace target at weight time
-					# IS the eventual target for those (the AI's
-					# turn-start enemy slot). Self / team / single_ally
-					# / single_pc moves don't read the workspace target
-					# meaningfully, so these modifiers skip them.
+					# Gated to single_enemy: only there is the weight-time
+					# workspace target the eventual target. Other targeting
+					# modes don't read it meaningfully.
 
 					# Bypass-dodge bonus when target is dodging.
 					modifier = {
@@ -661,11 +510,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 						scope:combat_host = { has_variable = pod_combat_target_is_stealthed }
 					}
 
-					# Capitalize-on-stealth bonus: when the AI is
-					# currently stealthed (the +30 hit-chance bonus
-					# is live), bias hard toward damage-dealing
-					# moves so the actor cashes in the stealth
-					# window instead of burning it on heals/buffs
+					# Cash in stealth: while stealthed (+30 hit live), bias
+					# toward damage so the window isn't spent on heals/buffs.
 					modifier = {
 						add = @ai_cash_in_stealth
 						has_variable = hp_damage
@@ -673,10 +519,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 						scope:combat_host = { has_variable = pod_combat_actor_is_stealthed }
 					}
 
-					# Aggravated-vs-soak bonus: when the workspace target
-					# has high soak (≥ 70%), bias toward aggravated-damage
-					# moves. Aggravated bypasses the soak roll entirely for
-					# the vast majority of targets 
+					# Aggravated vs high-soak (≥70%) target — aggravated
+					# bypasses the soak roll.
 					modifier = {
 						add = @ai_aggravated_vs_soak
 						has_variable = hp_damage
@@ -688,12 +532,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Weakness-exploitation bonus: when the candidate's
-					# damage_source matches a splat weakness of the
-					# workspace target. The mapping lives in
-					# pod_combat_damage_source_weakness_triggers.txt; edit
-					# the per-source triggers there to add or remove
-					# weaknesses without touching this selector.
+					# Weakness exploit: damage_source matches the target's
+					# splat weakness. Mapping lives in
+					# pod_combat_damage_source_weakness_triggers.txt.
 					modifier = {
 						add = @ai_weakness_exploit
 						has_variable = hp_damage
@@ -705,10 +546,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 						pod_combat_move_exploits_target_weakness_trigger = yes
 					}
 
-					# HP-finish bonus tier 1: target near death (1 box
-					# left), any damage move can finish them. Reads HP
-					# directly off the target character's PoD wound
-					# track since there's no target_hp_value SV.
+					# HP-finish tier 1: target at 1 box, any damage finishes.
+					# Reads the wound track directly (no target_hp_value SV).
 					modifier = {
 						add = @ai_hp_finish_1box
 						has_variable = hp_damage
@@ -719,9 +558,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# HP-finish bonus tier 2: target hurt (2 boxes left)
-					# AND move deals at least 2 damage so a finish is
-					# realistic.
+					# HP-finish tier 2: target at 2 boxes and move deals ≥2.
 					modifier = {
 						add = @ai_hp_finish_2box
 						has_variable = hp_damage
@@ -733,8 +570,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Morale-finish bonus tier 1: target almost broken
-					# (morale 0-2), any morale-damage move finishes.
+					# Morale-finish tier 1: target morale ≤2, any morale damage finishes.
 					modifier = {
 						add = @ai_mor_finish_low
 						has_variable = morale_damage
@@ -744,8 +580,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Morale-finish bonus tier 2: target shaken (morale
-					# 3-4) AND move deals at least 2 morale damage.
+					# Morale-finish tier 2: target morale ≤4 and move deals ≥2.
 					modifier = {
 						add = @ai_mor_finish_mid
 						has_variable = morale_damage
@@ -756,12 +591,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Low-hit attack penalty: moves that actually roll a
-					# hit chance and could miss. Auto-hit moves
-					# (supernatural / mental, plus any physical move
-					# with override_requires_hit_roll = no) skip this
-					# penalty because they can't whiff. Gated on the
-					# capability flag
+					# Low-hit penalty (hit_chance ≤30). requires_hit_roll gate
+					# spares auto-hit moves, which can't whiff.
 					modifier = {
 						add = @ai_hit_penalty_low
 						has_variable = hp_damage
@@ -772,9 +603,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Mid-hit attack: softer penalty in the 31-40%
-					# band, same gate (only fires for moves that roll
-					# a hit chance).
+					# Mid-hit penalty: softer, 31-40% band, same gate.
 					modifier = {
 						add = @ai_hit_penalty_mid
 						has_variable = hp_damage
@@ -785,14 +614,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Energy attrition: gently deprioritise energy
-					# spends as the pool drains this combat. The four
-					# stacking add modifiers below are -8 / -10 / -12 / -14
-					# (NOT a flat -4 per step), so the cumulative penalty
-					# at 0 / 1 / 2 / 3 / 4+ energy used is 0 / -8 / -18 /
-					# -30 / -44. The escalating per-step magnitude makes
-					# the AI back off energy-spends faster as the pool
-					# depletes than a flat curve would.
+					# Energy attrition — four stacking steps -8/-10/-12/-14
+					# (escalating, not flat), so cumulative at 0/1/2/3/4+
+					# energy used is 0/-8/-18/-30/-44.
 					modifier = {
 						add = @ai_energy_step1
 						has_variable = energy_cost
@@ -814,28 +638,17 @@ pod_combat_ai_select_and_execute_move_effect = {
 						scope:combat_host = { var:pod_combat_actor_energy_used >= 4 }
 					}
 
-					# Trait-gate bonus: moves with splat / perk /
-					# trait requirements (disciplines, gifts, hekau,
-					# etc.) represent the character's actual class
-					# repertoire. Nudge them above generic physicals
-					# so e.g. vampires favour their disciplines over
-					# plain strikes. Starter moves have no required
-					# trait, so a missing is_starter_move flag is the
-					# proxy.
+					# Trait-gate bonus — nudge class moves (disciplines,
+					# gifts, hekau…) above generic physicals. Non-starter is
+					# the proxy: only gated moves lack is_starter_move.
 					modifier = {
 						add = @ai_trait_gated
 						NOT = { has_variable = is_starter_move }
 					}
 
-					# Floor the final weight so a move that the
-					# situational modifiers have driven into negative
-					# territory still has a non-zero chance of being
-					# picked. random_in_list ignores items with
-					# weight <= 0, which would silently exclude moves
-					# the player has equipped but had a streak of bad
-					# context — keeping `min = @ai_weight_floor` lets
-					# the AI eventually fall back to anything in the
-					# loadout.
+					# Floor: random_in_list silently drops items with weight
+					# ≤ 0, so a move buried by situational penalties would
+					# become unpickable. Floor keeps it as a fallback.
 					min = @ai_weight_floor
 				}
 
@@ -843,10 +656,8 @@ pod_combat_ai_select_and_execute_move_effect = {
 			}
 		}
 
-		# Execute on combat_host so swap / execute / restore all write
-		# to the workspace that's actually loaded there. Running this
-		# inside var:pod_combat_actor_char would miss the workspace
-		# entirely and the AI would "act" with no mechanical effect.
+		# Execute on combat_host — that's where the workspace lives. Inside
+		# var:pod_combat_actor_char the AI would "act" with no effect.
 		if = {
 			limit = {
 				exists = scope:chosen_move
@@ -861,13 +672,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 			POD_execute_combat_move           = { STORY = scope:chosen_move }
 			POD_combat_ai_restore_after_move = { STORY = scope:chosen_move }
 
-			# Record anti-repetition only now that the move has actually
-			# executed. Guarded by the same exists + re-validation gate
-			# above, so a no-pick try_action (stale scope:chosen_move from
-			# a prior call) can't pollute history with a move that was
-			# never performed. Shift the 3-deep ring (prev2 ← prev,
-			# prev ← last, last ← chosen); read each older slot BEFORE
-			# overwriting it so writes cascade cleanly in one pass.
+			# Record anti-repetition only after the move actually executed
+			# (inside the same gate), else a stale chosen_move would pollute
+			# history. Shift the 3-deep ring reading each older slot before
+			# overwriting it.
 			scope:ai_actor = {
 				if = {
 					limit = { has_variable = pod_combat_ai_prev_move }
@@ -893,38 +701,14 @@ pod_combat_ai_select_and_execute_move_effect = {
 }
 
 pod_combat_ai_ensure_loadout_effect = {
-	# AI loadouts are TRANSIENT per fight. 
-	# Lifecycle:
-	#   1. Slot init (pod_combat_init_slot_from_character_effect)
-	#      clears pod_combat_loadout on every AI combatant entering
-	#      combat — handles legacy NPCs with stale story refs from
-	#      pre-version-reload catalogues, and refreshes the pool for
-	#      mid-campaign trait changes.
-	#   2. This effect runs at the top of every AI move-selection
-	#      call. On the AI's first turn the loadout is empty (just
-	#      cleared at slot init), so POD_apply_ai_full_loadout fires
-	#      and seeds the actor's trait/splat/perk-qualified subset of
-	#      the catalogue (the static gate is applied once here — see
-	#      below). On subsequent turns the gate fails (count > 0) and
-	#      this is a cheap no-op.
-	#   3. pod_combat_group_cleanup_effect clears the loadout again
-	#      at combat end so save data between fights doesn't carry
-	#      the full per-AI catalogue snapshot (one story ref per
-	#      generated move).
-	#
-	# AI combatants aren't limited to the 4-per-category cap so they
-	# have their full trait-appropriate repertoire to pick from.
-	# Two-stage gating: the STATIC requirements (trait / splat / perk via
-	# can_execute_decision) are filtered HERE at seed time inside
-	# POD_apply_ai_full_loadout, so the loadout already holds only
-	# qualified moves; the DYNAMIC per-pick checks (AP / energy / stance
-	# dupes) still run each turn through the selector's
-	# POD_can_execute_combat_move limit. See POD_apply_ai_full_loadout for
-	# the perf rationale behind moving the static gate to seed time.
-	#
-	# PC loadouts are seeded by the configure decision with the 8
-	# starters and persist as equipment; the slot-init clear skips
-	# slot 0 so the PC's list isn't touched.
+	# AI loadouts are TRANSIENT per fight: cleared at slot init and combat
+	# cleanup, seeded here on the first turn (empty → POD_apply_ai_full_loadout,
+	# then count>0 no-ops). AI gets its full trait-appropriate repertoire
+	# (no 4-per-category cap). Two-stage gate: STATIC trait/splat/perk reqs
+	# filtered at seed time inside POD_apply_ai_full_loadout (perf); DYNAMIC
+	# AP/energy/stance checks run per-pick in the selector. PCs are seeded by
+	# the configure decision and skip the slot-init clear (slot 0), so their
+	# equipped list survives.
 	if = {
 		limit = {
 			has_variable = pod_combat_actor_char
@@ -939,14 +723,8 @@ pod_combat_ai_ensure_loadout_effect = {
 }
 
 POD_combat_ai_swap_for_story = {
-	# $STORY$ = the chosen move
-	# Dispatches to the matching swap effect based on the story's
-	# targeting flag. Single_ally and single_pc swap into the right
-	# slot before the move body runs; every other targeting mode
-	# keeps the AI's turn-start enemy target (single_enemy default)
-	# or handles its own slot iteration (team_enemy / team_ally /
-	# self).
-
+	# $STORY$ = the chosen move. Only single_ally / single_pc need a
+	# target swap; other modes keep the turn-start enemy or self-iterate.
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:single_ally } }
 		pod_combat_ai_swap_to_ally_target_effect = yes
@@ -955,17 +733,13 @@ POD_combat_ai_swap_for_story = {
 		limit = { $STORY$ = { var:targeting = flag:single_pc } }
 		pod_combat_ai_swap_to_pc_target_effect = yes
 	}
-	# single_enemy, self, team_enemy, team_ally — no swap needed
-	# (the workspace keeps the turn-start enemy target; AoE skills
-	# do their own slot iteration inside the execution engine).
+	# else: no swap (AoE modes iterate slots in the execution engine).
 }
 
 POD_combat_ai_restore_after_move = {
-	# $STORY$ = the chosen move
-	# Undoes any swap done by POD_combat_ai_swap_for_story so the next
-	# action starts from the AI's turn-start enemy target. Only swaps
-	# that saved pod_combat_ai_saved_enemy_target_* need restoration;
-	# the existing swap effects all save it, so a blanket restore is safe.
+	# $STORY$ = the chosen move. Undoes the swap so the next action aims
+	# at the turn-start enemy again. Both swaps save the enemy target, so
+	# gating on its presence is a safe blanket restore.
 	if = {
 		limit = {
 			OR = {
@@ -979,35 +753,22 @@ POD_combat_ai_restore_after_move = {
 }
 
 # ─── SINGLE-ALLY TARGET SWAP ──────────────────────────────────────
-# Fired by the AI select effect right before a single_ally move body
-# runs. Saves the AI's current enemy target (selected_target, set at
-# AI turn start by pod_combat_ai_select_{enemy,player}_target_effect),
-# picks the first alive non-self same-team ally, and loads that ally
-# into the target workspace so the move effect's writes land on the
-# right slot.
-#
-# Single_ally moves are filtered out of the selector pool when the
-# acting AI has no alive same-team ally — POD_can_execute_combat_move's
-# AI-side gate calls pod_combat_ai_has_available_ally_trigger for
-# single_ally targeting and rejects the candidate if the trigger
-# returns false. So when this swap effect runs, the if/else_if chain
-# below is guaranteed to hit a match. 
+# Saves the enemy target, picks an alive non-self same-team ally, loads
+# it into the target workspace. The selector already rejects single_ally
+# when no ally is available (pod_combat_ai_has_available_ally_trigger),
+# so a match here is guaranteed.
 
 pod_combat_ai_swap_to_ally_target_effect = {
-	# Save the current selected_target so pod_combat_ai_restore_enemy_target_effect
-	# can put it back after the single-ally move fires.
+	# Save selected_target so restore_enemy_target can put it back.
 	set_variable = { name = pod_combat_ai_saved_enemy_target_team     value = var:pod_combat_selected_target_team }
 	set_variable = { name = pod_combat_ai_saved_enemy_target_position value = var:pod_combat_selected_target_position }
 
-	# Pick any alive non-self same-team ally and load them into the
-	# target workspace. Team membership reads off the slot's combat_team
-	# flag, so "same team as actor" is the single combat_team ==
-	# current_actor_team filter below.
+	# Pick any alive non-self same-team ally into the target workspace.
 	save_scope_as = host
 	random_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
-			var:slot_alive = 1
+			pod_combat_slot_is_alive_trigger = yes
 			# not the actor itself (same team + same position)
 			NOT = {
 				AND = {
@@ -1024,9 +785,8 @@ pod_combat_ai_swap_to_ally_target_effect = {
 		}
 		save_scope_as = chosen_target
 	}
-	# `this` is chosen_target, so the load effect runs without an explicit
-	# scope-switch; scope:host and scope:chosen_target remain globally
-	# resolvable for the workspace write.
+	# `this` is chosen_target here, so the load runs without an explicit
+	# scope-switch; host/chosen_target stay resolvable for the write.
 	scope:chosen_target ?= {
 		scope:host = {
 			set_variable = { name = pod_combat_selected_target_team     value = scope:chosen_target.var:combat_team }
@@ -1042,8 +802,6 @@ pod_combat_ai_swap_to_pc_target_effect = {
 	set_variable = { name = pod_combat_ai_saved_enemy_target_position value = var:pod_combat_selected_target_position }
 
 	# Swap to player/0 (the PC) and load into the target workspace.
-	# Snapshot host scope, flip into the slot story, delegate to
-	# pod_combat_load_target_from_story_effect.
 	if = {
 		limit = { has_variable = pod_combat_pc_slot var:pod_combat_pc_slot = { has_variable = slot_char } }
 		set_variable = { name = pod_combat_selected_target_team     value = flag:player }
@@ -1056,18 +814,12 @@ pod_combat_ai_swap_to_pc_target_effect = {
 }
 
 pod_combat_ai_restore_enemy_target_effect = {
-	# Restore the enemy target saved by either
-	# pod_combat_ai_swap_to_ally_target_effect (single_ally moves) or
-	# pod_combat_ai_swap_to_pc_target_effect (single_pc moves) and reload
-	# it into the target workspace. Called from
-	# POD_combat_ai_restore_after_move whenever the move's targeting was
-	# single_ally or single_pc, so subsequent AI actions in the same turn
-	# continue to aim at the AI's original chosen enemy.
+	# Restore the saved enemy target into the workspace so the rest of the
+	# turn aims at it again.
 	#
-	# CRITICAL: Save the ally slot first. The single-ally move effect wrote
-	# buffs into the target workspace, and the workspace currently holds
-	# the buffed ally. If we reload the enemy slot without saving first, the
-	# buff would be overwritten by the stale slot data and effectively erased.
+	# CRITICAL: save the ally slot FIRST — the workspace still holds the
+	# buffed ally the move just wrote, and reloading the enemy without
+	# saving would overwrite (erase) that buff with stale slot data.
 	if = {
 		limit = { has_variable = pod_combat_ai_saved_enemy_target_team }
 		save_scope_as = host
