@@ -4,11 +4,14 @@
 # Seats a brand-new combatant into a LIVE fight (the duel builder only runs
 # pre-combat). See COMBAT_REFERENCE.info for the slot / leader-pointer model.
 #
-#   pod_combat_add_ally_midfight_effect  = { CHARACTER }  -> player team
-#   pod_combat_add_enemy_midfight_effect = { CHARACTER }  -> enemy team
-# Two team-specific entry points, not one { TEAM }: CK3 can't index the per-team
-# counter / leader pointer / add wrapper by a parse-time token, so the caller
-# resolves the team at runtime.
+#   pod_combat_add_ally_midfight_effect            = { CHARACTER }             -> player, now
+#   pod_combat_add_enemy_midfight_effect           = { CHARACTER }             -> enemy, now
+#   pod_combat_schedule_ally_reinforcement_effect  = { CHARACTER JOIN_ROUND }  -> player, at round N
+#   pod_combat_schedule_enemy_reinforcement_effect = { CHARACTER JOIN_ROUND }  -> enemy, at round N
+# add_* enters immediately; schedule_* enters at the start of JOIN_ROUND (a round <= the
+# current one means now), seated by pod_combat_group_end_round_effect's per-round sweep.
+# Team-specific entry points, not one { TEAM }: CK3 can't index the per-team counter /
+# leader pointer / add wrapper by a parse-time token, so the caller resolves it.
 
 ###################
 ###### GENERAL: ADD A COMBATANT MID-FIGHT
@@ -67,6 +70,102 @@ pod_combat_init_one_midfight_slot_effect = {
 		pod_combat_init_slot_from_character_effect = { CHARACTER = scope:pod_combat_summon_slot_char ENEMY_LEADER = scope:pod_combat_summon_opp_leader }
 		pod_combat_calc_one_hit_chance_effect = { OPP_PROWESS = scope:pod_combat_summon_opp_prowess }
 		set_variable = { name = slot_has_acted value = 1 }
+	}
+}
+
+###################
+###### DEFERRED REINFORCEMENTS
+###################
+
+pod_combat_schedule_ally_reinforcement_effect = {
+	# $CHARACTER$ (saved scope) joins the PLAYER team at $JOIN_ROUND$ (absolute round).
+	# A round <= the current one seats immediately; a future round defers to the
+	# per-round sweep in pod_combat_group_end_round_effect. Host (PC) scope.
+	if = {
+		limit = {
+			has_variable = pod_combat_round
+			var:pod_combat_round < $JOIN_ROUND$
+		}
+		pod_combat_defer_reinforcement_effect = { CHARACTER = $CHARACTER$  JOIN_ROUND = $JOIN_ROUND$  TEAM = player }
+	}
+	else = { pod_combat_add_ally_midfight_effect = { CHARACTER = $CHARACTER$ } }
+}
+
+pod_combat_schedule_enemy_reinforcement_effect = {
+	# Enemy-team counterpart of pod_combat_schedule_ally_reinforcement_effect.
+	if = {
+		limit = {
+			has_variable = pod_combat_round
+			var:pod_combat_round < $JOIN_ROUND$
+		}
+		pod_combat_defer_reinforcement_effect = { CHARACTER = $CHARACTER$  JOIN_ROUND = $JOIN_ROUND$  TEAM = enemy }
+	}
+	else = { pod_combat_add_enemy_midfight_effect = { CHARACTER = $CHARACTER$ } }
+}
+
+pod_combat_defer_reinforcement_effect = {
+	# Registers $CHARACTER$ to enter on $JOIN_ROUND$ (absolute round). Host scope.
+	# Join round + team live on the character; the host list
+	# pod_combat_pending_reinforcements drives the per-round sweep in
+	# pod_combat_group_end_round_effect.
+	$CHARACTER$ = {
+		set_variable = { name = pod_combat_join_round value = $JOIN_ROUND$ }
+		set_variable = { name = pod_combat_join_team  value = flag:$TEAM$ }
+	}
+	add_to_variable_list = { name = pod_combat_pending_reinforcements target = $CHARACTER$ }
+	# Player feedback (and a test breadcrumb): announce that backup is on the way.
+	pod_combat_push_system_log_effect = { MESSAGE_KEY = reinforcement_scheduled }
+}
+
+pod_combat_process_pending_reinforcements_effect = {
+	# Host scope. Seats every pending reinforcement whose join round has arrived, then
+	# unregisters it. Called from pod_combat_group_end_round_effect after the round
+	# increment and before calculate_initiative, so a freshly-seated slot rolls into the
+	# new round's initiative (its seat-time slot_has_acted = 1 is reset to 0 there, so it
+	# acts this round). Two passes: a list can't be modified while every_in_list walks it.
+	if = {
+		limit = { has_variable_list = pod_combat_pending_reinforcements }
+		save_scope_as = reinf_host
+		every_in_list = {
+			variable = pod_combat_pending_reinforcements
+			limit = { var:pod_combat_join_round <= scope:reinf_host.var:pod_combat_round }
+			save_temporary_scope_as = due_char
+			scope:reinf_host = { add_to_variable_list = { name = pod_combat_reinf_due target = scope:due_char } }
+		}
+		if = {
+			limit = { has_variable_list = pod_combat_reinf_due }
+			every_in_list = {
+				variable = pod_combat_reinf_due
+				save_temporary_scope_as = due_char
+				scope:reinf_host = {
+					remove_list_variable = { name = pod_combat_pending_reinforcements target = scope:due_char }
+					# Seat on the stored team. A reinforcement killed before its round is
+					# just dropped (removed above, not seated).
+					if = {
+						limit = { scope:due_char = { is_alive = yes  var:pod_combat_join_team = flag:player } }
+						pod_combat_add_ally_midfight_effect = { CHARACTER = scope:due_char }
+						set_variable = pod_combat_reinf_arrived_flag
+					}
+					else_if = {
+						limit = { scope:due_char = { is_alive = yes  var:pod_combat_join_team = flag:enemy } }
+						pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:due_char }
+						set_variable = pod_combat_reinf_arrived_flag
+					}
+				}
+				scope:due_char = {
+					remove_variable = pod_combat_join_round
+					remove_variable = pod_combat_join_team
+				}
+			}
+			clear_variable_list = pod_combat_reinf_due
+			# One "reinforcements arrive" log row if at least one actually seated this
+			# round (a due-but-dead reinforcement leaves the flag unset).
+			if = {
+				limit = { has_variable = pod_combat_reinf_arrived_flag }
+				pod_combat_push_system_log_effect = { MESSAGE_KEY = reinforcements_arrive }
+				remove_variable = pod_combat_reinf_arrived_flag
+			}
+		}
 	}
 }
 
