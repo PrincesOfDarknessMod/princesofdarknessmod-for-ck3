@@ -12,6 +12,8 @@
 # current one means now), seated by pod_combat_group_end_round_effect's per-round sweep.
 # Team-specific entry points, not one { TEAM }: CK3 can't index the per-team counter /
 # leader pointer / add wrapper by a parse-time token, so the caller resolves it.
+# Every mid-fight seat auto-posts a named "<who> joins the fray" log row, so callers
+# (reinforcements, summons, events) never wire their own arrival message.
 
 ###################
 ###### GENERAL: ADD A COMBATANT MID-FIGHT
@@ -35,6 +37,7 @@ pod_combat_add_ally_midfight_effect = {
 		var:pod_combat_enemy_leader_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
 		POD_combat_duel_add_ally_effect = { CHARACTER = $CHARACTER$ }
 		pod_combat_init_one_midfight_slot_effect = { TEAM = player }
+		pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
 	}
 }
 
@@ -51,6 +54,7 @@ pod_combat_add_enemy_midfight_effect = {
 		var:pod_combat_pc_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
 		POD_combat_duel_add_enemy_effect = { CHARACTER = $CHARACTER$ }
 		pod_combat_init_one_midfight_slot_effect = { TEAM = enemy }
+		pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
 	}
 }
 
@@ -113,8 +117,6 @@ pod_combat_defer_reinforcement_effect = {
 		set_variable = { name = pod_combat_join_team  value = flag:$TEAM$ }
 	}
 	add_to_variable_list = { name = pod_combat_pending_reinforcements target = $CHARACTER$ }
-	# Player feedback (and a test breadcrumb): announce that backup is on the way.
-	pod_combat_push_system_log_effect = { MESSAGE_KEY = reinforcement_scheduled }
 }
 
 pod_combat_process_pending_reinforcements_effect = {
@@ -144,12 +146,10 @@ pod_combat_process_pending_reinforcements_effect = {
 					if = {
 						limit = { scope:due_char = { is_alive = yes  var:pod_combat_join_team = flag:player } }
 						pod_combat_add_ally_midfight_effect = { CHARACTER = scope:due_char }
-						set_variable = pod_combat_reinf_arrived_flag
 					}
 					else_if = {
 						limit = { scope:due_char = { is_alive = yes  var:pod_combat_join_team = flag:enemy } }
 						pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:due_char }
-						set_variable = pod_combat_reinf_arrived_flag
 					}
 				}
 				scope:due_char = {
@@ -158,30 +158,28 @@ pod_combat_process_pending_reinforcements_effect = {
 				}
 			}
 			clear_variable_list = pod_combat_reinf_due
-			# One "reinforcements arrive" log row if at least one actually seated this
-			# round (a due-but-dead reinforcement leaves the flag unset).
-			if = {
-				limit = { has_variable = pod_combat_reinf_arrived_flag }
-				pod_combat_push_system_log_effect = { MESSAGE_KEY = reinforcements_arrive }
-				remove_variable = pod_combat_reinf_arrived_flag
-			}
+			# Each reinforcement self-announces a named "joins the fray" row as it seats
+			# (via pod_combat_add_ally/enemy_midfight_effect), so no batch arrival message.
 		}
 	}
 }
 
 ###################
-###### TEST CASE: GIOVANNI NECROMANCY — RAISE WRAITH
+###### MOVE-DRIVEN SUMMONS (generic; raise_wraith is the first user)
 ###################
 
-pod_combat_summon_wraith_glue_effect = {
-	# Fired from §14b of POD_execute_combat_move on a summons_wraith move; runs in
-	# combat-host scope. Despawned at combat end via pod_combat_summoned_chars.
+pod_combat_summon_combatant_glue_effect = {
+	# Fired from section 14b of POD_execute_combat_move on a summons_combatant move;
+	# runs in combat-host scope. Creates a fresh combatant, applies the move's
+	# summon_recipe, and seats it on the caster's team; despawned at combat end via
+	# pod_combat_summoned_chars. The seat self-logs a named "joins the fray" row.
+	# $MOVE_STORY$ = the executing move story (carries summon_recipe).
 	# WHOLE BODY in hidden_effect: the confirm-tooltip walks the effect tree without
 	# applying state, and a bare create_character / create_story / list-add errors
 	# in that preview ("Undefined event target").
 	hidden_effect = {
 		var:pod_combat_actor_char = { save_scope_as = pod_combat_summoner }
-		# Capacity pre-check BEFORE creating anything — create-then-fail-to-seat would
+		# Capacity pre-check BEFORE creating anything: create-then-fail-to-seat would
 		# orphan an un-cleaned character. Same threshold add_ally/add_enemy use.
 		if = {
 			limit = {
@@ -196,37 +194,46 @@ pod_combat_summon_wraith_glue_effect = {
 					}
 				}
 			}
-			# NO template — avoids template root-scope reads; explicit culture/faith/gender.
+			# NO template: avoids template root-scope reads; explicit culture/faith/gender.
 			create_character = {
 				location = scope:pod_combat_summoner.location
 				culture  = scope:pod_combat_summoner.culture
 				faith    = scope:pod_combat_summoner.faith
 				gender_female_chance = 50
-				save_scope_as = pod_combat_new_wraith
+				save_scope_as = pod_combat_new_summon
 			}
-			# SAFE wraith recipe — NOT POD_wraith_initialization_effect, which relocates
-			# to the Shadowlands (POD_send_to_dark_kingdom_effect) + fires
-			# POD_wraith_maintenance.1, both catastrophic for a live slot occupant.
-			# add_trait wraith FIRST so energy init picks the pathos pool.
-			scope:pod_combat_new_wraith = {
-				# Deliberate marker (not consumed today): backstop hook for a future
-				# on_game_start orphan-sweep. Primary despawn is pod_combat_summoned_chars.
-				add_character_flag = pod_combat_summoned_temp
-				add_trait = wraith
-				POD_initialize_energy_modifier = yes
-				POD_arcanoi_initiation_effect = yes
-				add_character_flag = had_POD_character_initialization
-			}
+			# Temp marker: backstops a future on_game_start orphan-sweep (primary despawn
+			# is the pod_combat_summoned_chars list below). Lifecycle, so set here for
+			# every recipe instead of in each recipe branch.
+			scope:pod_combat_new_summon = { add_character_flag = pod_combat_summoned_temp }
+			pod_combat_apply_summon_recipe_effect = { CHARACTER = scope:pod_combat_new_summon  MOVE_STORY = $MOVE_STORY$ }
 			# Team-specific entry points, so branch on the actor's team flag.
 			if = {
 				limit = { var:pod_combat_current_actor_team = flag:player }
-				pod_combat_add_ally_midfight_effect = { CHARACTER = scope:pod_combat_new_wraith }
+				pod_combat_add_ally_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
 			}
 			else = {
-				pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:pod_combat_new_wraith }
+				pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
 			}
-			pod_combat_push_system_log_effect = { MESSAGE_KEY = wraith_summoned }
-			add_to_variable_list = { name = pod_combat_summoned_chars target = scope:pod_combat_new_wraith }
+			add_to_variable_list = { name = pod_combat_summoned_chars target = scope:pod_combat_new_summon }
+		}
+	}
+}
+
+pod_combat_apply_summon_recipe_effect = {
+	# Splat-init dispatch for a freshly-created summon shell. $CHARACTER$ = the shell
+	# (saved scope); $MOVE_STORY$ supplies var:summon_recipe (a flag) selecting the
+	# recipe. A new creature type = one more else_if branch here; nothing else changes.
+	$CHARACTER$ = {
+		if = {
+			limit = { $MOVE_STORY$ = { var:summon_recipe = flag:wraith } }
+			# SAFE wraith recipe, NOT POD_wraith_initialization_effect, which relocates
+			# to the Shadowlands (POD_send_to_dark_kingdom_effect) + fires POD_wraith_maintenance.1.
+			# add_trait wraith FIRST so energy init picks the pathos pool.
+			add_trait = wraith
+			POD_initialize_energy_modifier = yes
+			POD_arcanoi_initiation_effect = yes
+			add_character_flag = had_POD_character_initialization
 		}
 	}
 }
