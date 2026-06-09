@@ -49,6 +49,8 @@ pod_combat_clear_last_result_vars_effect = {
 	remove_variable = pod_combat_last_attack_result
 	remove_variable = pod_combat_last_retal_fired
 	remove_variable = pod_combat_last_retal_agg
+	remove_variable = pod_combat_last_retal_morale
+	remove_variable = pod_combat_last_retal_source
 	remove_variable = pod_combat_last_heal_amount
 	remove_variable = pod_combat_last_morale_damage_amount
 	remove_variable = pod_combat_last_morale_heal_amount
@@ -67,6 +69,8 @@ pod_combat_clear_per_target_state_effect = {
 	remove_variable = pod_combat_last_attack_result
 	remove_variable = pod_combat_last_retal_fired
 	remove_variable = pod_combat_last_retal_agg
+	remove_variable = pod_combat_last_retal_morale
+	remove_variable = pod_combat_last_retal_source
 	remove_variable = pod_combat_last_heal_amount
 	remove_variable = pod_combat_last_morale_damage_amount
 	remove_variable = pod_combat_last_morale_heal_amount
@@ -103,6 +107,7 @@ pod_combat_apply_reaction_if_triggered_effect = {
 	# $TRIGGER_VAR$       = workspace var holding the reaction amount
 	#                       (presence = armed; value = damage)
 	# $AGG_FLAG_VAR$      = presence marks the reaction aggravated
+	# $KIND_VAR$          = flag-valued: a damage source (fire/cold/...) or `morale`
 	# $CONDITION_TRIGGER$ = result-code partition trigger to gate on
 	#                       (pod_combat_result_code_indicates_*)
 	# $ACTOR_SIDE$        = side taking the reaction damage (just attacked)
@@ -117,9 +122,11 @@ pod_combat_apply_reaction_if_triggered_effect = {
 			RETALIATOR_SIDE = $RETALIATOR_SIDE$
 			AMOUNT_VAR      = $TRIGGER_VAR$
 			AGG_FLAG_VAR    = $AGG_FLAG_VAR$
+			KIND_VAR        = $KIND_VAR$
 		}
 		remove_variable = $TRIGGER_VAR$
 		remove_variable = $AGG_FLAG_VAR$
+		remove_variable = $KIND_VAR$
 	}
 }
 
@@ -137,6 +144,7 @@ pod_combat_check_retaliation_effect = {
 	pod_combat_apply_reaction_if_triggered_effect = {
 		TRIGGER_VAR       = pod_combat_$TARGET_SIDE$_retaliate_hit
 		AGG_FLAG_VAR      = pod_combat_$TARGET_SIDE$_retaliate_hit_agg
+		KIND_VAR          = pod_combat_$TARGET_SIDE$_retaliate_hit_kind
 		CONDITION_TRIGGER = pod_combat_result_code_indicates_contact_trigger
 		ACTOR_SIDE        = $ACTOR_SIDE$
 		RETALIATOR_SIDE   = $TARGET_SIDE$
@@ -146,6 +154,7 @@ pod_combat_check_retaliation_effect = {
 	pod_combat_apply_reaction_if_triggered_effect = {
 		TRIGGER_VAR       = pod_combat_$TARGET_SIDE$_retaliate_miss
 		AGG_FLAG_VAR      = pod_combat_$TARGET_SIDE$_retaliate_miss_agg
+		KIND_VAR          = pod_combat_$TARGET_SIDE$_retaliate_miss_kind
 		CONDITION_TRIGGER = pod_combat_result_code_indicates_miss_trigger
 		ACTOR_SIDE        = $ACTOR_SIDE$
 		RETALIATOR_SIDE   = $TARGET_SIDE$
@@ -157,6 +166,7 @@ pod_combat_apply_retaliation_helper = {
 	# $RETALIATOR_SIDE$ = side dishing out retaliation (original target).
 	# $AMOUNT_VAR$      = workspace var holding retaliation damage.
 	# $AGG_FLAG_VAR$    = workspace var whose presence marks aggravated.
+	# $KIND_VAR$        = flag-valued workspace var: a damage source (fire/cold/...) or `morale`.
 	#
 	# bypass_guard: retaliation ignores the actor's guard (guard is for
 	# incoming attacks, not counter strikes). Its scope-export return
@@ -181,16 +191,41 @@ pod_combat_apply_retaliation_helper = {
 			value = var:$AMOUNT_VAR$
 		}
 
+		# Dispatch on the counter kind: morale > aggravated > source > plain.
+		# pod_combat_last_retal_damage is lifted per-branch (post-soak for HP, the
+		# armed amount for morale) so the log can render a counter-attack rider even
+		# when the main attack was blocked / soaked / missed (entry.damage = 0).
 		if = {
+			# Morale counter — erodes will, not flesh (also bleeds onto PoD stress).
+			limit = { has_variable = $KIND_VAR$  var:$KIND_VAR$ = flag:morale }
+			pod_combat_deal_morale_damage_effect = {
+				TARGET_SIDE = $ACTOR_SIDE$
+				AMOUNT      = scope:retaliation_amount
+			}
+			set_variable = { name = pod_combat_last_retal_morale value = yes }
+			set_variable = { name = pod_combat_last_retal_damage value = scope:retaliation_amount }
+		}
+		else_if = {
 			limit = { has_variable = $AGG_FLAG_VAR$ }
 			pod_combat_deal_hp_damage_bypass_guard_effect = {
 				TARGET_SIDE = $ACTOR_SIDE$
 				AMOUNT      = scope:retaliation_amount
 				REASON      = duel_aggravated
 			}
-			# Mark aggravated so the retal rider renders the
-			# aggravated wound-box icon (captured as entry.var:retal_agg).
+			# Aggravated wound-box icon on the retal rider (entry.var:retal_agg).
 			set_variable = { name = pod_combat_last_retal_agg value = yes }
+			set_variable = { name = pod_combat_last_retal_damage value = scope:damage_dealt }
+		}
+		else_if = {
+			# Sourced counter (fire/cold/...) — routes through PoD's weakness pipeline.
+			limit = { has_variable = $KIND_VAR$ }
+			pod_combat_deal_typed_retal_damage_effect = {
+				TARGET_SIDE = $ACTOR_SIDE$
+				AMOUNT      = scope:retaliation_amount
+				KIND_VAR    = $KIND_VAR$
+			}
+			set_variable = { name = pod_combat_last_retal_source value = var:$KIND_VAR$ }
+			set_variable = { name = pod_combat_last_retal_damage value = scope:damage_dealt }
 		}
 		else = {
 			pod_combat_deal_hp_damage_bypass_guard_effect = {
@@ -198,21 +233,40 @@ pod_combat_apply_retaliation_helper = {
 				AMOUNT      = scope:retaliation_amount
 				REASON      = duel
 			}
-		}
-
-		# Lift the retal's landed (post-soak) damage onto
-		# entry.var:retal_damage so the log can render a counter-attack
-		# rider even when the main attack was blocked/soaked/missed
-		# (entry.damage = 0).
-		set_variable = {
-			name  = pod_combat_last_retal_damage
-			value = scope:damage_dealt
+			set_variable = { name = pod_combat_last_retal_damage value = scope:damage_dealt }
 		}
 
 		# Set the retal_fired overlay (independent of outcome /
 		# attack_result) — PODCombatLogRetalRider reads it + retal_damage
 		# to emit the counter line alongside the main outcome.
 		pod_combat_set_retal_fired_effect = yes
+	}
+}
+
+pod_combat_deal_typed_retal_damage_effect = {
+	# Sourced retaliation: map the $KIND_VAR$ source flag to a PoD death_reason and
+	# deal it bypass-guard (the reflex path). Mirrors POD_combat_dispatch_by_source
+	# (identity in 7 of 8; holy -> true_faith). Aggravated-ness comes from the source's
+	# PoD weakness mapping, so no separate agg flag is needed here.
+	# $TARGET_SIDE$ = who takes the counter. $AMOUNT$ = pre-soak amount.
+	if = { limit = { var:$KIND_VAR$ = flag:fire }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = fire } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:cold }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = cold } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:lightning }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = lightning } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:sun }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = sun } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:silver }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = silver } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:gold }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = gold } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:holy }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = true_faith } }
+	else_if = { limit = { var:$KIND_VAR$ = flag:balefire }
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = balefire } }
+	else = {
+		pod_combat_deal_hp_damage_bypass_guard_effect = { TARGET_SIDE = $TARGET_SIDE$ AMOUNT = $AMOUNT$ REASON = duel }
 	}
 }
 
@@ -1057,6 +1111,21 @@ pod_combat_push_log_effect = {
 				scope:combat_host = { has_variable = pod_combat_last_retal_agg }
 			}
 			set_variable = { name = retal_agg value = 1 }
+		}
+		# Morale marker: the counter eroded will, not flesh. PODCombatLogRetalRider
+		# renders the counter as morale instead of an HP wound-box line.
+		if = {
+			limit = {
+				scope:combat_host = { has_variable = pod_combat_last_retal_morale }
+			}
+			set_variable = { name = retal_morale value = 1 }
+		}
+		# Source marker (fire/sun/...): stored as the flag so the rider GetFlagName's it.
+		if = {
+			limit = {
+				scope:combat_host = { has_variable = pod_combat_last_retal_source }
+			}
+			set_variable = { name = retal_source value = scope:combat_host.var:pod_combat_last_retal_source }
 		}
 	}
 	pod_combat_prepend_capped_log_entry_effect = yes
