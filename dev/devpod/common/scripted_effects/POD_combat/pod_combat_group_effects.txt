@@ -1653,6 +1653,81 @@ pod_combat_check_group_victory_effect = {
 # and set up the next round.
 ##############################################################################################
 
+# Round-end Damage-over-Time tick. Hooked into pod_combat_group_end_round_effect
+# after the round increment, before reinforcements/initiative. Walks every alive
+# slot carrying a burn (slot_dot_rounds > 0): logs the tick, decrements, clears at
+# 0, then deals the damage. HP ticks bypass soak/guard via the workspace round-trip
+# (pod_combat_deal_dot_tick_from_host_effect); morale ticks erode slot_morale.
+# Then re-marks KO (shared predicate) + re-checks victory once: a burn can end the
+# fight between turns, so a downed slot must be out before the new round seats.
+pod_combat_tick_dots_effect = {
+	# combat_host: read by the log push + as the wound ATTACKER. host: contract name for
+	# the workspace load/save helpers (same dual-save the AoE dispatchers use).
+	save_scope_as = combat_host
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			has_variable = slot_dot_rounds
+			var:slot_dot_rounds > 0
+		}
+		# Phase A: slot-local reads and writes only, BEFORE any inline scope switch (an inline
+		# switch corrupts the iteration scope for every later statement in the body - one root
+		# cause of the long DoT-damage hunt). The amount is lifted into a scope VALUE (numbers
+		# survive that fine); the KIND is NOT - reading a flag var through save_scope_value_as
+		# degrades it to 'value' type and every later flag comparison TYPE-ERRORS (the other
+		# root cause). The host dispatch reads the kind through the saved slot object instead.
+		save_scope_as = dot_slot
+		save_scope_value_as = { name = dot_log_amount  value = var:slot_dot_amount }
+		save_scope_value_as = { name = dot_tick_amount value = var:slot_dot_amount }
+		var:slot_char = { save_scope_as = dot_log_victim }
+		# Message dispatch: morale tick, then a damage-type per-element row, then the wound-box
+		# rows for untyped damage (aggravated box for balefire / damage_type aggravated moves,
+		# superficial box otherwise).
+		if = { limit = { var:slot_dot_kind = flag:morale }      pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_morale } }
+		else_if = { limit = { var:slot_dot_kind = flag:fire }      pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_fire } }
+		else_if = { limit = { var:slot_dot_kind = flag:cold }      pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_cold } }
+		else_if = { limit = { var:slot_dot_kind = flag:lightning } pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_lightning } }
+		else_if = { limit = { var:slot_dot_kind = flag:sun }       pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_sun } }
+		else_if = { limit = { var:slot_dot_kind = flag:silver }    pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_silver } }
+		else_if = { limit = { var:slot_dot_kind = flag:gold }      pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_gold } }
+		else_if = { limit = { var:slot_dot_kind = flag:holy }      pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_holy } }
+		else_if = { limit = { var:slot_dot_kind = flag:balefire }  pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
+		else_if = { limit = { has_variable = slot_dot_aggravated  var:slot_dot_aggravated = 1 } pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
+		else = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick } }
+		change_variable = { name = slot_dot_rounds subtract = 1 }
+		# Phase B: deal the tick. HP ticks use the proven AoE per-target shape: load the slot
+		# into the TARGET workspace, wound from HOST scope, save back, KO-check. The fork
+		# compares the slot VAR (a literal flag since the §13b reseed), same shape as the
+		# message dispatch above.
+		if = {
+			limit = { var:slot_dot_kind = flag:morale }
+			pod_combat_deal_slot_dot_morale_tick_effect = yes
+		}
+		else = {
+			pod_combat_load_target_from_story_effect = yes
+			scope:host = { pod_combat_deal_dot_tick_from_host_effect = yes }
+			pod_combat_save_target_to_story_effect = yes
+			pod_combat_aoe_check_target_alive_effect = yes
+		}
+		# Phase C: expiry, AFTER the wound (the host dispatch reads slot_dot_kind off the slot,
+		# so it must survive the final tick). A scripted-effect CALL: calls stay reliable after
+		# phase B's inline switches, inline statements do not.
+		pod_combat_expire_dot_if_done_effect = yes
+	}
+	scope:host = { pod_combat_load_workspace_effect = yes }
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			var:slot_alive = 1
+			pod_combat_slot_should_be_marked_ko_trigger = yes
+		}
+		set_variable = { name = slot_alive value = 0 }
+	}
+	pod_combat_check_group_victory_effect = yes
+}
+
 pod_combat_group_end_round_effect = {
 	# Guard: skip if combat already ended this round (vars may be cleaned up).
 	if = {
@@ -1666,6 +1741,10 @@ pod_combat_group_end_round_effect = {
 	# System log: round transition. Pushed AFTER the increment so entry.var:round
 	# captures the NEW round number.
 	pod_combat_push_system_log_effect = { MESSAGE_KEY = round_begins }
+
+	# Tick active Damage-over-Time burns before reinforcements/initiative so a slot
+	# the burn just downed is out before the new round seats and rolls turn order.
+	pod_combat_tick_dots_effect = yes
 
 	# Seat reinforcements scheduled to arrive this round, before initiative so they
 	# roll into the new round's turn order and act this round.

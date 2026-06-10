@@ -270,6 +270,146 @@ pod_combat_deal_typed_retal_damage_effect = {
 	}
 }
 
+# Unsoakable DoT wound, applied in the victim character's scope. Mirrors
+# POD_increase_wounds_effect's non-soaked branch (final_damage = COUNT * splat-weakness,
+# capped; box apply + vanilla treatment + balefire stacks). Only the soak random_list is
+# dropped - the round-end burn is defined as unsoakable; hard immunity and clay-man
+# protection still block.
+# Caller contract: victim scope, reached from HOST scope via var:pod_combat_target_char (the
+# proven route_to_pod_damage shape).
+pod_combat_apply_dot_wound_effect = {
+	$ATTACKER$ = { save_scope_as = wound_attacker }
+	save_scope_value_as = { name = death_reason value = flag:death_$REASON$ }
+	save_scope_value_as = {
+		name = final_damage
+		value = { value = $COUNT$  multiply = POD_wound_multiplier_from_splat_weaknesses  max = POD_damage_cap_per_death_reason  ceiling = yes }
+	}
+	POD_set_scope_value_from_trigger = { NAME = is_aggravated TRIGGER = "POD_damage_type_is_aggravated = { DEATH_REASON = scope:death_reason }" }
+	if = {
+		limit = { POD_has_immunity_to_damage_type = { DEATH_REASON = scope:death_reason } }
+		# Hard immunity blocks the tick entirely; only the soak roll is bypassed.
+	}
+	else_if = {
+		limit = { POD_has_clay_man_protection = yes }
+		POD_trigger_clay_man_protection = yes
+	}
+	else = {
+		POD_apply_wound_boxes = { COUNT = scope:final_damage AGGRAVATED = scope:is_aggravated REASON = $REASON$ }
+		POD_vanilla_wound_treatment = { REASON = $REASON$ }
+		if = {
+			limit = { scope:death_reason = flag:death_balefire }
+			while = { count = scope:final_damage  POD_add_modifier_and_track_stacks = { TYPE = character MODIFIER = balefire_health_modifier } }
+		}
+	}
+}
+
+# Morale DoT tick, slot scope. Erodes slot_morale and mirrors PoD Mental Strain. Reads the
+# amount from scope:dot_tick_amount (saved by the tick loop BEFORE expiry can remove the
+# slot var on the final tick).
+pod_combat_deal_slot_dot_morale_tick_effect = {
+	save_scope_value_as = { name = dot_morale_lost value = { value = scope:dot_tick_amount  max = var:slot_morale } }
+	set_variable = { name = slot_morale value = { value = var:slot_morale  subtract = scope:dot_tick_amount  min = 0 } }
+	if = {
+		limit = { scope:dot_morale_lost > 0 }
+		var:slot_char = { POD_static_stress_gain = { COUNT = { value = scope:dot_morale_lost  multiply = pod_combat_morale_stress_multiplier } } }
+	}
+}
+
+# HP DoT tick wound dispatch, HOST scope. The tick loop loads the burning slot into the
+# TARGET workspace first (the proven AoE per-target shape: wounds are dealt from host scope
+# via the workspace, never from slot scope - slot-scope wound attempts silently no-op in the
+# round-end loop). Kind is read through the saved slot OBJECT (scope:dot_slot): a flag lifted
+# via save_scope_value_as degrades to 'value' type and flag compares then TYPE-ERROR. The
+# amount (a number) rides safely in scope:dot_tick_amount.
+pod_combat_deal_dot_tick_from_host_effect = {
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:fire }      var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = fire COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:cold }      var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = cold COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:lightning } var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = lightning COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:sun }       var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = sun COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:silver }    var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = silver COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:gold }      var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = gold COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:holy }      var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = true_faith COUNT = scope:dot_tick_amount } } }
+	if = { limit = { scope:dot_slot.var:slot_dot_kind = flag:balefire }  var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = balefire COUNT = scope:dot_tick_amount } } }
+	if = {
+		limit = { NOR = { scope:dot_slot.var:slot_dot_kind = flag:fire scope:dot_slot.var:slot_dot_kind = flag:cold scope:dot_slot.var:slot_dot_kind = flag:lightning scope:dot_slot.var:slot_dot_kind = flag:sun scope:dot_slot.var:slot_dot_kind = flag:silver scope:dot_slot.var:slot_dot_kind = flag:gold scope:dot_slot.var:slot_dot_kind = flag:holy scope:dot_slot.var:slot_dot_kind = flag:balefire } }
+		# Untyped tick: honor the move's damage_type the same way §6 does for direct hits
+		# (duel_aggravated REASON), read off the slot's always-set 0/1 marker.
+		if = {
+			limit = { scope:dot_slot = { has_variable = slot_dot_aggravated  var:slot_dot_aggravated = 1 } }
+			var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = duel_aggravated COUNT = scope:dot_tick_amount } }
+		}
+		else = {
+			var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect = { ATTACKER = scope:combat_host REASON = duel COUNT = scope:dot_tick_amount } }
+		}
+	}
+}
+
+# DoT expiry, slot scope. Called as the tick loop's LAST statement (a contained call, safe after
+# phase B's inline switches). Kept separate from the round decrement so slot_dot_kind survives
+# until the host wound dispatch has read it.
+pod_combat_expire_dot_if_done_effect = {
+	if = {
+		limit = { var:slot_dot_rounds <= 0 }
+		remove_variable = slot_dot_amount
+		remove_variable = slot_dot_rounds
+		remove_variable = slot_dot_kind
+		remove_variable = slot_dot_aggravated
+	}
+}
+
+# DoT-tick log row. Reads scopes saved by pod_combat_tick_dots_effect: combat_host
+# (round), dot_log_victim (entry.actor), dot_log_amount (entry.dot_tick_amount).
+# MESSAGE_KEY = dot_tick (HP burn) or dot_tick_morale. The element type lives on the
+# Burning status icon, not this row, so no kind is stamped here.
+pod_combat_push_dot_tick_log_effect = {
+	hidden_effect_new_object = {
+		character:POD_wraith_01 = {
+			create_story = {
+				type = POD_combat_log_entry
+				save_scope_as = new_log_entry
+			}
+		}
+		scope:new_log_entry = {
+			set_variable = { name = system_message  value = flag:$MESSAGE_KEY$ }
+			set_variable = { name = actor           value = scope:dot_log_victim }
+			set_variable = { name = dot_tick_amount value = scope:dot_log_amount }
+			set_variable = { name = actor_side      value = -1 }
+			if = {
+				limit = { scope:combat_host = { has_variable = pod_combat_round } }
+				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
+			}
+		}
+		pod_combat_prepend_capped_log_entry_effect = yes
+	}
+}
+
+# DoT application log row (one-time, at cast). Reads scopes saved by §13b of
+# POD_execute_combat_move: combat_host (round), dot_applied_victim (entry.actor),
+# dot_applied_amount (entry.dot_tick_amount), dot_applied_rounds (entry.dot_applied_rounds).
+# MESSAGE_KEY = dot_applied (HP) or dot_applied_morale.
+pod_combat_push_dot_applied_log_effect = {
+	hidden_effect_new_object = {
+		character:POD_wraith_01 = {
+			create_story = {
+				type = POD_combat_log_entry
+				save_scope_as = new_log_entry
+			}
+		}
+		scope:new_log_entry = {
+			set_variable = { name = system_message     value = flag:$MESSAGE_KEY$ }
+			set_variable = { name = actor              value = scope:dot_applied_victim }
+			set_variable = { name = dot_tick_amount    value = scope:dot_applied_amount }
+			set_variable = { name = dot_applied_rounds value = scope:dot_applied_rounds }
+			set_variable = { name = actor_side         value = -1 }
+			if = {
+				limit = { scope:combat_host = { has_variable = pod_combat_round } }
+				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
+			}
+		}
+		pod_combat_prepend_capped_log_entry_effect = yes
+	}
+}
+
 pod_combat_apply_ap_drain_effect = {
 	# Apply last round's AP-drain debuff to the current
 	# actor, then clear it so it fires once. Reads the workspace

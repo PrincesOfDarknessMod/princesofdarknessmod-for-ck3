@@ -1,4 +1,4 @@
-# POD Combat — System Reference
+﻿# POD Combat — System Reference
 
 Single source of truth for the combat minigame's runtime model. Code
 files reference sections of this doc instead of re-stating the
@@ -112,6 +112,9 @@ contract that gives those vars meaning.
 | `slot_energy_used` | counter for AI energy-attrition weighting |
 | `slot_turn_order` | turn-rank within the round (1 = first); stamped by `pod_combat_calc_turn_orders_effect` after initiative roll |
 | `slot_has_acted` | 1 once the slot's turn resolves this round; reset to 0 by `pod_combat_calculate_initiative_effect` at the start of every round |
+| `slot_dot_amount` / `slot_dot_rounds` | active burn (DoT): damage per round-end tick / rounds remaining. Absence = no burn (the tick loop filters on `has_variable = slot_dot_rounds`); re-application overwrites |
+| `slot_dot_kind` | LITERAL flag typing the burn: `flag:morale`, a damage source (`flag:fire` etc.), or `flag:duel` for untyped. Always set while a burn is active — status icon, log dispatch, and wound dispatch all read it |
+| `slot_dot_aggravated` | 0/1, always set with the burn: when 1, untyped ticks route as `duel_aggravated` (mirrors the move's `damage_type = aggravated`); ignored for typed sources (PoD's classifier types those per victim splat) |
 
 Team affiliation is stored explicitly on each slot as the `combat_team`
 flag (`flag:player` / `flag:enemy`); `team_position` (int 0+, 0 = leader)
@@ -278,8 +281,9 @@ load-bearing — reordering will silently break behavior.
 | §12 | Stance flags (`set_guard` / `dodge` / `stealth`) | applied to actor AFTER damage, so a "set guard then attack" attacks first then guards (intuitive ordering for the end-of-turn defensive stance) |
 | §12b | AoE buff broadcast | extends §11/§12 to allies on `team_ally` moves; runs after actor's own buffs are written |
 | §13 | Retaliation setup | actor-side; the `retaliate_*` workspace slots written here arm reactions for the NEXT turn's §15 to consume |
+| §13b | DoT application | seeds `slot_dot_amount/rounds/kind/aggravated` on the target's slot (single-target; an AoE DoT would fold into the §5b/AoE phase). Kind is seeded as LITERAL flags only (default duel, per-source override, morale wins); re-apply refreshes. Pushes the per-type "is afflicted" log row. Ticks fire at round end — see **DoT primitive** in §7 |
 | §14 | Parametric flags (AP gain/drain, `initiative_debuff`) | order-independent |
-| §14b | Summon a combatant | dispatched on the `summons_combatant` flag -> `pod_combat_summon_combatant_glue_effect = { MOVE_STORY }`, which creates a character, applies the move's `summon_recipe` via `pod_combat_apply_summon_recipe_effect`, and seats it on the caster's team mid-fight via `pod_combat_add_ally_midfight_effect` / `_add_enemy_midfight_effect`. Runs after the damage/AoE phases and before §15; the summon sits out the cast round and joins initiative next round (`slot_has_acted = 1`). Every mid-fight seat posts a named "joins the fray" log row. See **Mid-combat add** under §3 |
+| §14b | Summon a combatant | dispatched on the `summons_combatant` flag -> `pod_combat_summon_combatant_glue_effect = { MOVE_STORY }`, which creates a character, applies the move's `summon_recipe` (`pod_combat_apply_summon_recipe_effect`), and seats it on the caster's team mid-fight via `pod_combat_add_ally_midfight_effect` / `_add_enemy_midfight_effect`. Runs AFTER the damage/AoE phases (a same-cast AoE can't hit the new unit) and before §15; the summon sits out the current round and joins initiative next round-start (`slot_has_acted = 1`). Every mid-fight seat posts a named "joins the fray" log row. See **Mid-combat add** under §3 |
 | §15 | Reaction phase | fires reactions armed by the PREVIOUS turn's §13. Each reaction is gated by a result-code partition trigger (`pod_combat_result_code_indicates_*`) that reads §6's outcome on this scope. Today: retaliate-on-contact (hp damage / guard blocked / soaked all qualify — thorns semantics) and retaliate-on-evasion (miss / dodge / stealth all qualify — riposte semantics). See **Reaction system** below |
 | §16 | Push log | reads ALL prior flags + amount fields. MUST run last |
 
@@ -871,6 +875,47 @@ per-target retaliation hook would attach inside the damage iterators
 specifically — buffs/debuffs don't arm reactions, so they wouldn't
 need the workspace round-trip under that extension either.
 
+### DoT primitive (round-end burns)
+
+A move with `dot_amount` / `dot_rounds` (CSV) seeds a burn on its
+target's slot at §13b; the burn ticks at every round end and expires
+after its last tick. All state lives on the slot story (§1): amount,
+rounds, kind (a LITERAL flag), and the untyped-aggravated 0/1 marker.
+
+Tick flow (`pod_combat_tick_dots_effect`, called from
+`pod_combat_group_end_round_effect` after the round increment, before
+reinforcements/initiative). The loop body is three ordered phases:
+
+1. **Phase A — slot-local, before any inline scope switch:** save the
+   amount into scope values and the slot object (`scope:dot_slot`),
+   save the victim for the log push, dispatch the per-kind tick row
+   (element mark / stress / superficial-or-aggravated box), decrement
+   `slot_dot_rounds`.
+2. **Phase B — the damage, last inline statements of the body:**
+   morale kind erodes `slot_morale` slot-locally (plus the PoD Mental
+   Strain mirror); HP kinds run the SAME workspace round-trip as
+   damage AoEs — load target from story,
+   `scope:host = { pod_combat_deal_dot_tick_from_host_effect }`, save
+   back, KO-check. The host dispatch maps kind → REASON
+   (fire/cold/…/true_faith/balefire; untyped → `duel` or
+   `duel_aggravated` off the 0/1 marker) and wounds via
+   `var:pod_combat_target_char = { pod_combat_apply_dot_wound_effect }`.
+3. **Phase C — expiry, a contained call:**
+   `pod_combat_expire_dot_if_done_effect` removes the four slot vars
+   at rounds ≤ 0. Kept separate from the decrement so the kind
+   survives until the wound dispatch has read it.
+
+`pod_combat_apply_dot_wound_effect` mirrors PoD's
+`POD_increase_wounds_effect` minus the soak random_list: **DoT ticks
+are unsoakable by design** (splat-weakness multiplier, damage cap,
+hard immunity, and clay-man protection still apply). The tick is
+slot-direct — no hit roll, no guard, no stance interaction.
+
+Display: the application row and tick rows carry the damage-type icon
+(element mark, stress for morale, superficial/aggravated box for
+untyped); the slot status icon keeps the generic DoT symbol as the
+"has a burn" marker.
+
 ### Saved-scope `combat_host` (§0)
 
 Downstream damage routing
@@ -1231,6 +1276,17 @@ rendering, and the combat-log dispatcher.
     localization (both validator-invisible).
 10. **Damage icon**: optionally add `gfx/interface/icons/combat/X_damage.dds`
     if visual styling is desired.
+
+11. **DoT path** (if the source can appear on a `dot_amount` move):
+    §13b kind seeding in `pod_combat_move_effects.txt` (a literal-flag
+    override branch + an application-row dispatch branch),
+    `pod_combat_deal_dot_tick_from_host_effect` in
+    `pod_combat_effects.txt` (kind → REASON branch), the tick message
+    dispatch in `pod_combat_tick_dots_effect`
+    (`pod_combat_group_effects.txt`), two loc rows
+    (`pod_combat_log_system_dot_tick_X` / `_dot_applied_X`), two
+    dispatcher branches in `POD_combat_log_custom_loc.txt`, and the
+    matching `POD_combat_suppress_flag` entries.
 
 ### Adding a new outcome flag
 
