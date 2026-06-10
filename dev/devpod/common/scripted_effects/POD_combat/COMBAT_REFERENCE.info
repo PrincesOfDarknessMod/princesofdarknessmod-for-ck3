@@ -66,7 +66,7 @@ groups them by *owner* for the "where does this live?" lookup.
 | **Slot** | `POD_combat_slot` story (one per slot, on Charon) | slot creation → slot cleanup | `combat_team`, `team_position`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_base_soak`, `slot_hit_chance`, `slot_base_hit_chance`, `slot_initiative`, `slot_init_bonus`, `slot_ap_drain`, `slot_energy_used`, `slot_turn_order`, `slot_has_acted`, `slot_is_guarding`, `slot_is_dodging`, `slot_is_stealthed`, `slot_retaliate_*`, `slot_incorporeal_spirit`, `slot_can_damage_spirit`, all `slot_{stat}_{direction}_{duration}_tier` vars |
 | **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` (mirrors of the slot fields above) |
 | **Character (AI)** | the acting AI character | persists per-character across combats until `pod_combat_group_cleanup_effect` clears them | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` (variable list) |
-| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:retal_fired` (three-axis result snapshot — see §4), `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, `entry.var:retal_damage`, `entry.var:retal_agg`, `entry.var:actor_side` (team code of the acting slot — `0` ally/player / `1` enemy / `-1` system entry; the combat-log GUI keys the ally-gold / enemy-red side bar + actor-name tint off this), `entry.var:aoe_burst_index` (set by AoE iterations so the buff rider renders once per move; absent on non-AoE rows), `entry.var:system_message` (only on bookend rows pushed by `pod_combat_push_system_log_effect`), `entry.var:round`, plus the move-context fields the customizable_loc dispatcher reads |
+| **Log entry** | `POD_combat_log_entry` story (one per log row, on Charon) | combat init → combat cleanup (all entries end together) | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:retal_fired` (three-axis result snapshot — see §4), `entry.var:damage`, `entry.var:heal_amount`, `entry.var:morale_damage_amount`, `entry.var:morale_heal_amount`, `entry.var:retal_damage`, `entry.var:retal_agg`, `entry.var:actor_side` (team code of the acting slot — `0` ally/player / `1` enemy / `-1` system entry; the combat-log GUI keys the ally-gold / enemy-red side bar + actor-name tint off this), `entry.var:self_damage` (post-soak recoil, set only when > 0), `entry.var:aoe_burst_index` (set by AoE iterations so intent segments and the recoil segment render once per move; absent on non-AoE rows), `entry.var:system_message` (only on bookend rows pushed by `pod_combat_push_system_log_effect`), `entry.var:round`, plus the move-context fields the customizable_loc dispatcher reads |
 
 HP is derived live from each slot character's PoD wound vars
 (`POD_empty_damage_boxes` etc.); it is **not** owned by any of the
@@ -556,40 +556,60 @@ dropped wholesale alongside the per-target shape — those existed
 to rescue the misleading last-target capture under the old single-
 row contract. The per-target contract makes them obsolete.
 
-### Log dispatcher
+### Row rendering — head + segments
 
-`PODCombatLogResultText` customizable_localization
-(`pod_combat_log_custom_loc.txt`) consumes two saved scopes:
+A move row's result column is a **head plus an ordered list of
+segments**, composed left-to-right by the GUI hbox (full design:
+`docs/COMBAT_LOG_REFACTOR_DESIGN.md`).
 
-- `entry` — the log entry story scope, for `var:outcome` /
-  `var:attack_result` / `var:retal_fired` axis reads AND for
-  `var:damage` / `heal_amount` / `morale_damage_amount` /
-  `morale_heal_amount` / `retal_damage` amount reads
-- `move` — the executing move story, for `damage_type` /
-  `damage_source` / `targeting` / buff-tier checks the rider
-  customizable_locs need
+**The head** is `PODCombatLogResultText` (customizable_localization),
+consuming two saved scopes — `entry` (the log entry story: outcome /
+attack_result / retal_fired axes + amount fields) and `move` (the
+executing move story). Branches compose on the outcome axis first;
+HP-track outcomes split into `_aggravated` variants off
+`scope:move.var:damage_type` / `heal_type`. The damage-source mark
+renders beside the head ONLY for direct damage (`move.hp_damage` AND
+`move.damage_source` both set, suppressed on no-damage outcomes) — a
+source that types a secondary effect is marked by that effect's own
+segment.
 
-The rcode flag-scope used by the single-flag model is gone — the
-dispatcher branches gate directly on `scope:entry.var:outcome` /
-`scope:entry.var:attack_result`.
+**Segments** each consist of exactly: a visible SV
+(`pod_combat_log_seg_<x>_visible_value`, entry scope, returns 1 iff
+the renderer emits content — move-var checks, entry-amount checks,
+outcome suppression, and the AoE burst gate all live here), a
+renderer (`PODCombatLogSeg<X>` customizable_loc reading ONLY its own
+fields, with a defensive no-move first branch because the GUI
+evaluates raw_text even on invisible widgets), and a separator +
+content widget pair built from the `PODSegVisible` /
+`PODSegSepVisible` / `PODSegText` data-binding macros
+(`POD_combat_macros.txt`).
 
-Each trigger branch composes on the outcome axis first
-(outcome=flag:attack routes into the attack_result sub-dispatch;
-outcome=flag:heal / morale_damage / morale_healed routes to their
-respective text lines; outcome=flag:utility renders empty). The
-HP-track outcomes (outcome=attack + attack_result=hp_damage, plus
-outcome=heal) split into `_aggravated` variants — the wound-box
-icon swaps from superficial to aggravated based on
-`scope:move.var:damage_type` / `heal_type`.
+Separator correctness uses **linked accumulators**:
+`pod_combat_log_before_<x>_value` = previous segment's visible SV +
+previous accumulator. A separator checks exactly two terms (own
+visible AND before), so appending a segment never edits existing
+separators.
 
-The retal overlay (`entry.var:retal_fired`) is rendered by a
-SEPARATE customizable_loc, `PODCombatLogRetalRider`, invoked as
-its own text_single in the result-column hbox alongside the main
-dispatcher. It emits "+ Counter -X HP" / "+ Counter Soaked" rider
-lines independent of the main outcome — so EVERY main outcome
-(hp_damage / soaked / guard_blocked / missed / dodged / stealthed)
-can carry the retal overlay without needing dedicated `_retal`
-composite flags.
+Segment order (outcome segments — entry-captured actuals — then
+intent segments — move-story definitions):
+
+| Segment | Source |
+|---|---|
+| Heal / Morale damage / Morale heal | outcome (amount fields, suppressed when outcome equals their primary) |
+| Retal fired ("+ Counter ...") | outcome (`retal_fired` overlay) |
+| Recoil (self damage) | outcome (`entry.self_damage`, lifted at §8) |
+| Hit tier, Soak tier | intent (tier vars; one segment per stat) |
+| Guard / Dodge / Stealth / Guard strip | intent (stance flags) |
+| Retal armed ("→ Retaliate" + own type mark, morale > aggravated > source) | intent |
+| AP gain, AP drain ("Stuns" at >= base AP), Initiative debuff | intent |
+
+Intent segments gate on `aoe_burst_index` unset-or-0 so move-level
+effects render once per AoE burst; outcome segments render on
+whichever per-target row captured their amount.
+
+The retal overlay (`entry.var:retal_fired`) remains independent of
+the main outcome — every main outcome can carry the counter line
+without composite `_retal` flags.
 
 ---
 
@@ -929,6 +949,13 @@ status icon (empty AP pip on the slot card, tooltip splits
 dazed/stunned at base AP) and the dazed/stunned consumption log rows
 pushed by `pod_combat_apply_ap_drain_effect`. Drain writes are
 take-max so a small drain landing after a stun cannot shrink it.
+
+A dedicated stun condition (turn-skip flag on the slot) was weighed
+and rejected for v1: it duplicated most of the above for roughly
+tenfold the surface (turn-loop edits, a PC action gate, recursion-safe
+auto-skip of the PC turn). Revisit only if multi-TURN stuns or
+AP-decoupled denial (immune to future AP-gain effects) become real
+design wants — nothing in the drain approach forecloses that.
 
 ### Saved-scope `combat_host` (§0)
 
@@ -1301,6 +1328,31 @@ rendering, and the combat-log dispatcher.
     (`pod_combat_log_system_dot_tick_X` / `_dot_applied_X`), two
     dispatcher branches in `POD_combat_log_custom_loc.txt`, and the
     matching `POD_combat_suppress_flag` entries.
+
+### Adding a combat-log segment
+
+The append-only recipe (segment contract:
+`docs/COMBAT_LOG_REFACTOR_DESIGN.md`):
+
+1. **Visible SV** `pod_combat_log_seg_X_visible_value` in
+   `pod_combat_values.txt` (entry scope). Intent segments: move-var
+   check via `var:move = { ... }` + the `aoe_burst_index`
+   unset-or-0 gate. Outcome segments: entry-amount check.
+2. **Before SV** `pod_combat_log_before_X_value` = previous tail
+   segment's visible SV + its before SV. Appending touches nothing
+   else; inserting mid-order re-points exactly one successor.
+3. **Renderer** `PODCombatLogSegX` in `POD_combat_log_custom_loc.txt`
+   — defensive `NOT exists scope:move` first branch, then this
+   segment's branches only, blank fallback last.
+4. **Widget pair** in `pod_combat_window.gui` using
+   `PODSegSepVisible` / `PODSegVisible` / `PODSegText`.
+5. **Loc fragment key(s)** in `POD_combat_static_l_english.yml`.
+6. **Error suppression** for any NEW entry var or message flag the
+   renderer reads (`pod_combat_error_suppression_effects.txt`).
+7. **Outcome segments only**: lift the amount to a
+   `pod_combat_last_*` host var in the pipeline, capture it in
+   `push_log`, and add it to
+   `pod_combat_clear_last_result_vars_effect`.
 
 ### Adding a new outcome flag
 

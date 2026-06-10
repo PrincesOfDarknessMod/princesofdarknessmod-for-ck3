@@ -519,48 +519,6 @@ pod_combat_log_show_damage_source_value = {
 	}
 }
 
-# Buff-rider visibility for the combat-log GUI. Returns 1 when the
-# move story carries ANY of the buff / stance / tier / utility /
-# retaliation / init-mod variables that PODCombatLogBuffRider knows
-# how to render — 0 otherwise.
-#
-#
-# Called on the move story scope (the GUI passes
-# `Scope.Var('move').Story.MakeScope` as the call scope). All
-# `has_variable` reads resolve against the move story's vars.
-pod_combat_move_has_buff_rider_value = {
-	value = 0
-	if = {
-		limit = {
-			OR = {
-				# Stance flags (set_guard / dodge / stealth /
-				# remove_guard) — single-effect rider lines.
-				has_variable = set_guard
-				has_variable = dodge
-				has_variable = stealth
-				has_variable = remove_guard
-				# Tier buffs / debuffs (soak / hit, round / combat
-				# duration) — magnitude-driven rider lines.
-				has_variable = soak_buff_round_tier
-				has_variable = soak_buff_combat_tier
-				has_variable = soak_debuff_round_tier
-				has_variable = soak_debuff_combat_tier
-				has_variable = hit_buff_round_tier
-				has_variable = hit_buff_combat_tier
-				has_variable = hit_debuff_round_tier
-				has_variable = hit_debuff_combat_tier
-				# Resource / timing modifiers — AP gain / drain,
-				# retaliation arm flags, next-round init debuff.
-				has_variable = ap_gain
-				has_variable = ap_drain
-				has_variable = retaliate_if_hit
-				has_variable = retaliate_if_missed
-				has_variable = initiative_debuff
-			}
-		}
-		value = 1
-	}
-}
 
 # ─── Combat-log result-column visibility probes ────────────────────
 # Each "rider" in the result column (heal / morale damage / morale
@@ -602,7 +560,7 @@ pod_combat_log_heal_rider_visible_value = {
 		limit = {
 			has_variable = heal_amount
 			var:heal_amount > 0
-			NOT = {
+			NAND = {
 				has_variable = outcome
 				var:outcome = flag:heal
 			}
@@ -619,7 +577,7 @@ pod_combat_log_morale_damage_rider_visible_value = {
 		limit = {
 			has_variable = morale_damage_amount
 			var:morale_damage_amount > 0
-			NOT = {
+			NAND = {
 				has_variable = outcome
 				var:outcome = flag:morale_damage
 			}
@@ -636,7 +594,7 @@ pod_combat_log_morale_heal_rider_visible_value = {
 		limit = {
 			has_variable = morale_heal_amount
 			var:morale_heal_amount > 0
-			NOT = {
+			NAND = {
 				has_variable = outcome
 				var:outcome = flag:morale_healed
 			}
@@ -658,23 +616,39 @@ pod_combat_log_retal_rider_visible_value = {
 	}
 }
 
-# Buff rider would render content. Requires:
-#   - The row's move has at least one rider-eligible buff/stance/
-#     debuff/AP/retal-arm var (delegated to the move-side SV
-#     pod_combat_move_has_buff_rider_value).
-#   - This row isn't a subsequent AoE per-target row — move-level
-#     buffs apply ONCE per move, so the rider renders only on the
-#     first row of the burst (aoe_burst_index = 0) or on rows that
-#     aren't part of any burst (single-target moves have the var
-#     unset).
-pod_combat_log_buff_rider_visible_value = {
+
+# ─── Segment separator accumulators ────────────────────────────────
+# "Content exists before segment X" as a linked chain: each SV is the
+# previous segment's visible SV plus the previous accumulator. A
+# separator's visibility is then exactly two terms (own visible AND
+# before), so appending a segment never edits existing separators.
+# 0/1 sums, read through GreaterThan(0) - no cap needed.
+
+pod_combat_log_before_heal_value = {
+	value = pod_combat_log_main_has_content_value
+}
+pod_combat_log_before_morale_damage_value = {
+	value = pod_combat_log_heal_rider_visible_value
+	add = pod_combat_log_before_heal_value
+}
+pod_combat_log_before_morale_heal_value = {
+	value = pod_combat_log_morale_damage_rider_visible_value
+	add = pod_combat_log_before_morale_damage_value
+}
+pod_combat_log_before_retal_value = {
+	value = pod_combat_log_morale_heal_rider_visible_value
+	add = pod_combat_log_before_morale_heal_value
+}
+# ─── Recoil (self-damage) segment - outcome segment, entry scope ───
+# Renders the post-soak recoil the actor took from their own move.
+# Burst-gated like intent segments: recoil lands once per move, not
+# once per AoE target row.
+pod_combat_log_seg_recoil_visible_value = {
 	value = 0
 	if = {
 		limit = {
-			has_variable = move
-			var:move = {
-				pod_combat_move_has_buff_rider_value > 0
-			}
+			has_variable = self_damage
+			var:self_damage > 0
 			OR = {
 				NOT = { has_variable = aoe_burst_index }
 				var:aoe_burst_index = 0
@@ -684,6 +658,230 @@ pod_combat_log_buff_rider_visible_value = {
 	}
 }
 
+# ─── Intent segment visibility (entry scope) ───────────────────────
+# One SV per intent segment: the move defines the primitive AND this
+# row is the first of its AoE burst (move-level effects apply once).
+# Segment contract: docs/COMBAT_LOG_REFACTOR_DESIGN.md.
+pod_combat_log_seg_hit_tier_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				OR = {
+					has_variable = hit_buff_round_tier
+					has_variable = hit_buff_combat_tier
+					has_variable = hit_debuff_round_tier
+					has_variable = hit_debuff_combat_tier
+				}
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_soak_tier_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				OR = {
+					has_variable = soak_buff_round_tier
+					has_variable = soak_buff_combat_tier
+					has_variable = soak_debuff_round_tier
+					has_variable = soak_debuff_combat_tier
+				}
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_guard_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = set_guard
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_dodge_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = dodge
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_stealth_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = stealth
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_remove_guard_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = remove_guard
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_retal_armed_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				OR = {
+					has_variable = retaliate_if_hit
+					has_variable = retaliate_if_missed
+				}
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_ap_gain_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = ap_gain
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_ap_drain_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = ap_drain
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+pod_combat_log_seg_init_debuff_visible_value = {
+	value = 0
+	if = {
+		limit = {
+			has_variable = move
+			var:move = {
+				has_variable = initiative_debuff
+			}
+			OR = {
+				NOT = { has_variable = aoe_burst_index }
+				var:aoe_burst_index = 0
+			}
+		}
+	value = 1
+	}
+}
+
+# Before-accumulators for the intent segments, chained off the retal
+# rider (the last outcome segment).
+pod_combat_log_before_recoil_value = {
+	value = pod_combat_log_retal_rider_visible_value
+	add = pod_combat_log_before_retal_value
+}
+pod_combat_log_before_hit_tier_value = {
+	value = pod_combat_log_seg_recoil_visible_value
+	add = pod_combat_log_before_recoil_value
+}
+pod_combat_log_before_soak_tier_value = {
+	value = pod_combat_log_seg_hit_tier_visible_value
+	add = pod_combat_log_before_hit_tier_value
+}
+pod_combat_log_before_guard_value = {
+	value = pod_combat_log_seg_soak_tier_visible_value
+	add = pod_combat_log_before_soak_tier_value
+}
+pod_combat_log_before_dodge_value = {
+	value = pod_combat_log_seg_guard_visible_value
+	add = pod_combat_log_before_guard_value
+}
+pod_combat_log_before_stealth_value = {
+	value = pod_combat_log_seg_dodge_visible_value
+	add = pod_combat_log_before_dodge_value
+}
+pod_combat_log_before_remove_guard_value = {
+	value = pod_combat_log_seg_stealth_visible_value
+	add = pod_combat_log_before_stealth_value
+}
+pod_combat_log_before_retal_armed_value = {
+	value = pod_combat_log_seg_remove_guard_visible_value
+	add = pod_combat_log_before_remove_guard_value
+}
+pod_combat_log_before_ap_gain_value = {
+	value = pod_combat_log_seg_retal_armed_visible_value
+	add = pod_combat_log_before_retal_armed_value
+}
+pod_combat_log_before_ap_drain_value = {
+	value = pod_combat_log_seg_ap_gain_visible_value
+	add = pod_combat_log_before_ap_gain_value
+}
+pod_combat_log_before_init_debuff_value = {
+	value = pod_combat_log_seg_ap_drain_visible_value
+	add = pod_combat_log_before_ap_drain_value
+}
 # Loadout bookkeeping — counts the equipped moves per combat_category
 # and in total by iterating the character's pod_combat_loadout variable
 # list.
