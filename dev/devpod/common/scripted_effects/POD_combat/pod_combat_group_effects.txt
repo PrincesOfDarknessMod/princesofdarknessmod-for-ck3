@@ -1563,15 +1563,55 @@ pod_combat_process_group_turns_effect = {
 
 pod_combat_execute_ai_turn_effect = {
 
-	# Select target
+	save_scope_as = combat_host
+
+	# Mind control: detect a stolen turn before target selection. The resolve
+	# loop mirrors the mark-acted matcher at the bottom; the host flag gates
+	# the selector inversion here and the AI move filter's controlled-turn
+	# restrictions.
+	if = {
+		limit = { has_variable = pod_combat_current_actor_team }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				var:combat_team = scope:combat_host.var:pod_combat_current_actor_team
+				var:team_position = scope:combat_host.var:pod_combat_current_actor_position
+			}
+			if = {
+				limit = { has_variable = slot_controlled }
+				scope:combat_host = { set_variable = { name = pod_combat_turn_is_controlled value = 1 } }
+			}
+		}
+	}
+
+	# Select target. A controlled (dominated) actor picks from its OWN side
+	# this turn: the selector branch inverts, and everything downstream runs
+	# on (team, position) pointers, which are team-blind.
 	if = {
 		limit = { has_variable = pod_combat_current_actor_team var:pod_combat_current_actor_team = flag:player }
-		# Actor is on player team — target an enemy
-		pod_combat_ai_select_enemy_target_effect = yes
+		if = {
+			limit = { has_variable = pod_combat_turn_is_controlled }
+			pod_combat_ai_select_player_target_effect = yes
+		}
+		else = { pod_combat_ai_select_enemy_target_effect = yes }
 	}
 	else = {
-		# Actor is on enemy team — target a player
-		pod_combat_ai_select_player_target_effect = yes
+		if = {
+			limit = { has_variable = pod_combat_turn_is_controlled }
+			pod_combat_ai_select_enemy_target_effect = yes
+		}
+		else = { pod_combat_ai_select_player_target_effect = yes }
+	}
+
+	# A dominated sole survivor can only pick itself; the steal then fizzles
+	# into a lost turn rather than a self-strike.
+	if = {
+		limit = {
+			has_variable = pod_combat_turn_is_controlled
+			var:pod_combat_selected_target_team = var:pod_combat_current_actor_team
+			var:pod_combat_selected_target_position = var:pod_combat_current_actor_position
+		}
+		set_variable = { name = pod_combat_turn_control_fizzled value = 1 }
 	}
 
 	# Load workspace (actor -> actor workspace, target -> target workspace)
@@ -1581,8 +1621,21 @@ pod_combat_execute_ai_turn_effect = {
 	set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
 	pod_combat_apply_ap_drain_effect = yes
 
-	# Run AI moves (uses existing pod_combat_ai_take_turn_effect which reads from workspace)
-	pod_combat_ai_take_turn_effect = yes
+	# Run AI moves (uses existing pod_combat_ai_take_turn_effect which reads
+	# from workspace). A fizzled stolen turn skips the moves entirely.
+	if = {
+		limit = { has_variable = pod_combat_turn_control_fizzled }
+		var:pod_combat_actor_char = { save_scope_as = mind_log_victim }
+		pod_combat_push_mind_log_effect = { MESSAGE_KEY = mind_fizzle }
+	}
+	else = {
+		if = {
+			limit = { has_variable = pod_combat_turn_is_controlled }
+			var:pod_combat_actor_char = { save_scope_as = mind_log_victim }
+			pod_combat_push_mind_log_effect = { MESSAGE_KEY = mind_betrayal }
+		}
+		pod_combat_ai_take_turn_effect = yes
+	}
 
 	# Save workspace back to slots
 	pod_combat_save_workspace_effect = yes
@@ -1598,8 +1651,16 @@ pod_combat_execute_ai_turn_effect = {
 				var:team_position = scope:host.var:pod_combat_current_actor_position
 			}
 			set_variable = { name = slot_has_acted value = 1 }
+			# One stolen turn exactly: the control marker dies with the turn
+			# it consumed, fizzled or not.
+			if = {
+				limit = { scope:host = { has_variable = pod_combat_turn_is_controlled } }
+				remove_variable = slot_controlled
+			}
 		}
 	}
+	remove_variable = pod_combat_turn_is_controlled
+	remove_variable = pod_combat_turn_control_fizzled
 
 	# Check victory
 	pod_combat_check_group_victory_effect = yes
