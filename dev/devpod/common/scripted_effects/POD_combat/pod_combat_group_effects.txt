@@ -211,6 +211,90 @@ pod_combat_load_target_from_story_effect = {
 }
 
 ##############################################################################################
+# SECTION 1b: KO MARKER + ALLY-DOWN MORALE SHOCK
+# The single alive->down transition point. Every in-combat KO flip site calls
+# pod_combat_mark_slot_ko_effect instead of writing slot_alive directly, so the
+# per-KO side effect (the ally-down morale shock) fires exactly once even though
+# several sites can re-detect the same KO. The init-time roster correction in
+# POD_combat_finalize_duel_effect keeps a bare flip on purpose: a combatant who
+# walks in already KO'd never fell mid-fight, so no shock and no log row.
+##############################################################################################
+
+# Scope = a slot story whose KO condition the caller has already verified
+# (pod_combat_slot_should_be_marked_ko_trigger). The var:slot_alive = 1 gate
+# makes the flip a real transition: re-detections on an already-down slot are
+# no-ops. Caller contract: scope:host = the workspace owner (PC), as for the
+# load/save helpers (the teammate walk and the log push re-enter it).
+pod_combat_mark_slot_ko_effect = {
+	if = {
+		limit = { var:slot_alive = 1 }
+		set_variable = { name = slot_alive value = 0 }
+		# Ally-down morale shock: every still-living teammate loses
+		# pod_combat_ally_down_morale_penalty morale, floored at 1. Morale 0 is
+		# itself a KO source, so the floor both keeps the design rule (an ally
+		# falling demoralizes but never breaks you outright) and guarantees the
+		# shock can never trigger a KO of its own.
+		save_scope_as = ally_down_slot
+		var:slot_char = { save_scope_as = ally_down_char }
+		set_variable = { name = pod_combat_ally_shock_hits value = 0 }
+		# Literal team dispatch: combat_team is a flag var, so the teammate
+		# filter compares literals through the parametric helper instead of
+		# lifting the flag (lifted flags degrade to 'value' type and every
+		# later flag compare silently type-errors).
+		if = {
+			limit = { var:combat_team = flag:player }
+			pod_combat_ally_down_shock_team_helper = { TEAM = player }
+		}
+		else = {
+			pod_combat_ally_down_shock_team_helper = { TEAM = enemy }
+		}
+		# Lift the hit count into a scope value (numbers survive that fine) and
+		# clear the scratch var BEFORE the host re-entry, keeping this body
+		# "slot-local writes first, scope switches last" like the DoT tick loop.
+		save_scope_value_as = { name = ally_shock_hits value = var:pod_combat_ally_shock_hits }
+		remove_variable = pod_combat_ally_shock_hits
+		# One system row per KO that actually shook somebody. In a 1v1 (or when
+		# every teammate already sits at the floor) nothing happened, so no row.
+		if = {
+			limit = { scope:ally_shock_hits > 0 }
+			scope:host = {
+				pod_combat_push_system_log_named_effect = { MESSAGE_KEY = ally_down_shock CHARACTER = scope:ally_down_char }
+			}
+		}
+	}
+}
+
+# Teammate walk for the marker above. $TEAM$ = player|enemy (literal). The
+# downed slot is already flipped, so the alive filter excludes it without a
+# self-check. Caller scope is the downed SLOT STORY, but pod_combat_active_slots
+# lives on the HOST, so the walk must re-enter scope:host first: a list read off
+# a scope that lacks it iterates zero times with no error.
+pod_combat_ally_down_shock_team_helper = {
+	scope:host = {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				var:combat_team = flag:$TEAM$
+				pod_combat_slot_is_alive_trigger = yes
+			}
+			pod_combat_apply_ally_down_shock_to_slot_effect = yes
+		}
+	}
+}
+
+# Per-teammate shock body (scope = a living teammate slot story). At 1 morale
+# there is nothing left to take, so the slot does not count as hit. The
+# scope:ally_down_slot counter bump lives inside this call so the teammate
+# loop's iteration scope never sees an inline scope switch.
+pod_combat_apply_ally_down_shock_to_slot_effect = {
+	if = {
+		limit = { var:slot_morale > 1 }
+		set_variable = { name = slot_morale value = { value = var:slot_morale subtract = pod_combat_ally_down_morale_penalty min = 1 } }
+		scope:ally_down_slot = { change_variable = { name = pod_combat_ally_shock_hits add = 1 } }
+	}
+}
+
+##############################################################################################
 # SECTION 2: WORKSPACE SAVE EFFECTS
 # Two effects that copy the actor or target workspace back into a slot story.
 ##############################################################################################
@@ -232,10 +316,11 @@ pod_combat_save_side_to_story_helper = {
 		# Flush post-action morale to the slot FIRST so the shared KO trigger reads it.
 		set_variable = { name = slot_morale value = scope:host.var:pod_combat_$SIDE$_morale }
 		# Alive-flip on any KO condition, both sides, via the shared
-		# pod_combat_slot_should_be_marked_ko_trigger (4 KO sources documented there).
+		# pod_combat_slot_should_be_marked_ko_trigger (4 KO sources documented
+		# there). The marker owns the transition gate + ally-down shock (§1b).
 		if = {
 			limit = { pod_combat_slot_should_be_marked_ko_trigger = yes }
-			set_variable = { name = slot_alive value = 0 }
+			pod_combat_mark_slot_ko_effect = yes
 		}
 		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_$SIDE$_soak }
 		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_$SIDE$_base_soak }
@@ -381,7 +466,7 @@ pod_combat_aoe_check_target_alive_effect = {
 		limit = {
 			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
-		set_variable = { name = slot_alive value = 0 }
+		pod_combat_mark_slot_ko_effect = yes
 	}
 }
 
@@ -524,7 +609,7 @@ pod_combat_save_workspace_effect = {
 			var:team_position = scope:host.var:pod_combat_selected_target_position
 			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
-		set_variable = { name = slot_alive value = 0 }
+		pod_combat_mark_slot_ko_effect = yes
 	}
 
 	# KO check on the actor: counter / retaliation damage can finish them off.
@@ -537,7 +622,7 @@ pod_combat_save_workspace_effect = {
 			var:team_position = scope:host.var:pod_combat_current_actor_position
 			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
-		set_variable = { name = slot_alive value = 0 }
+		pod_combat_mark_slot_ko_effect = yes
 	}
 
 	# Victory check at the post-flush boundary (slot vars are fresh). One of
@@ -937,6 +1022,9 @@ POD_combat_finalize_duel_effect = {
 	# live, so a combatant who walks in already KO'd (filled track, torpor,
 	# morale-broken, scripted incap) would be marked alive. Apply the shared KO
 	# predicate, then victory-check so a one-sided start resolves immediately.
+	# Deliberately a bare flip, NOT pod_combat_mark_slot_ko_effect: this is a
+	# pre-fight roster correction, the combatant never fell mid-fight, so no
+	# ally-down shock and no log row (which would land before "Combat begins").
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -1072,8 +1160,9 @@ pod_combat_recalc_pc_hit_chance_effect = {
 	# effect name encodes that contract.
 	#
 	# Round-duration tiers carry over (they expire at round end, not on
-	# target swap). Stealth's +30 is a separate mechanic outside the
-	# tier system and is handled by its own consume paths.
+	# target swap). Stealth's hit bonus (pod_combat_stealth_hit_bonus) is a
+	# separate mechanic outside the tier system and is handled by its own
+	# consume paths.
 	if = {
 		limit = {
 			has_variable = pod_combat_actor_prowess
@@ -1833,7 +1922,7 @@ pod_combat_tick_dots_effect = {
 			var:slot_alive = 1
 			pod_combat_slot_should_be_marked_ko_trigger = yes
 		}
-		set_variable = { name = slot_alive value = 0 }
+		pod_combat_mark_slot_ko_effect = yes
 	}
 	pod_combat_check_group_victory_effect = yes
 }
