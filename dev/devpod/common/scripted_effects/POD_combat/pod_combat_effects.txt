@@ -245,7 +245,7 @@ pod_combat_apply_retaliation_helper = {
 
 pod_combat_deal_typed_retal_damage_effect = {
 	# Sourced retaliation: map the $KIND_VAR$ source flag to a PoD death_reason and
-	# deal it bypass-guard (the reflex path). Mirrors POD_combat_dispatch_by_source
+	# deal it bypass-guard (the reflex path). Mirrors pod_combat_dispatch_by_source
 	# (identity in 7 of 8; holy -> true_faith). Aggravated-ness comes from the source's
 	# PoD weakness mapping, so no separate agg flag is needed here.
 	# $TARGET_SIDE$ = who takes the counter. $AMOUNT$ = pre-soak amount.
@@ -520,7 +520,7 @@ pod_combat_push_ap_drain_log_effect = {
 pod_combat_route_to_pod_damage = {
 	# $TARGET_SIDE$ = "actor" or "target"
 	# $REASON$ = death_reason suffix (no "death_" prefix). Routed values
-	#            map lives in POD_combat_dispatch_by_source
+	#            map lives in pod_combat_dispatch_by_source
 	#            (pod_combat_move_effects.txt).
 	# $COUNT$ = raw damage (PoD multiplies by splat weakness + soak roll).
 	#
@@ -1144,6 +1144,11 @@ pod_combat_auto_resolve_effect = {
 #   outcome / attack_result / retal_fired
 #                         - three-axis flag model (see COMBAT_REFERENCE.info
 #                            §4; dispatch tables in pod_combat_log_custom_loc.txt).
+#   seg_<x>_on / seg_<x>_sep
+#                         - segment visibility / separator marks baked once
+#                            at push (bake banner inside push_log); the
+#                            pod_combat_log_*_visible_value / _before_* SVs
+#                            are thin reads of these.
 #
 # Entries are PREPENDED - push_log rebuilds the list to insert each new
 # row at the FRONT so the GUI datamodel renders newest-first without
@@ -1343,6 +1348,256 @@ pod_combat_push_log_effect = {
 			}
 			set_variable = { name = retal_source value = scope:combat_host.var:pod_combat_last_retal_source }
 		}
+		# ── Segment-visibility bake ──────────────────────────────────
+		# Entry / move vars are immutable once this row is pushed, so each
+		# result-column segment's visibility is decided HERE, once, instead
+		# of per UI tick. Written in display order:
+		#   seg_<x>_on  = 1  ->  the segment renders content
+		#   seg_<x>_sep = 1  ->  a separator precedes it (segment renders
+		#                        AND the head or an earlier segment did)
+		# The pod_combat_log_*_visible_value / pod_combat_log_before_<x>_value
+		# SVs in pod_combat_values.txt are thin has_variable reads of these
+		# vars. Rows that skip this bake (system / DoT / mind / daze rows)
+		# carry no seg vars and read as all-invisible, same as before.
+		#   - heal / morale riders: amount captured and > 0, NAND outcome
+		#     equals the segment's primary (NAND, not NOT: outcome is always
+		#     stamped above, so a multi-child NOT (= NOR) would be
+		#     permanently false and silently kill the rider).
+		#   - retal rider: retal_fired overlay present, never suppressed.
+		#   - recoil + intent segments: burst-gated via the shared trigger
+		#     (entry's aoe_burst_index was captured above) so move-level
+		#     lines render once per AoE burst, not once per target row.
+		# seg_bake_prior is the running "any earlier content" counter; the
+		# head counts unless outcome=utility (its loc renders "").
+		if = {
+			limit = { NOT = { var:outcome = flag:utility } }
+			set_variable = { name = seg_bake_prior value = 1 }
+		}
+		else = {
+			set_variable = { name = seg_bake_prior value = 0 }
+		}
+		if = {
+			limit = {
+				has_variable = heal_amount
+				var:heal_amount > 0
+				NAND = {
+					has_variable = outcome
+					var:outcome = flag:heal
+				}
+			}
+			set_variable = { name = seg_heal_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_heal_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = morale_damage_amount
+				var:morale_damage_amount > 0
+				NAND = {
+					has_variable = outcome
+					var:outcome = flag:morale_damage
+				}
+			}
+			set_variable = { name = seg_morale_damage_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_morale_damage_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = morale_heal_amount
+				var:morale_heal_amount > 0
+				NAND = {
+					has_variable = outcome
+					var:outcome = flag:morale_healed
+				}
+			}
+			set_variable = { name = seg_morale_heal_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_morale_heal_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = { has_variable = retal_fired }
+			set_variable = { name = seg_retal_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_retal_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = self_damage
+				var:self_damage > 0
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_recoil_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_recoil_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = {
+					OR = {
+						has_variable = hit_buff_round_tier
+						has_variable = hit_buff_combat_tier
+						has_variable = hit_debuff_round_tier
+						has_variable = hit_debuff_combat_tier
+					}
+				}
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_hit_tier_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_hit_tier_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = {
+					OR = {
+						has_variable = soak_buff_round_tier
+						has_variable = soak_buff_combat_tier
+						has_variable = soak_debuff_round_tier
+						has_variable = soak_debuff_combat_tier
+					}
+				}
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_soak_tier_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_soak_tier_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = set_guard }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_guard_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_guard_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = dodge }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_dodge_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_dodge_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = stealth }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_stealth_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_stealth_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = remove_guard }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_remove_guard_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_remove_guard_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = {
+					OR = {
+						has_variable = retaliate_if_hit
+						has_variable = retaliate_if_missed
+					}
+				}
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_retal_armed_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_retal_armed_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = ap_gain }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_ap_gain_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_ap_gain_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = ap_drain }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_ap_drain_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_ap_drain_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = initiative_debuff }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_init_debuff_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_init_debuff_sep value = 1 }
+			}
+			# Kept on the last segment too: appending a new segment stays a
+			# pure block copy.
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		remove_variable = seg_bake_prior
 	}
 	pod_combat_prepend_capped_log_entry_effect = yes
 

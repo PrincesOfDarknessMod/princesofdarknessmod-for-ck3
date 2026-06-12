@@ -174,7 +174,11 @@ pod_combat_ai_select_and_execute_move_effect = {
 				limit = {
 					save_temporary_scope_as = ai_candidate_move
 					scope:combat_host = {
-						POD_can_execute_combat_move = {
+						# Dynamic-only validation: loadout membership already
+						# proves the unlock (seeded through the dispatcher at
+						# fight finalize / mid-fight seat), so skip the
+						# generated unlock switch per candidate.
+						pod_combat_move_is_usable_now_trigger = {
 							STORY = scope:ai_candidate_move
 							ACTOR = scope:ai_actor
 						}
@@ -203,25 +207,16 @@ pod_combat_ai_select_and_execute_move_effect = {
 							}
 						}
 
-						# Redundancy guard — skip a buff/debuff/stance
-						# move whose effect is already active at or above
-						# what it would apply (else the AI re-casts it for
-						# no state change). Strict `<` so a higher tier can
-						# still upgrade a lower stack but not vice-versa. No
-						# damaging move carries a tier/stance rider, so
-						# excluding pure buff/debuff/stance strands nothing.
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = soak_buff_round_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = soak_buff_combat_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = hit_buff_round_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = hit_buff_combat_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = soak_debuff_round_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = soak_debuff_combat_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = hit_debuff_round_tier }
-						pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = hit_debuff_combat_tier }
+						# Tier / stance / heal redundancy guards live in
+						# pod_combat_move_is_usable_now_trigger (shared with
+						# the PC validator); only AI-specific gates are inline.
 						# Pure-heal redundancy — drop a heal-only move (heal
 						# but no damage; lifesteal hybrids stay) when none of
 						# its heals can do anything on the actor's current
-						# state. Keep-condition mirrors the heal-when-hurt
+						# state. AI-specific: broader limit than the
+						# validator's self-targeting-only heal gate (covers
+						# every targeting mode except single_ally), so NOT a
+						# duplicate. Keep-condition mirrors the heal-when-hurt
 						# weight modifiers below.
 						trigger_if = {
 							limit = {
@@ -234,7 +229,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 									NOT = { has_variable = morale_damage }
 									# single_ally heals depend on the ALLY's state, not
 									# the actor's — they gate on ally-need in
-									# POD_can_execute_combat_move instead.
+									# pod_combat_move_is_usable_now_trigger instead.
 									NOT = { var:targeting = flag:single_ally }
 								}
 							}
@@ -261,27 +256,6 @@ pod_combat_ai_select_and_execute_move_effect = {
 									var:pod_combat_actor_morale < pod_combat_max_morale
 								}
 							}
-						}
-						# Self stance flags (presence-only, no tier).
-						NAND = {
-							scope:ai_candidate_move = { has_variable = set_guard }
-							has_variable = pod_combat_actor_is_guarding
-						}
-						NAND = {
-							scope:ai_candidate_move = { has_variable = dodge }
-							has_variable = pod_combat_actor_is_dodging
-						}
-						NAND = {
-							scope:ai_candidate_move = { has_variable = stealth }
-							has_variable = pod_combat_actor_is_stealthed
-						}
-						NAND = {
-							scope:ai_candidate_move = { has_variable = retaliate_if_hit }
-							has_variable = pod_combat_actor_retaliate_hit
-						}
-						NAND = {
-							scope:ai_candidate_move = { has_variable = retaliate_if_missed }
-							has_variable = pod_combat_actor_retaliate_miss
 						}
 					}
 				}
@@ -635,15 +609,16 @@ pod_combat_ai_select_and_execute_move_effect = {
 			limit = {
 				exists = scope:chosen_move
 				scope:combat_host = {
-					POD_can_execute_combat_move = {
+					# Dynamic-only recheck: same unlock proof as the selector limit.
+					pod_combat_move_is_usable_now_trigger = {
 						STORY = scope:chosen_move
 						ACTOR = scope:ai_actor
 					}
 				}
 			}
-			POD_combat_ai_swap_for_story     = { STORY = scope:chosen_move }
+			pod_combat_ai_swap_for_story     = { STORY = scope:chosen_move }
 			POD_execute_combat_move           = { STORY = scope:chosen_move }
-			POD_combat_ai_restore_after_move = { STORY = scope:chosen_move }
+			pod_combat_ai_restore_after_move = { STORY = scope:chosen_move }
 
 			# Record anti-repetition only after the move actually executed
 			# (inside the same gate), else a stale chosen_move would pollute
@@ -674,14 +649,17 @@ pod_combat_ai_select_and_execute_move_effect = {
 }
 
 pod_combat_ai_ensure_loadout_effect = {
-	# AI loadouts are TRANSIENT per fight: cleared at slot init and combat
-	# cleanup, seeded here on the first turn (empty → POD_apply_ai_full_loadout,
-	# then count>0 no-ops). AI gets its full trait-appropriate repertoire
-	# (no 4-per-category cap). Two-stage gate: STATIC trait/splat/perk reqs
-	# filtered at seed time inside POD_apply_ai_full_loadout (perf); DYNAMIC
-	# AP/energy/stance checks run per-pick in the selector. PCs are seeded by
-	# the configure decision and skip the slot-init clear (slot 0), so their
-	# equipped list survives.
+	# Empty-list BACKSTOP only; primary seeding is eager, at fight setup
+	# (POD_combat_finalize_duel_effect, after the fera warform pre-pass) and
+	# at mid-fight seat (pod_combat_init_one_midfight_slot_effect). AI
+	# loadouts are TRANSIENT per fight (cleared at slot init and combat
+	# cleanup); if a path reaches the selector unseeded anyway, seed here
+	# (count>0 no-ops). AI gets its full trait-appropriate repertoire (no
+	# 4-per-category cap). Seeding always filters through the unlock
+	# dispatcher (POD_apply_ai_full_loadout), which is what lets the
+	# selector validate picks with the dynamic-only trigger. PCs are seeded
+	# by the configure decision and skip the slot-init clear (slot 0), so
+	# their equipped list survives.
 	if = {
 		limit = {
 			has_variable = pod_combat_actor_char
@@ -695,7 +673,7 @@ pod_combat_ai_ensure_loadout_effect = {
 	}
 }
 
-POD_combat_ai_swap_for_story = {
+pod_combat_ai_swap_for_story = {
 	# $STORY$ = the chosen move. Only single_ally / single_pc need a
 	# target swap; other modes keep the turn-start enemy or self-iterate.
 	if = {
@@ -709,7 +687,7 @@ POD_combat_ai_swap_for_story = {
 	# else: no swap (AoE modes iterate slots in the execution engine).
 }
 
-POD_combat_ai_restore_after_move = {
+pod_combat_ai_restore_after_move = {
 	# $STORY$ = the chosen move. Undoes the swap so the next action aims
 	# at the turn-start enemy again. Both swaps save the enemy target, so
 	# gating on its presence is a safe blanket restore.
