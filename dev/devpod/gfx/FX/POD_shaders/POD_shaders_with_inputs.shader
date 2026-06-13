@@ -658,6 +658,126 @@ PixelShader =
 			}
 		]]
 	}
+
+	MainCode PS_PODHeartblood
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// Blood pumping through a heart. A churning, domain-warped field of
+			// blood is driven by a "lub-dub" cardiac envelope that (1) flushes the
+			// whole field brighter on each contraction, (2) drives an expanding
+			// pressure ring outward from the core, and (3) advects the flow radially
+			// outward so the blood reads as being pumped away from the centre.
+
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float rand(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
+			}
+
+			float noise(float2 n) {
+				const float2 d = float2(0.0, 1.0);
+				float2 b = floor(n), f = smoothstep(float2(0.0,0.0), float2(1.0,1.0), frac(n));
+				return lerp(lerp(rand(b), rand(b + d.yx), f.x), lerp(rand(b + d.xy), rand(b + d.yy), f.x), f.y);
+			}
+
+			float fbm(float2 n) {
+				float total = 0.0, amplitude = 1.0;
+				for (int i = 0; i < 5; i++) {
+					total += noise(n) * amplitude;
+					n = n * 2.0 + 17.0;
+					amplitude *= 0.5;
+				}
+				return total;
+			}
+
+			// The cardiac cycle as a normalized [0,1] envelope: a tall systolic
+			// "lub" thump followed closely by a shorter diastolic "dub", then a
+			// long quiet refill. Built from gaussians (not pow, which is undefined
+			// for a negative base in HLSL) so the squared term is an explicit a*a.
+			float heartbeat(float t) {
+				float x = frac(t);
+				float a = (x - 0.12) * 7.0;
+				float b = (x - 0.30) * 9.0;
+				float lub = exp(-a * a);
+				float dub = 0.55 * exp(-b * b);
+				return saturate(lub + dub);
+			}
+
+			PDX_MAIN
+			{
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y; // UVs are upside down in ck3
+
+				// Aspect-correct coordinates centred on the heart.
+				float2 p = 2.0 * uv - 1.0;
+				p.x *= SpriteSize.x / SpriteSize.y;
+
+				float speed    = SpriteBorder[0].x; // spriteborder_left   (heart rate / flow speed)
+				float zoom     = SpriteBorder[0].y; // spriteborder_top    (vessel scale)
+				float pulseAmp = SpriteBorder[0].z; // spriteborder_right  (contraction strength)
+				float gradient = SpriteBorder[0].w; // spriteborder_bottom (radial edge falloff)
+				// Sensible fallbacks so the effect still animates if a widget leaves
+				// the spriteborder params at zero.
+				if (speed    <= 0.0) speed    = 1.0;
+				if (zoom     <= 0.0) zoom     = 3.0;
+				if (pulseAmp <= 0.0) pulseAmp = 1.0;
+
+				float time = GuiTime * speed;
+				float beat = heartbeat(time);
+
+				float radius = length(p);
+				float2 dir = radius > 0.001 ? p / radius : float2(0.0, 1.0);
+
+				// Systole squeezes the field inward; meanwhile the pattern drifts
+				// steadily outward and lurches further on each beat, so the blood
+				// looks driven out from the core rather than merely scrolling.
+				float squeeze = 1.0 - beat * 0.15 * pulseAmp;
+				float2 flow = p * zoom * squeeze - dir * (time * 0.25 + beat * 0.6 * pulseAmp);
+
+				// Domain warp churns the blood instead of letting it slide flat.
+				float2 q = float2(fbm(flow + time * 0.15),
+								  fbm(flow + float2(5.2, 1.3) - time * 0.10));
+				float turb = fbm(flow + 2.0 * q);
+
+				// Expanding pressure ring, born at the core on every contraction
+				// and decaying with distance.
+				float wave = 0.5 + 0.5 * sin(radius * 13.0 - time * 6.2831);
+				float pressure = wave * beat * exp(-radius * 1.6) * pulseAmp;
+
+				float density = saturate(turb * 0.7 + pressure + beat * 0.2 * pulseAmp);
+
+				float3 venous   = SpriteModifyTexturesColors[1].rgb; // dark, deoxygenated
+				float3 arterial = SpriteModifyTexturesColors[2].rgb; // bright arterial surge
+				// Fall back to a blood palette if the widget supplied no colours.
+				if (dot(venous, venous) + dot(arterial, arterial) <= 0.0001) {
+					venous   = float3(0.18, 0.01, 0.02);
+					arterial = float3(0.75, 0.04, 0.06);
+				}
+				const float3 highlight = float3(1.0, 0.35, 0.28);
+
+				float3 col = lerp(venous, arterial, density);
+				col = lerp(col, highlight, saturate(pressure * 1.4)); // bright crest of each surge
+
+				// Contain the mass with a soft radial vignette.
+				float vig = saturate(1.0 - radius * 0.55);
+				col *= lerp(1.0, vig, gradient);
+
+				float alpha = SampleImageSprite(Texture, Input.UV0).a;
+				alpha = lerp(alpha, alpha * vig, gradient);
+
+				#ifdef DISABLED
+					col = DisableColor( col );
+				#endif
+
+				return float4(col, alpha);
+			}
+		]]
+	}
 }
 
 BlendState BlendState
@@ -817,5 +937,18 @@ Effect PODGigerDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_PODGiger"
+	Defines = { "DISABLED" }
+}
+
+Effect PODHeartblood
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODHeartblood"
+}
+
+Effect PODHeartbloodDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODHeartblood"
 	Defines = { "DISABLED" }
 }

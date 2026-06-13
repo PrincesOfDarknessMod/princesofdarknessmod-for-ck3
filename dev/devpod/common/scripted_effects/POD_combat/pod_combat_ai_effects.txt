@@ -82,6 +82,324 @@
 @ai_thresh_mor_finish_mid  = 4    # target morale ≤ this → mor_finish_mid fires
 @ai_thresh_finish_morale   = 2    # mor_finish_mid also requires morale_damage ≥ this
 
+# ─────────────────────────────────────────────────────────────
+# PERSONALITY + PRIMITIVE-SITUATIONAL CONSTANTS
+# ─────────────────────────────────────────────────────────────
+# Personality bias magnitudes, consumed by pod_combat_apply_personality_profile_effect
+# (the precompute) and the PERSONALITY BAND read-modifiers. Pre-clamp per-trait
+# contributions; cross-axis sums are bounded by the @ai_pers_clamp_* values below.
+@ai_pers_aggressive     = 8
+@ai_pers_bold           = 8
+@ai_pers_savage         = 5
+@ai_pers_defensive      = 8
+@ai_pers_timid          = 10
+@ai_pers_passive        = 5
+@ai_pers_dominating     = 8
+@ai_pers_cruel          = 8
+@ai_pers_cruel_light    = 3
+@ai_pers_wary           = 8
+@ai_pers_disciplined    = 5
+@ai_pers_reckless       = 5
+@ai_pers_guile          = 5
+
+# Cross-axis post-sum clamp bounds (symmetric: var clamped to [-N, +N]).
+# Negated twins are precomputed defines (CK3 has no clamp_variable, and the
+# negative-bound compares/writes need a literal, not inline use-site math).
+@ai_pers_clamp_dot      = 8
+@ai_pers_clamp_control  = 10
+@ai_pers_clamp_savage   = 8
+@ai_pers_clamp_dot_neg      = @[ai_pers_clamp_dot * -1]
+@ai_pers_clamp_control_neg  = @[ai_pers_clamp_control * -1]
+@ai_pers_clamp_savage_neg   = @[ai_pers_clamp_savage * -1]
+
+# Category post-sum clamp bound (atk/def/ctl/pwr). Opposed-pair exclusivity
+# bounds a single pair, but unrelated compatible ATK-positive traits all
+# co-exist (CK3 has no 3-trait cap), so the worst compatible stack reaches
+# ~+76 unclamped - enough to swamp the +30 heal-need incentive and let a
+# dying aggressive AI fight to its own death. A dying
+# actor's heal (DEF, +@ai_heal_needed) must beat the best non-finishing
+# ATK move: with category defaults that is (8 + 30 - C) > (15 + C), i.e.
+# C < 11.5. Clamp at 10 for a +3 margin even on a max-aggressive build,
+# while a single strong trait (timid +10, bold/aggressive +8) still reads
+# in full.
+@ai_pers_clamp_cat      = 10
+@ai_pers_clamp_cat_neg      = @[ai_pers_clamp_cat * -1]
+
+# Primitive situational weights (DoT / mind control / stun / summon / retaliate).
+@ai_dot_healthy_target    = 10   # DoT vs a target with boxes to burn
+@ai_dot_overkill_penalty  = -10  # DoT ramp-up wasted on a near-dead target
+@ai_mind_control_value    = 15   # dominate a dominatable AI
+@ai_stun_value            = 14   # full stun (ap_drain ≥ @ai_thresh_stun) vs AI
+@ai_ap_drain_value        = 6    # partial ap_drain vs AI (flat, no target-AP read)
+@ai_summon_outnumbered    = 12   # summon while down a teammate (KO'd same-team slot)
+@ai_retaliate_when_exposed = 10  # arm a retaliation while hp < max
+
+# Personality/primitive thresholds.
+@ai_thresh_dot_healthy  = 4    # DoT bonus needs target empty_damage_boxes ≥ this
+@ai_thresh_stun         = 6    # ap_drain ≥ this counts as a full stun (vs partial)
+
+
+# Per-actor personality precompute.
+# Runs ONCE per combat on scope:ai_actor (the acting NPC), writing the seven bias
+# vars the PERSONALITY BAND reads at candidate-scoring time. Cleared at the
+# AI-character cleanup site (slot init + group teardown), NOT host teardown.
+#
+# Contract: seed all seven biases to 0, sum per-trait contributions, then clamp
+# LAST. The three cross-axis vars (_dot/_control/_savage) clamp because multiple
+# compatible traits write them (e.g. sadistic + ambitious both writing _control);
+# the four category vars clamp because many opposed-pair-independent traits stack
+# them (~+76 worst-case ATK unclamped). See @ai_pers_clamp_cat for why that would
+# otherwise let a dying aggressive AI skip the heal. Magnitudes are the @ai_pers_*
+# constants in the tuning header.
+pod_combat_apply_personality_profile_effect = {
+	# Seed all seven biases to 0 -> branch-free, safe reads in the weight block.
+	set_variable = { name = pod_combat_pers_bias_atk     value = 0 }
+	set_variable = { name = pod_combat_pers_bias_def     value = 0 }
+	set_variable = { name = pod_combat_pers_bias_ctl     value = 0 }
+	set_variable = { name = pod_combat_pers_bias_pwr     value = 0 }
+	set_variable = { name = pod_combat_pers_bias_dot     value = 0 }
+	set_variable = { name = pod_combat_pers_bias_control value = 0 }
+	set_variable = { name = pod_combat_pers_bias_savage  value = 0 }
+
+	# Opposed-pair traits are mutually exclusive, so the wrathful/calm and
+	# brave/craven contradictions can't co-occur on one character.
+	# wrathful: berserker - presses damage, savors aggravated + DoT, scorns defense.
+	if = {
+		limit = { has_trait = wrathful }
+		change_variable = { name = pod_combat_pers_bias_atk    add = @ai_pers_aggressive }
+		change_variable = { name = pod_combat_pers_bias_savage add = @ai_pers_savage }
+		change_variable = { name = pod_combat_pers_bias_dot    add = @ai_pers_savage }
+		change_variable = { name = pod_combat_pers_bias_def    subtract = @ai_pers_defensive }
+	}
+	# calm: disciplined - stances/buffs and measured control, no berserk lunge.
+	if = {
+		limit = { has_trait = calm }
+		change_variable = { name = pod_combat_pers_bias_def    add = @ai_pers_defensive }
+		change_variable = { name = pod_combat_pers_bias_ctl    add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_savage subtract = @ai_pers_savage }
+	}
+	# brave: frontline - presses ATK, won't skulk. The DEF lean is category-wide
+	# (the mechanism can't single out disengage stances); a brave actor still
+	# heals when truly hurt (the heal-need gate is untouched by personality).
+	if = {
+		limit = { has_trait = brave }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_bold }
+		change_variable = { name = pod_combat_pers_bias_def subtract = @ai_pers_bold }
+	}
+	# craven: marquee turtle - hoards guard/dodge/heal, flees damage.
+	if = {
+		limit = { has_trait = craven }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_timid }
+		change_variable = { name = pod_combat_pers_bias_atk subtract = @ai_pers_timid }
+	}
+	# sadistic: cruelty - DoT + domination + morale-break. The morale-break lean
+	# rides the _ctl bias rather than a dedicated axis (morale-attack moves are
+	# CTL category), so no separate morale var is needed.
+	if = {
+		limit = { has_trait = sadistic }
+		change_variable = { name = pod_combat_pers_bias_dot     add = @ai_pers_cruel }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_cruel }
+		change_variable = { name = pod_combat_pers_bias_ctl     add = @ai_pers_cruel }
+	}
+	# ambitious: dominator - control plays (mind_control/ap_drain) + ATK pressure.
+	if = {
+		limit = { has_trait = ambitious }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_dominating }
+		change_variable = { name = pod_combat_pers_bias_ctl     add = @ai_pers_dominating }
+		change_variable = { name = pod_combat_pers_bias_atk     add = @ai_pers_bold }
+	}
+
+	# content: disengaged - mild defense, reluctant to escalate.
+	if = {
+		limit = { has_trait = content }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_passive }
+		change_variable = { name = pod_combat_pers_bias_atk subtract = @ai_pers_passive }
+	}
+	# arbitrary: tyrant - control + morale-break. Morale-break rides _ctl (morale
+	# moves are CTL category), same as sadistic; no dedicated morale axis.
+	if = {
+		limit = { has_trait = arbitrary }
+		change_variable = { name = pod_combat_pers_bias_ctl     add = @ai_pers_dominating }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_dominating }
+	}
+	# just: lawful - straightforward ATK, no underhanded control.
+	if = {
+		limit = { has_trait = just }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_ctl subtract = @ai_pers_disciplined }
+	}
+	# compassionate: reluctant - mild defense, avoids cruelty primitives.
+	if = {
+		limit = { has_trait = compassionate }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_passive }
+		change_variable = { name = pod_combat_pers_bias_dot subtract = @ai_pers_passive }
+	}
+	# callous: efficient lethality - kills rather than savors. Control routes to
+	# _control (not _ctl) so the band de-dup and clamp apply.
+	if = {
+		limit = { has_trait = callous }
+		change_variable = { name = pod_combat_pers_bias_atk     add = @ai_pers_aggressive }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_cruel_light }
+	}
+	# vengeful: hunter - ATK + DoT pursuit. The DEF lean is category-wide ("disengage
+	# only" isn't expressible), same as brave; the finish gate already rewards kills.
+	if = {
+		limit = { has_trait = vengeful }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_bold }
+		change_variable = { name = pod_combat_pers_bias_dot add = @ai_pers_cruel_light }
+		change_variable = { name = pod_combat_pers_bias_def subtract = @ai_pers_bold }
+	}
+	# forgiving: de-escalating - mild defense, no pursuit.
+	if = {
+		limit = { has_trait = forgiving }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_passive }
+		change_variable = { name = pod_combat_pers_bias_atk subtract = @ai_pers_passive }
+	}
+	# paranoid: pre-emptive - guard/dodge + control (remove_guard/ap_drain), shies
+	# from committal PWR.
+	if = {
+		limit = { has_trait = paranoid }
+		change_variable = { name = pod_combat_pers_bias_def     add = @ai_pers_wary }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_wary }
+		change_variable = { name = pod_combat_pers_bias_pwr     subtract = @ai_pers_wary }
+	}
+	# trusting: open - mild ATK, undervalues paranoia's control plays.
+	if = {
+		limit = { has_trait = trusting }
+		change_variable = { name = pod_combat_pers_bias_atk     add = @ai_pers_passive }
+		change_variable = { name = pod_combat_pers_bias_control subtract = @ai_pers_passive }
+	}
+	# diligent: methodical - combat-duration buff setup + control.
+	if = {
+		limit = { has_trait = diligent }
+		change_variable = { name = pod_combat_pers_bias_ctl add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_disciplined }
+	}
+	# lazy: low-effort - mild penalty to setup-heavy plays.
+	if = {
+		limit = { has_trait = lazy }
+		change_variable = { name = pod_combat_pers_bias_ctl subtract = @ai_pers_passive }
+		change_variable = { name = pod_combat_pers_bias_pwr subtract = @ai_pers_passive }
+	}
+	# patient: long-game - defense/control setup + DoT, avoids low-odds gambles.
+	if = {
+		limit = { has_trait = patient }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_ctl add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_dot add = @ai_pers_cruel_light }
+	}
+	# impatient: burst-now - immediate ATK, penalizes slow setup/DoT.
+	if = {
+		limit = { has_trait = impatient }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_aggressive }
+		change_variable = { name = pod_combat_pers_bias_ctl subtract = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_dot subtract = @ai_pers_cruel_light }
+	}
+	# arrogant: overreach - flashy PWR/ATK, disdains careful defense (deliberately
+	# suboptimal; heal-need still pulls it to safety when low).
+	if = {
+		limit = { has_trait = arrogant }
+		change_variable = { name = pod_combat_pers_bias_pwr add = @ai_pers_reckless }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_reckless }
+		change_variable = { name = pod_combat_pers_bias_def subtract = @ai_pers_reckless }
+	}
+	# humble: solid - efficient ATK, avoids PWR overreach.
+	if = {
+		limit = { has_trait = humble }
+		change_variable = { name = pod_combat_pers_bias_def add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_pwr subtract = @ai_pers_reckless }
+	}
+	# deceitful: ambusher - stealth/bypass + control (stealth/bypass feed existing
+	# situationals; this only tips the opening).
+	if = {
+		limit = { has_trait = deceitful }
+		change_variable = { name = pod_combat_pers_bias_control add = @ai_pers_guile }
+	}
+	# honest: straightforward - direct ATK, shuns trickery.
+	if = {
+		limit = { has_trait = honest }
+		change_variable = { name = pod_combat_pers_bias_atk     add = @ai_pers_disciplined }
+		change_variable = { name = pod_combat_pers_bias_control subtract = @ai_pers_guile }
+	}
+	# zealous: crusader - ATK + PWR (faith-driven heavy plays).
+	if = {
+		limit = { has_trait = zealous }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_bold }
+		change_variable = { name = pod_combat_pers_bias_pwr add = @ai_pers_disciplined }
+	}
+	# cynical: pragmatic - slight ATK efficiency.
+	if = {
+		limit = { has_trait = cynical }
+		change_variable = { name = pod_combat_pers_bias_atk add = @ai_pers_cruel_light }
+	}
+
+	# Cross-axis clamps. CK3 has no clamp_variable effect, so clamp via paired
+	# if/set_variable to [-bound, +bound]. These vars take contributions from
+	# several compatible (non-opposed) traits, so the sum needs bounding.
+	if = {
+		limit = { var:pod_combat_pers_bias_dot > @ai_pers_clamp_dot }
+		set_variable = { name = pod_combat_pers_bias_dot value = @ai_pers_clamp_dot }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_dot < @ai_pers_clamp_dot_neg }
+		set_variable = { name = pod_combat_pers_bias_dot value = @ai_pers_clamp_dot_neg }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_control > @ai_pers_clamp_control }
+		set_variable = { name = pod_combat_pers_bias_control value = @ai_pers_clamp_control }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_control < @ai_pers_clamp_control_neg }
+		set_variable = { name = pod_combat_pers_bias_control value = @ai_pers_clamp_control_neg }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_savage > @ai_pers_clamp_savage }
+		set_variable = { name = pod_combat_pers_bias_savage value = @ai_pers_clamp_savage }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_savage < @ai_pers_clamp_savage_neg }
+		set_variable = { name = pod_combat_pers_bias_savage value = @ai_pers_clamp_savage_neg }
+	}
+
+	# Category clamps (atk/def/ctl/pwr). Unlike the cross-axis vars, these
+	# accumulate from many opposed-pair-independent traits (CK3 has no
+	# 3-trait cap), so the worst compatible ATK pile reaches ~+76 unclamped.
+	# The post-sum bound keeps that from drowning the heal-need (+30) and
+	# finish (+25) incentives, so a dying aggressive AI still heals to safety.
+	if = {
+		limit = { var:pod_combat_pers_bias_atk > @ai_pers_clamp_cat }
+		set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_atk < @ai_pers_clamp_cat_neg }
+		set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat_neg }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_def > @ai_pers_clamp_cat }
+		set_variable = { name = pod_combat_pers_bias_def value = @ai_pers_clamp_cat }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_def < @ai_pers_clamp_cat_neg }
+		set_variable = { name = pod_combat_pers_bias_def value = @ai_pers_clamp_cat_neg }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_ctl > @ai_pers_clamp_cat }
+		set_variable = { name = pod_combat_pers_bias_ctl value = @ai_pers_clamp_cat }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_ctl < @ai_pers_clamp_cat_neg }
+		set_variable = { name = pod_combat_pers_bias_ctl value = @ai_pers_clamp_cat_neg }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_pwr > @ai_pers_clamp_cat }
+		set_variable = { name = pod_combat_pers_bias_pwr value = @ai_pers_clamp_cat }
+	}
+	if = {
+		limit = { var:pod_combat_pers_bias_pwr < @ai_pers_clamp_cat_neg }
+		set_variable = { name = pod_combat_pers_bias_pwr value = @ai_pers_clamp_cat_neg }
+	}
+}
+
 
 pod_combat_ai_refresh_target_if_dead_effect = {
 	# Re-pick selected_target only if it's no longer alive (usually the
@@ -163,6 +481,18 @@ pod_combat_ai_select_and_execute_move_effect = {
 
 		var:pod_combat_actor_char = {
 			save_scope_as = ai_actor
+
+			# Personality profile precompute. Runs once
+			# per combat (guard var lives on the AI char, cleared at the slot-init /
+			# group-teardown AI cleanup) so the weight block only ever READS the
+			# bias vars rather than re-testing has_trait per candidate.
+			scope:ai_actor = {
+				if = {
+					limit = { NOT = { has_variable = pod_combat_pers_profile_done } }
+					pod_combat_apply_personality_profile_effect = yes
+					set_variable = pod_combat_pers_profile_done
+				}
+			}
 
 			# Iteration scope = the candidate story. save_temporary_scope_as
 			# binds it as ai_candidate_move so the trigger can still reach it
@@ -517,6 +847,103 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
+					# ===== PRIMITIVE SITUATIONALS (DoT / control / stun) =====
+					# Keyed only on signals that exist. Target reads mirror the HP-finish
+					# idiom above (scope:combat_host + pod_combat_target_char), and are
+					# personality-independent (they fire for any actor holding the move).
+
+					# DoT vs a target with room to burn: reward a >=2-round burn on a
+					# single enemy that still has boxes to lose.
+					modifier = {
+						add = @ai_dot_healthy_target
+						has_variable = dot_rounds
+						var:dot_rounds >= 2
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+							var:pod_combat_target_char.POD_empty_damage_boxes >= @ai_thresh_dot_healthy
+						}
+					}
+					# DoT overkill: a ramp-up is wasted on a target a burst would finish
+					# now. Reuse the 2-box finish threshold for "near dead".
+					modifier = {
+						add = @ai_dot_overkill_penalty
+						has_variable = dot_amount
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+							var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
+						}
+					}
+					# Mind control vs a dominatable AI. Pure positive weight: the
+					# random_in_list limit already waste-gates players and
+					# undominatable targets, so this only ever lands on a real steal.
+					modifier = {
+						add = @ai_mind_control_value
+						has_variable = mind_control
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+							var:pod_combat_target_char = { is_ai = yes }
+						}
+					}
+					# Full stun (ap_drain >= @ai_thresh_stun) vs an AI with a turn to lose.
+					# No target-AP read exists, so gate on is_ai only.
+					modifier = {
+						add = @ai_stun_value
+						has_variable = ap_drain
+						var:ap_drain >= @ai_thresh_stun
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+							var:pod_combat_target_char = { is_ai = yes }
+						}
+					}
+					# Partial ap_drain (< @ai_thresh_stun): small flat bonus vs an AI.
+					modifier = {
+						add = @ai_ap_drain_value
+						has_variable = ap_drain
+						var:ap_drain < @ai_thresh_stun
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_char
+							var:pod_combat_target_char = { is_ai = yes }
+						}
+					}
+
+					# ===== SUMMON + RETALIATE SITUATIONALS =====
+					# Both flags are presence-only move vars (summons_combatant /
+					# retaliate_if_hit), so has_variable alone gates them.
+
+					# Summon while outnumbered. Summon moves are self-targeted, so NO
+					# single_enemy gate. Outnumbered signal: no per-team alive-count
+					# exists and a clean two-pass count per candidate is too costly
+					# here, so use the "a teammate has fallen" proxy - one
+					# short-circuiting any_in_list over the host's pod_combat_active_slots
+					# for a same-team KO'd slot. The actor's team is read back through
+					# scope:combat_host inside the iteration (the ally-target-swap idiom).
+					modifier = {
+						add = @ai_summon_outnumbered
+						has_variable = summons_combatant
+						scope:combat_host = {
+							any_in_list = {
+								variable = pod_combat_active_slots
+								var:combat_team = scope:combat_host.var:pod_combat_current_actor_team
+								pod_combat_slot_is_ko_trigger = yes
+							}
+						}
+					}
+					# Retaliate while exposed: a counter pays off only if the actor
+					# can still be struck. Reuse the exact @ai_defense_when_hurt
+					# actor-HP-below-max idiom (host-scoped SV compare).
+					modifier = {
+						add = @ai_retaliate_when_exposed
+						has_variable = retaliate_if_hit
+						scope:combat_host = {
+							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+						}
+					}
+
 					# Morale-finish tier 1: target morale ≤2, any morale damage finishes.
 					modifier = {
 						add = @ai_mor_finish_low
@@ -591,6 +1018,68 @@ pod_combat_ai_select_and_execute_move_effect = {
 					modifier = {
 						add = @ai_trait_gated
 						NOT = { has_variable = is_starter_move }
+					}
+
+					# ===== PERSONALITY BAND =====
+					# Reads the precomputed scope:ai_actor bias vars and dispatches
+					# on the CANDIDATE's own combat_category flag and primitive
+					# has_variable s - no has_trait at candidate time. Suppressed on
+					# a stolen (dominated) turn so the dominator intent drives the
+					# steal, not the victim temperament; the control flag is
+					# HOST-scoped.
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_atk
+						var:combat_category = flag:ATK
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_def
+						var:combat_category = flag:DEF
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					# De-dup: a control PRIMITIVE candidate reads _control, not its
+					# CTL category bias. So suppress _ctl on mind_control / ap_drain
+					# moves to avoid double-counting.
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_ctl
+						var:combat_category = flag:CTL
+						NOT = { has_variable = mind_control }
+						NOT = { has_variable = ap_drain }
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_pwr
+						var:combat_category = flag:PWR
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_dot
+						has_variable = dot_rounds
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					# _control covers BOTH control primitives (one modifier each,
+					# so a both-flag move reads it twice - intentional; the var is
+					# clamped at +/-10).
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_control
+						has_variable = mind_control
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_control
+						has_variable = ap_drain
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
+					}
+					# Savage compounds ATK for a berserker (intentional, bounded by
+					# the +8 clamp); gates on aggravated damage_type. The
+					# has_variable guard MUST precede the flag compare: damage_type
+					# is set only on damaging moves, so a bare var: read errors on
+					# buff/heal/utility candidates (AND short-circuits in order).
+					modifier = {
+						add = scope:ai_actor.var:pod_combat_pers_bias_savage
+						has_variable = damage_type
+						var:damage_type = flag:aggravated
+						scope:combat_host = { NOT = { has_variable = pod_combat_turn_is_controlled } }
 					}
 
 					# Floor: random_in_list silently drops items with weight
