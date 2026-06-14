@@ -307,6 +307,68 @@ Pick a numeric position, document its dependencies in this section,
 and update the result-flag reset block (§2) and the cleanup block in
 `pod_combat_cleanup_effect` if it produces a new flag.
 
+### Turn loop — how turns are sequenced
+
+`POD_execute_combat_move` above resolves ONE action. The turn loop
+(`pod_combat_group_effects.txt`) decides *whose* action runs next and
+when control returns to the GUI. It is built from one atomic step plus
+two drain wrappers, so the same pointer-advance happens in every
+context (combat start, mid-round, round boundary).
+
+**The atomic step — `pod_combat_advance_one_ai_turn_effect`.**
+`find_next`-first: select the next actor by initiative, then execute
+exactly one AI turn. Shape is `pod_combat_find_next_actor_effect`
+followed by a guarded `pod_combat_execute_ai_turn_effect`. The execute
+guard skips the call when the pointer is cleared, combat is over, OR
+the selected actor is **player/0** — the load-bearing case is the
+pre-PC walk, where the PC is still unacted so `find_next` can
+legitimately land on it; a bare execute would then run the PC's turn
+as if it were AI. (In the post-PC main loop the PC is already acted,
+so `find_next` never returns player/0 and the guard never fires.) A
+player-team ally AI at position > 0 is a genuine AI step and still
+executes — the guard is position-0-only.
+
+**The two drains, both bodied by the atomic step:**
+
+- `pod_combat_run_remaining_ai_turns_effect` — the post-PC auto
+  drain. `while` over "any alive + not-acted slot, combat not over",
+  one atomic step per iteration. Terminates because each step marks
+  one slot acted.
+- `pod_combat_run_pre_pc_ai_turns_effect` — the combat-start /
+  round-start walk. One prime `find_next` (so the `while` limit can
+  read `current_actor` on the first pass — callers therefore no
+  longer pre-call `find_next`), then `while` over the same alive +
+  not-acted set BUT additionally stopping the moment the pointer
+  reaches player/0. On a clean exit it leaves `current_actor` on the
+  PC and runs `pod_combat_setup_pc_turn_effect` inline.
+
+**Entry points — End Turn vs Advance.** Two SGUIs
+(`pod_combat_skill_guis.txt`) drive the loop from the GUI, and the
+split is the whole point of the decomposition:
+
+- **End Turn** (`pod_combat_end_turn` → `pod_combat_process_group_turns_effect`).
+  Reachable ONLY when the PC is the current actor. Carries the
+  **once-per-PC-turn prologue** — mark player/0 acted + save the PC
+  workspace — exactly once. This is the only effect that carries that
+  prologue.
+- **Advance** (`pod_combat_advance_turn`). The dedicated mid-step
+  entry point, **prologue-free** by design: it never marks the PC
+  acted and never saves the PC workspace, so it is safe to fire
+  repeatedly while an AI turn is pending. It resolves the *currently
+  pending* AI actor that `find_next` already primed.
+
+`pod_combat_setup_pc_turn_effect` is the hand-back point reached from
+all three PC-first sites (finalize, end-round, the pre-PC walk): it
+restores the PC target, loads the workspace, recalcs the PC hit
+chance, and resets / applies AP for the player's turn. The
+round-boundary transition lives in `pod_combat_group_end_round_effect`
+(round increment, log row, DoT tick, reinforcement seating,
+initiative recalc, round-tier revert, then a PC-first-vs-AI-first
+branch). The combat-start equivalent is the round-1 branch at the
+tail of `POD_combat_finalize_duel_effect`. Both branches are
+mode-aware — see *Step mode* in §7 for how STEP vs AUTO routes
+through these same effects.
+
 ---
 
 ## §3 Slot lifecycle
@@ -970,6 +1032,71 @@ tenfold the surface (turn-loop edits, a PC action gate, recursion-safe
 auto-skip of the PC turn). Revisit only if multi-TURN stuns or
 AP-decoupled denial (immune to future AP-gain effects) become real
 design wants — nothing in the drain approach forecloses that.
+
+### Step mode (advance one AI turn at a time)
+
+Combat can resolve AI turns one click at a time (STEP) or drain them
+all at once (AUTO, the historical behavior). Two pieces of state drive
+it, and keeping them distinct is the whole design:
+
+- **Preference (persistent, global):** `global_var:pod_combat_auto_advance`
+  — present = AUTO. Flipped by the combat-window checkbox
+  (`pod_combat_toggle_auto_advance`); survives across fights.
+- **Per-fight mode (host var):** `pod_combat_step_mode` — present =
+  STEP. Seeded at `POD_combat_finalize_duel_effect` from the
+  preference (preference present → `remove` step_mode; absent → `set`
+  step_mode), alongside `pod_combat_active`. The seed is **explicit on
+  both branches** so a stale `step_mode` from a prior fight can never
+  leak in. The toggle re-seeds it from the now-updated preference too,
+  so flipping mid-fight takes effect on the next click. The loop reads
+  `step_mode`, never the global, so a preference flip only changes the
+  *next* seed unless the toggle re-seeds the live fight (it does).
+
+**The two settle effects** are STEP's "what now?" after one atomic AI
+step, and they always re-run `find_next` first so `current_actor`
+reflects the NEXT pending actor (never the just-consumed one) before
+the GUI reads it:
+
+- `pod_combat_after_step_settle_effect` — the IN-ROUND path (PC has
+  committed). After the step: combat over → nothing (GUI swaps to End
+  Combat); next actor is the PC → `setup_pc_turn`; an AI still pending
+  → leave `current_actor` on it (Advance stays live); round exhausted
+  (`find_next` cleared the pointer) → `group_end_round`.
+- `pod_combat_after_pre_pc_step_settle_effect` — the PRE-PC path
+  (combat start / round start, PC not yet acted). Same shape, but its
+  done-stepping target is `current_actor == player/0`. `process_group_turns`
+  routes between the two on `pod_combat_pc_has_acted_this_round_trigger`;
+  `advance_turn` does the same.
+
+**Combat start defers the first AI turn.** On round 1, when an AI wins
+initiative, STEP resolves **nothing** in finalize — `find_next`
+already primed `current_actor` on the opening AI, and the combat
+window opens only AFTER finalize returns, so executing that turn now
+would resolve it invisibly. The window opens with Advance live and the
+player's first Advance click resolves the opening turn. (AUTO walks
+the pre-PC AI turns in finalize, as before.) The round-boundary
+branch in `pod_combat_group_end_round_effect` differs: there the
+window is already open, so STEP takes the first AI turn immediately
+(`advance_one_ai_turn` + `after_pre_pc_step_settle`).
+
+**Accepted quirk — the AI-first round-boundary double-step.** At a
+round boundary where an AI goes first, the round-end branch takes one
+AI step, then the player's next Advance takes another before the PC
+regains control — i.e. the boundary "costs" an extra implicit step
+compared to a strict one-click-per-AI cadence. This is accepted: it
+keeps the round-transition effect mode-symmetric with AUTO without a
+special pre-PC re-entry guard, and the player still sees each AI act
+resolve on its own row.
+
+**GUI footgun — no `==` infix.** The data-binding language has no
+equality operator on script values, so the End-Turn-vs-Advance button
+swap can't test "is the current actor player/0" directly. It compares
+the `pod_combat_current_actor_value` script value (PC at player/0 →
+ordinal 0, no actor → -1, any other actor → > 0) with
+`GreaterThan_CFixedPoint(..., '(CFixedPoint)0')`: `> 0` shows Advance
+(an AI is up), otherwise End Turn. Route every "which actor" GUI
+branch through that SV-plus-`GreaterThan_CFixedPoint` idiom, never a
+hand-rolled `==`.
 
 ### Mind control = a stolen turn (not a team transfer)
 
