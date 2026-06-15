@@ -26,7 +26,11 @@
 
 # Round-buff lifecycle penalties.
 @ai_round_buff_spam     = -8   # generic round-duration buff (any stat)
-@ai_round_buff_lateap   = -20  # round hit-buff specifically, low AP remaining
+# Decoupled from the generic spam gate: a round hit-buff ate both penalties
+# (-8 spam + -20 lateap = -28 cumulative), flooring out so the AI never
+# refreshed an expired hit buff on turns 2-3. -12 keeps a late-turn refresh
+# pickable while still discouraging a wasted last-AP buff.
+@ai_round_buff_lateap   = -12  # round hit-buff specifically, low AP remaining
 
 # Tier-size preference (buffs AND debuffs) — tier 3 buys 3× the
 # effect for the same AP cost, so bias toward it. Tier 2 is pinned
@@ -56,14 +60,22 @@
 @ai_hit_penalty_low     = -25  # hit_chance ≤ ai_thresh_hit_low
 @ai_hit_penalty_mid     = -15  # hit_chance ≤ ai_thresh_hit_mid
 
-# Energy attrition (stacking per step of actor_energy_used).
+# Energy attrition (stacking per step of actor_energy_used). Step 4 flattened
+# -14 -> -12: at the old -14 the 4th-step cumulative -44 floored a late-turn
+# finisher out of contention, so a dying AI couldn't spend its last expensive
+# move to close a kill. -12 keeps that finisher pickable while still escalating.
 @ai_energy_step1        = -8
 @ai_energy_step2        = -10
 @ai_energy_step3        = -12
-@ai_energy_step4        = -14
+@ai_energy_step4        = -12
 
 # Class / repertoire bias.
-@ai_trait_gated         = 10   # non-starter move (perk/trait/splat-gated)
+# Bumped 10 -> 18: at base-8 + 10 a class move's share was a rounding error
+# against the heal's 8 + 30, so learned powers felt unused. At +18 a class
+# move reaches 26, a real fallback share. Gated only on non-starter moves and
+# independent of the heal/finish modifiers, so it never stacks into the
+# heal-vs-attack clamp inequality (still well under the +30 heal / +25 finish).
+@ai_trait_gated         = 18   # non-starter move (perk/trait/splat-gated)
 
 # Final-weight floor (random_in_list ignores items with weight ≤ 0).
 @ai_weight_floor        = 1
@@ -129,7 +141,7 @@
 @ai_dot_healthy_target    = 10   # DoT vs a target with boxes to burn
 @ai_dot_overkill_penalty  = -10  # DoT ramp-up wasted on a near-dead target
 @ai_mind_control_value    = 15   # dominate a dominatable AI
-@ai_stun_value            = 14   # full stun (ap_drain ≥ @ai_thresh_stun) vs AI
+@ai_stun_value            = 15   # full stun (ap_drain ≥ @ai_thresh_stun) vs AI; aligned with mind_control's 15 (the two control primitives)
 @ai_ap_drain_value        = 6    # partial ap_drain vs AI (flat, no target-AP read)
 @ai_summon_outnumbered    = 12   # summon while down a teammate (KO'd same-team slot)
 @ai_retaliate_when_exposed = 10  # arm a retaliation while hp < max
@@ -137,6 +149,35 @@
 # Personality/primitive thresholds.
 @ai_thresh_dot_healthy  = 4    # DoT bonus needs target empty_damage_boxes ≥ this
 @ai_thresh_stun         = 6    # ap_drain ≥ this counts as a full stun (vs partial)
+
+# ── P3: PERSONALITY TARGET PREFERENCE ─────────────────────────
+# Temperament biases WHO gets hit, not just which move. Derived ONCE per combat
+# in pod_combat_apply_personality_profile_effect (a single mutually-exclusive
+# pod_combat_ai_target_pref flag off the summed/clamped bias vars), then read as
+# ONE gated additive in the two GROUP target selectors via scope:focus_actor.
+# Both magnitudes stay below the near-dead kill gap (factor 3 widens that gap to
+# +102 over the 51 baseline), so kill-priority always overrides target preference.
+#
+# NOTE: the next four are DOCUMENTATION ONLY. The target selectors live in
+# pod_combat_group_effects.txt and use these values as LITERALS (@-defines are
+# file-local and do not resolve cross-file), so editing the four below does NOT
+# change behavior - change the literals at the selector use sites. The three bias
+# thresholds after them ARE read by the precompute in THIS file and are live.
+@ai_pers_target_wounded   = 20   # (literal-mirror) wounded-pref add at the selectors
+@ai_pers_target_threat    = 25   # (literal-mirror) threat-pref add at the selectors
+@ai_thresh_pref_wounded   = 3    # empty_damage_boxes ≤ this counts as "wounded" for the pref
+@ai_thresh_pref_threat    = 12   # slot_prowess ≥ this counts as a "threat"
+@ai_thresh_pref_savage    = 5    # bias_savage ≥ this picks the wounded pref
+@ai_thresh_pref_dot       = 5    # bias_dot ≥ this picks the wounded pref
+@ai_thresh_pref_control   = 8    # bias_control ≥ this picks the threat pref (if not wounded)
+
+# ── B3: CRITICAL HEAL ──────────────────────────────────────────
+# A dying actor (at its last box) with no finishable enemy to kill instead gets
+# +20 heal weight ON TOP of @ai_heal_needed (+30 -> effective +50), so it tops up
+# rather than trading a doomed strike. enemy_finishable is precomputed once per
+# turn in GROUP (pod_combat_ai_flag_finishable_enemy_effect).
+@ai_heal_critical         = 20   # extra heal weight for a dying actor with no kill available
+@ai_thresh_heal_critical  = 1    # actor_hp_value ≤ this (at its last box) = "dying"
 
 
 # Per-actor personality precompute.
@@ -366,6 +407,10 @@ pod_combat_apply_personality_profile_effect = {
 	# 3-trait cap), so the worst compatible ATK pile reaches ~+76 unclamped.
 	# The post-sum bound keeps that from drowning the heal-need (+30) and
 	# finish (+25) incentives, so a dying aggressive AI still heals to safety.
+	# NOTE: raising @ai_pers_clamp_cat above the heal/finish need-bonuses is
+	# intentionally capped here - the heal-vs-attack inequality is the hard
+	# ceiling, so category bias does NOT scale linearly past 10. A designer
+	# expecting linear scaling above the clamp would misread this block.
 	if = {
 		limit = { var:pod_combat_pers_bias_atk > @ai_pers_clamp_cat }
 		set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat }
@@ -397,6 +442,21 @@ pod_combat_apply_personality_profile_effect = {
 	if = {
 		limit = { var:pod_combat_pers_bias_pwr < @ai_pers_clamp_cat_neg }
 		set_variable = { name = pod_combat_pers_bias_pwr value = @ai_pers_clamp_cat_neg }
+	}
+
+	# Derive a single mutually-exclusive target preference from 
+	# the FINAL clamped biases, read by the GROUP target selectors.
+	# Wounded takes precedence (lethality reads first): a cruel/sadistic 
+	# actor (high _dot or _savage) finishes the hurt; an ambitious/dominating
+	# actor (high_control) hunts the dangerous. Left unset otherwise -> selectors 
+	# stay neutral.
+	if = {
+		limit = { OR = { var:pod_combat_pers_bias_dot >= @ai_thresh_pref_dot  var:pod_combat_pers_bias_savage >= @ai_thresh_pref_savage } }
+		set_variable = { name = pod_combat_ai_target_pref value = flag:wounded }
+	}
+	else_if = {
+		limit = { var:pod_combat_pers_bias_control >= @ai_thresh_pref_control }
+		set_variable = { name = pod_combat_ai_target_pref value = flag:threat }
 	}
 }
 
@@ -635,6 +695,23 @@ pod_combat_ai_select_and_execute_move_effect = {
 						var:heal_type = flag:aggravated
 						scope:combat_host = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+						}
+					}
+					# B3 critical heal: actor at its last box and no finishable enemy to
+					# kill instead -> stack an extra heal incentive over @ai_heal_needed
+					# (so a dying AI tops up rather than trading a doomed strike). Gated
+					# on hp_heal + heal_type so it rides the same heals the base bonus
+					# does. enemy_finishable is precomputed once per turn in GROUP
+					# (pod_combat_ai_flag_finishable_enemy_effect), not per candidate.
+					# The NOT = { var:... = 1 } read is safe because the precompute
+					# always writes the var (0 or 1) at turn start before move selection.
+					modifier = {
+						add = @ai_heal_critical
+						has_variable = hp_heal
+						has_variable = heal_type
+						scope:combat_host = {
+							pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+							NOT = { var:pod_combat_ai_enemy_finishable = 1 }
 						}
 					}
 					# Morale heal when shaken.
@@ -988,9 +1065,10 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
-					# Energy attrition — four stacking steps -8/-10/-12/-14
-					# (escalating, not flat), so cumulative at 0/1/2/3/4+
-					# energy used is 0/-8/-18/-30/-44.
+					# Energy attrition — four stacking steps -8/-10/-12/-12
+					# (escalating then flat at step 4; see @ai_energy_step4),
+					# so cumulative at 0/1/2/3/4+ energy used is
+					# 0/-8/-18/-30/-42.
 					modifier = {
 						add = @ai_energy_step1
 						has_variable = energy_cost
@@ -1222,6 +1300,12 @@ pod_combat_ai_swap_to_ally_target_effect = {
 		weight = {
 			base = 1
 			modifier = { add = 50 }
+			# Prefer the most-wounded ally: same low-HP factor the enemy/player
+			# target selectors use, so heals land where they matter most.
+			modifier = {
+				factor = 2
+				var:slot_char.POD_empty_damage_boxes <= 2
+			}
 		}
 		save_scope_as = chosen_target
 	}

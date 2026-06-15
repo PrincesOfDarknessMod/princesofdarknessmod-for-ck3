@@ -709,8 +709,8 @@ pod_combat_init_slot_from_character_effect = {
 			remove_variable = pod_combat_ai_last_move
 			remove_variable = pod_combat_ai_prev_move
 			remove_variable = pod_combat_ai_prev2_move
-			# The personality bias precompute is per-fight
-			# AI-char state, so clear it at the SAME site (not host teardown).
+			remove_variable = pod_combat_ai_focus_team
+			remove_variable = pod_combat_ai_focus_position
 			remove_variable = pod_combat_pers_bias_atk
 			remove_variable = pod_combat_pers_bias_def
 			remove_variable = pod_combat_pers_bias_ctl
@@ -719,6 +719,7 @@ pod_combat_init_slot_from_character_effect = {
 			remove_variable = pod_combat_pers_bias_control
 			remove_variable = pod_combat_pers_bias_savage
 			remove_variable = pod_combat_pers_profile_done
+			remove_variable = pod_combat_ai_target_pref
 		}
 	}
 	# ── State marker modifier ────────────────────────────────────
@@ -1277,8 +1278,8 @@ pod_combat_group_cleanup_effect = {
 			remove_variable = pod_combat_ai_last_move
 			remove_variable = pod_combat_ai_prev_move
 			remove_variable = pod_combat_ai_prev2_move
-			# Clear personality bias precompute + guard here
-			# too, so a second consecutive fight rebuilds them fresh (no stale leak).
+			remove_variable = pod_combat_ai_focus_team
+			remove_variable = pod_combat_ai_focus_position
 			remove_variable = pod_combat_pers_bias_atk
 			remove_variable = pod_combat_pers_bias_def
 			remove_variable = pod_combat_pers_bias_ctl
@@ -1287,6 +1288,7 @@ pod_combat_group_cleanup_effect = {
 			remove_variable = pod_combat_pers_bias_control
 			remove_variable = pod_combat_pers_bias_savage
 			remove_variable = pod_combat_pers_profile_done
+			remove_variable = pod_combat_ai_target_pref
 		}
 	}
 
@@ -1517,10 +1519,104 @@ pod_combat_find_next_actor_effect = {
 # Enemy-target (player AI) and player-target (enemy AI) selectors. Weighted random, favors low-HP.
 ##############################################################################################
 
+# resolve the acting AI char into scope:focus_actor so the selectors' focus-fire
+# modifier can read its stored mark ONCE per call rather than per candidate. 
+# The workspace pod_combat_actor_char still points at the PRIOR actor
+# here (load_workspace runs after target selection), so match on the current-actor
+# pointers. Caller scope = host; the saved scope is read by the selector weight block.
+pod_combat_ai_resolve_focus_actor_effect = {
+	save_scope_as = host
+	if = {
+		limit = { has_variable = pod_combat_current_actor_team }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				var:combat_team = scope:host.var:pod_combat_current_actor_team
+				var:team_position = scope:host.var:pod_combat_current_actor_position
+			}
+			var:slot_char = { save_scope_as = focus_actor }
+		}
+	}
+}
+
+# Write site, called once per AI turn from pod_combat_execute_ai_turn_effect 
+# (after load_workspace, so pod_combat_actor_char is the current actor). 
+# Records the turn's chosen target as the actor's persistent focus, or clears 
+# it on a controlled turn (a stolen turn inverts the target side, so the mark
+# would point at the wrong team next turn). The focus TEAM flag is copied straight
+# off the chosen slot's combat_team (the literal-flag source), one hop, mirroring the 
+# proven PC pc_target_team write. NOT chained through selected_target_team,
+# to dodge flag-copy degrade.
+pod_combat_ai_record_focus_target_effect = {
+	save_scope_as = host
+	if = {
+		limit = { has_variable = pod_combat_actor_char }
+		if = {
+			limit = {
+				NOT = { has_variable = pod_combat_turn_is_controlled }
+				has_variable = pod_combat_selected_target_team
+			}
+			every_in_list = {
+				variable = pod_combat_active_slots
+				limit = {
+					var:combat_team = scope:host.var:pod_combat_selected_target_team
+					var:team_position = scope:host.var:pod_combat_selected_target_position
+				}
+				save_scope_as = focus_slot
+			}
+			if = {
+				limit = { exists = scope:focus_slot }
+				var:pod_combat_actor_char = {
+					set_variable = { name = pod_combat_ai_focus_team     value = scope:focus_slot.var:combat_team }
+					set_variable = { name = pod_combat_ai_focus_position value = scope:focus_slot.var:team_position }
+				}
+			}
+		}
+		else_if = {
+			limit = { has_variable = pod_combat_turn_is_controlled }
+			var:pod_combat_actor_char = {
+				remove_variable = pod_combat_ai_focus_team
+				remove_variable = pod_combat_ai_focus_position
+			}
+		}
+	}
+}
+
+# Once-per-turn precompute of "is there any enemy of the acting actor I 
+# could finish this turn?". Sets the host var pod_combat_ai_enemy_finishable to 
+# 1 iff ANY alive enemy slot is at <=1 empty box (the same finish threshold the 
+# move selector's hp-finish tier reads), else 0. The move selector's B3 heal 
+# modifier reads it so a dying actor only pivots to topping up when there's
+# no kill to take instead. "Enemy of the actor" = a slot whose combat_team differs
+# from the current actor's team. Uses any_in_list (a TRIGGER) rather than 
+# every_in_list-with-inline-write to avoid corrupting the iteration scope.
+# Consumed within the same turn, so a host var is safe (no cross-actor clobber); 
+# call site is the turn-start record block.
+pod_combat_ai_flag_finishable_enemy_effect = {
+	save_scope_as = host
+	if = {
+		limit = {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
+				var:slot_char.POD_empty_damage_boxes <= 1   # near-dead (=@ai_thresh_hp_finish_1, inlined; @-defines are file-local)
+			}
+		}
+		set_variable = { name = pod_combat_ai_enemy_finishable value = 1 }
+	}
+	else = { set_variable = { name = pod_combat_ai_enemy_finishable value = 0 } }
+}
+
 pod_combat_ai_select_enemy_target_effect = {
 	# Pick an enemy-team target for an ally AI actor: random_in_list over alive
 	# enemy slots, weighted toward low-HP (x2 if <= 2 empty wound boxes).
 	save_scope_as = host
+	# Resolve the acting AI char ONCE (not per candidate) so the focus-fire
+	# modifier can read its stored mark. pod_combat_actor_char is the PRIOR
+	# actor's at selection time (load_workspace runs after this), so match on
+	# the current-actor pointers instead.
+	pod_combat_ai_resolve_focus_actor_effect = yes
 	random_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -1530,9 +1626,49 @@ pod_combat_ai_select_enemy_target_effect = {
 		weight = {
 			base = 1
 			modifier = { add = 50 }
+			# Kill-priority floor (factor 3): widens the near-dead gap from 51 to
+			# 102 (healthy baseline 51 -> near-dead 153) so the P3 target-pref
+			# additives below still can't outrank finishing a near-dead enemy.
 			modifier = {
-				factor = 2
+				factor = 3
 				var:slot_char.POD_empty_damage_boxes <= 2
+			}
+			# Cross-turn focus-fire: stick to last turn's mark. Kept ADDITIVE and
+			# strictly below the low-HP factor's gap (focus < 51) so a fresh
+			# near-dead enemy on a different slot still outranks a healthy focused
+			# stick (kill-priority must beat focus). Math: healthy-focused 51+40=91
+			# < near-dead-non-focused (1+50)*3=153. One identity match per
+			# candidate, no list-walk.
+			modifier = {
+				add = 40
+				exists = scope:focus_actor
+				scope:focus_actor = { has_variable = pod_combat_ai_focus_team }
+				var:combat_team = scope:focus_actor.var:pod_combat_ai_focus_team
+				var:team_position = scope:focus_actor.var:pod_combat_ai_focus_position
+			}
+			# P3 temperament target preference (precomputed flag on the actor; one
+			# gated read via the already-resolved scope:focus_actor, no per-candidate
+			# trait walk). wounded/threat are mutually exclusive. wounded's threshold
+			# is a literal 3 boxes, one past the <=2 kill trigger, so a
+			# sadist also leans toward moderately-hurt (non-finishable) targets; the
+			# factor-3 floor still handles the <=2 finish.
+			modifier = {
+				add = 20
+				exists = scope:focus_actor
+				scope:focus_actor = {
+					has_variable = pod_combat_ai_target_pref
+					var:pod_combat_ai_target_pref = flag:wounded
+				}
+				var:slot_char.POD_empty_damage_boxes <= 3
+			}
+			modifier = {
+				add = 25
+				exists = scope:focus_actor
+				scope:focus_actor = {
+					has_variable = pod_combat_ai_target_pref
+					var:pod_combat_ai_target_pref = flag:threat
+				}
+				var:slot_prowess >= 12
 			}
 		}
 		save_scope_as = chosen_target
@@ -1550,6 +1686,8 @@ pod_combat_ai_select_player_target_effect = {
 	# Select a target from the player team for an enemy AI actor. Same
 	# weight shape as the enemy-target effect; just the team filter inverts.
 	save_scope_as = host
+	# Same once-per-call focus-actor resolve as the enemy selector.
+	pod_combat_ai_resolve_focus_actor_effect = yes
 	random_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -1559,9 +1697,42 @@ pod_combat_ai_select_player_target_effect = {
 		weight = {
 			base = 1
 			modifier = { add = 50 }
+			# Kill-priority floor (factor 3, mirrors the enemy selector): widens the
+			# near-dead gap to 102 so the P3 additives below can't outrank a finish.
 			modifier = {
-				factor = 2
+				factor = 3
 				var:slot_char.POD_empty_damage_boxes <= 2
+			}
+			# Cross-turn focus-fire (see enemy selector for rationale): additive and
+			# below the low-HP gap (focus < 51) so kill-priority still overrides it.
+			# Math: healthy-focused 51+40=91 < near-dead-non-focused (1+50)*3=153.
+			modifier = {
+				add = 40
+				exists = scope:focus_actor
+				scope:focus_actor = { has_variable = pod_combat_ai_focus_team }
+				var:combat_team = scope:focus_actor.var:pod_combat_ai_focus_team
+				var:team_position = scope:focus_actor.var:pod_combat_ai_focus_position
+			}
+			# P3 temperament target preference (see enemy selector for rationale).
+			# wounded/threat are mutually exclusive. The wounded box threshold (literal 3)
+			# deliberately extends one box past the <=2 kill trigger.
+			modifier = {
+				add = 20
+				exists = scope:focus_actor
+				scope:focus_actor = {
+					has_variable = pod_combat_ai_target_pref
+					var:pod_combat_ai_target_pref = flag:wounded
+				}
+				var:slot_char.POD_empty_damage_boxes <= 3
+			}
+			modifier = {
+				add = 25
+				exists = scope:focus_actor
+				scope:focus_actor = {
+					has_variable = pod_combat_ai_target_pref
+					var:pod_combat_ai_target_pref = flag:threat
+				}
+				var:slot_prowess >= 12
 			}
 		}
 		save_scope_as = chosen_target
@@ -1921,6 +2092,23 @@ pod_combat_execute_ai_turn_effect = {
 
 	# Load workspace (actor -> actor workspace, target -> target workspace)
 	pod_combat_load_workspace_effect = yes
+
+	# Record this turn's chosen target as the actor's persistent focus, O
+	# NCE per turn (here, NOT in the per-action try_action loop).
+	# pod_combat_actor_char is now the current actor (load_workspace just 
+	# wrote it). Stored on the AI CHAR (alongside ai_last_move / pers_bias_*), 
+	# not a host var: a host var would be clobbered by every other combatant's
+	# turn, so each AI must keep its own mark.
+	# CONTROLLED-TURN FOOTGUN: a stolen turn inverts the target side (the actor
+	# aims at its OWN team), so recording it would leave a stale focus pointing
+	# at the wrong team next turn. Clear the focus on any controlled turn instead.
+	pod_combat_ai_record_focus_target_effect = yes
+
+	# Refresh the "any finishable enemy?" host flag ONCE per turn 
+	# (here, not per candidate) so the move selector's critical-heal
+	# modifier reads a value current as of this actor's turn. Consumed 
+	# within the same turn, so the host var can't leak across actors.
+	pod_combat_ai_flag_finishable_enemy_effect = yes
 
 	# Set AP for this actor's turn
 	set_variable = { name = pod_combat_current_ap value = pod_combat_base_ap }
