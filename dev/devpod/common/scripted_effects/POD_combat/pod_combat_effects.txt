@@ -306,16 +306,12 @@ pod_combat_apply_dot_wound_effect = {
 	}
 }
 
-# Morale DoT tick, slot scope. Erodes slot_morale and mirrors PoD Mental Strain. Reads the
-# amount from scope:dot_tick_amount (saved by the tick loop BEFORE expiry can remove the
-# slot var on the final tick).
+# Morale DoT tick, slot scope. Erodes slot_morale. (Mental Strain is applied once at
+# combat end from final morale, not per tick - see pod_combat_apply_morale_strain_effect.)
+# Reads the amount from scope:dot_tick_amount (saved by the tick loop BEFORE expiry can
+# remove the slot var on the final tick).
 pod_combat_deal_slot_dot_morale_tick_effect = {
-	save_scope_value_as = { name = dot_morale_lost value = { value = scope:dot_tick_amount  max = var:slot_morale } }
 	set_variable = { name = slot_morale value = { value = var:slot_morale  subtract = scope:dot_tick_amount  min = 0 } }
-	if = {
-		limit = { scope:dot_morale_lost > 0 }
-		var:slot_char = { POD_static_stress_gain = { COUNT = { value = scope:dot_morale_lost  multiply = pod_combat_morale_stress_multiplier } } }
-	}
 }
 
 # HP DoT tick wound dispatch, HOST scope. The tick loop loads the burning slot into the
@@ -627,9 +623,9 @@ pod_combat_route_to_pod_damage = {
 			# so no workspace update needed here.
 			save_scope_value_as = { name = attack_result_flag value = flag:hp_damage }
 
-			# Morale spillover scales off actual (post-soak) damage and
-			# also bleeds into Mental Strain, matching direct morale
-			# damage (see pod_combat_deal_morale_damage_effect).
+			# Morale spillover scales off actual (post-soak) damage.
+			# (Mental Strain from morale is applied once at combat end
+			# from final morale - see pod_combat_apply_morale_strain_effect.)
 			save_scope_value_as = {
 				name = morale_spill
 				value = {
@@ -641,18 +637,9 @@ pod_combat_route_to_pod_damage = {
 			if = {
 				limit = {
 					scope:morale_spill > 0
-					# Gate on >0 so the stress / SV chain below doesn't
+					# Gate on >0 so the SV chain below doesn't
 					# run for zero net delta on an already-broken target.
 					var:pod_combat_$TARGET_SIDE$_morale > 0
-				}
-				# Cap at current morale so stress doesn't over-count past
-				# a broken target (as pod_combat_deal_morale_damage_effect).
-				save_scope_value_as = {
-					name = morale_actually_spilled
-					value = {
-						value = scope:morale_spill
-						max   = var:pod_combat_$TARGET_SIDE$_morale
-					}
 				}
 				save_scope_value_as = {
 					name = new_target_morale
@@ -663,20 +650,6 @@ pod_combat_route_to_pod_damage = {
 					}
 				}
 				set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_target_morale }
-				# Mental Strain on the spillover delta.
-				if = {
-					limit = { scope:morale_actually_spilled > 0 }
-					save_scope_value_as = {
-						name = mental_strain_from_spillover
-						value = {
-							value = scope:morale_actually_spilled
-							multiply = pod_combat_morale_stress_multiplier
-						}
-					}
-					var:pod_combat_$TARGET_SIDE$_char = {
-						POD_static_stress_gain = { COUNT = scope:mental_strain_from_spillover }
-					}
-				}
 			}
 		}
 	}
@@ -966,24 +939,6 @@ pod_combat_deal_morale_damage_effect = {
 		set_variable = { name = pod_combat_last_morale_damage_amount value = scope:morale_actually_lost }
 		pod_combat_set_outcome_if_unset_effect = { CODE = morale_damage }
 
-		# Mirror the loss onto the target as Mental Strain. The char alias
-		# is always populated mid-combat; guard for off-combat callers.
-		if = {
-			limit = {
-				has_variable = pod_combat_$TARGET_SIDE$_char
-				scope:morale_actually_lost > 0
-			}
-			save_scope_value_as = {
-				name = mental_strain_from_morale
-				value = {
-					value = scope:morale_actually_lost
-					multiply = pod_combat_morale_stress_multiplier
-				}
-			}
-			var:pod_combat_$TARGET_SIDE$_char = {
-				POD_static_stress_gain = { COUNT = scope:mental_strain_from_morale }
-			}
-		}
 		# Victory check runs at the end of pod_combat_save_workspace_effect.
 	}
 }
@@ -1810,6 +1765,32 @@ pod_combat_restore_hp_aggravated_effect = {
 }
 
 # ─── END COMBAT (INLINE) ──────────────────────────────────────────
+# Morale -> Mental Strain, batched to ONE pass at combat end. For each 
+# alive combatant, inflict POD_static_stress_gain from the FINAL morale deficit
+# (pod_combat_max_morale - slot_morale, x the stress multiplier). POD_static_stress_gain is
+# heavy (per-iteration force_character_skill_recalculation), so calling it per morale event
+# caused lag spikes; this runs it once per combatant, off the interactive turn loop. Host
+# scope (the slot list lives on the host).
+pod_combat_apply_morale_strain_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = { var:slot_char = { is_alive = yes } }
+		save_scope_value_as = {
+			name = morale_strain
+			value = {
+				value = pod_combat_max_morale
+				subtract = var:slot_morale
+				multiply = pod_combat_morale_stress_multiplier
+				min = 0
+			}
+		}
+		if = {
+			limit = { scope:morale_strain > 0 }
+			var:slot_char = { POD_static_stress_gain = { COUNT = scope:morale_strain } }
+		}
+	}
+}
+
 # Runs inline from the victory check, auto-resolve, or forfeit path.
 # Duel-driven combat (pod_combat_sc_context present) hands off to the
 # pod_combat.9999 dispatcher; standalone/debug combat shows a toast.
@@ -1827,6 +1808,10 @@ pod_combat_end_combat_effect = {
 
 	# Nonfatal cap + flag strip (header explains the mode handling).
 	pod_combat_apply_nonfatal_effect = yes
+
+	# Batch morale -> Mental Strain into one POD_static_stress_gain pass per combatant from
+	# final morale (replaces the per-event calls that caused the lag spikes).
+	pod_combat_apply_morale_strain_effect = yes
 
 	# Save winner/loser scopes first so the duel-end effect (and any
 	# submod override of it) has named access to the outcome characters.
