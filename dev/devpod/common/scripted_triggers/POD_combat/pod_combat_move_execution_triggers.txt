@@ -3,11 +3,13 @@
 ######################################################
 # Generic move-validation triggers: read move attributes off the
 # story_cycle scope, called on the combat-host (PC) scope.
-# POD_can_execute_combat_move (unlock dispatcher + dynamic gates) serves
-# every PC/UI path (execute_move SGUI is_valid); the AI runtime uses the
-# dynamic-only mirror pod_combat_move_is_usable_now_trigger below. The
-# loadout editor does NOT call these — it gates on can_execute_decision alone
-# (unlock-only subset; no AP/energy/targeting outside live combat).
+# POD_can_execute_combat_move (baked pc_can_use unlock flag + dynamic gates)
+# serves every PC/UI path (execute_move SGUI is_valid); the AI runtime uses the
+# dynamic-only mirror pod_combat_move_is_usable_now_trigger below. The loadout
+# editor's pool (pod_combat_loadout_option) also reads the baked pc_can_use flag.
+# The unlock is baked once per fight / per editor-open (running the FULL generated
+# dispatcher per move - pod_combat_bake_*_unlocks_effect in
+# pod_combat_group_effects.txt) so the expensive switch is off the per-frame path
 
 
 # Gates mirrored minus the unlock dispatcher by pod_combat_move_is_usable_now_trigger (below) - keep gate lists in lockstep.
@@ -19,12 +21,10 @@ POD_can_execute_combat_move = {
 
 	NOT = { pod_combat_is_over_trigger = yes }
 
-	# Unlock gate runs against the actor (not the host) via the GENERATED
-	# dispatcher, not can_execute_decision: decisions carry implicit taker
-	# requirements (ruler status among them) that unlanded combatants fail
-	# wholesale, so courtier knights could never act. The loadout-editor UI
-	# keeps the decision path - the PC is always a ruler.
-	pod_combat_actor_unlocks_move_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
+	# Unlock gate: read the per-fight baked pc_can_use flag instead of
+	# re-running the unlock dispatcher every GUI frame (the documented
+	# PC-turn hotspot; unlocks are static mid-combat).
+	$STORY$ = { has_variable = pc_can_use }
 
 	trigger_if = {
 		limit = {
@@ -274,6 +274,31 @@ POD_can_execute_combat_move = {
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
 
+	# Summon-capacity gate. A summons_combatant move can't seat a new combatant
+	# once the caster's side is at pod_combat_max_team_size (the glue pre-checks and
+	# no-ops, so without this the button looks live but the click wastes AP/energy).
+	# current_actor_team = the caster's side on either turn; has_variable-guarded since
+	# the combat window can re-evaluate is_valid between rounds when it is briefly unset.
+	trigger_if = {
+		limit = {
+			$STORY$ = { has_variable = summons_combatant }
+			has_variable = pod_combat_current_actor_team
+		}
+		custom_description = {
+			text = pod_combat_cant_summon_team_full_tt
+			OR = {
+				AND = {
+					var:pod_combat_current_actor_team = flag:player
+					var:pod_combat_player_team_size < pod_combat_max_team_size
+				}
+				AND = {
+					var:pod_combat_current_actor_team = flag:enemy
+					var:pod_combat_enemy_team_size < pod_combat_max_team_size
+				}
+			}
+		}
+	}
+
 	# team_ally and self need no gate (both always include the live
 	# actor). single_enemy is vacuous for the AI too: the victory check
 	# ends combat when no enemies remain, so selection never runs
@@ -501,6 +526,26 @@ pod_combat_move_is_usable_now_trigger = {
 		}
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
+
+	# Summon-capacity gate (mirror of POD_can_execute_combat_move; plain trigger,
+	# no PC tooltip). Don't let the AI pick a summon when its side is full - the glue
+	# would no-op and waste the turn.
+	trigger_if = {
+		limit = {
+			$STORY$ = { has_variable = summons_combatant }
+			has_variable = pod_combat_current_actor_team
+		}
+		OR = {
+			AND = {
+				var:pod_combat_current_actor_team = flag:player
+				var:pod_combat_player_team_size < pod_combat_max_team_size
+			}
+			AND = {
+				var:pod_combat_current_actor_team = flag:enemy
+				var:pod_combat_enemy_team_size < pod_combat_max_team_size
+			}
+		}
+	}
 }
 
 
@@ -538,11 +583,21 @@ pod_combat_tier_upgrade_only_trigger = {
 # then, so non-attack outcomes fail every partition by design.
 
 # The attack landed real wound boxes on the target.
+# Single-target path reads the live host last_* pair (the AND branch). AoE drains
+# loop enemies and the per-target push helper clears that pair, so the team_enemy
+# damage loop instead latches pod_combat_aoe_any_hp_damage when any target took HP
+# damage; the OR lets the §9 on_hp_damage drain rider fire once after the loop. A
+# fully soaked/missed AoE latches nothing, so the drain correctly does not heal.
 pod_combat_result_code_indicates_hp_damage_trigger = {
-	has_variable = pod_combat_last_outcome
-	var:pod_combat_last_outcome = flag:attack
-	has_variable = pod_combat_last_attack_result
-	var:pod_combat_last_attack_result = flag:hp_damage
+	OR = {
+		AND = {
+			has_variable = pod_combat_last_outcome
+			var:pod_combat_last_outcome = flag:attack
+			has_variable = pod_combat_last_attack_result
+			var:pod_combat_last_attack_result = flag:hp_damage
+		}
+		has_variable = pod_combat_aoe_any_hp_damage
+	}
 }
 
 # Physical contact: hp_damage plus blocked / soaked. For "fires on

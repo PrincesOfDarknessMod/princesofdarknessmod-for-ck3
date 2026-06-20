@@ -55,12 +55,21 @@ pod_combat_max_equipped = 16
 #   == 1   → pure prowess ordering (debug only)
 pod_combat_initiative_roll_max = 30
 
+# Morale damage = HP damage * this ratio (pod_combat_route_to_pod_damage spillover,
+# pod_combat_effects.txt). Script value not @-constant: @ refs inside a $PARAM$-using
+# effect don't resolve and crash (same footgun as base_hit's @ bounds in
+# pod_combat_group_effects.txt). SV-eval cost is one int read.
+pod_combat_morale_from_hp_ratio = {
+	value = 2
+}
+
 # Mental-strain scaling for morale damage in the combat minigame.
-# Combat morale is 0-20, each point of morale damage
-# translates to 5 stress applied as Mental Strain (static
-# stress: unaffected by stress-gain modifiers). A full
-# morale-broken character (20 morale damage) takes 100 stress.
-# Adjust this knob to rebalance stress attrition.
+# Combat morale is 0-20; each point of the FINAL morale deficit (max
+# minus end-of-combat morale) translates to 5 stress applied as Mental
+# Strain (static stress: unaffected by stress-gain modifiers), inflicted
+# once at combat end via pod_combat_apply_morale_strain_effect. A fully
+# morale-broken character (deficit 20) takes 100 stress. Adjust this
+# knob to rebalance stress attrition.
 pod_combat_morale_stress_multiplier = 5
 
 # Ally-down morale shock: morale every still-living teammate loses when a
@@ -80,18 +89,24 @@ pod_combat_ally_down_morale_penalty = 2
 # pod_combat.0001.desc (help event).
 pod_combat_stealth_hit_bonus = 30
 
-# Maximum number of log entries kept in pod_combat_log. Each push
-# rebuilds the list (CK3 lists are append-only and we need newest-
-# first ordering), so without a cap the rebuild is O(N²) over the
-# combat's lifetime. At 50 entries that bounds the per-push cost
-# around 50 list-ops; for very long combats (NvN with 10+ actors
-# and 12+ rounds) it prevents the list from growing unbounded too.
-# Entries dropped beyond the cap get end_story'd so the underlying
-# POD_combat_log_entry story_cycle doesn't leak on Charon for the
-# rest of the session.
-#
-# Tune higher if players ask for more scroll-back history; tune
-# lower if combat-log rendering ever becomes a perf bottleneck.
+# AI target-preference weight adds, applied in the two GROUP target selectors
+# (pod_combat_ai_select_enemy_target_effect / _player_target_effect in
+# pod_combat_group_effects.txt) when the acting AI's precomputed
+# pod_combat_ai_target_pref flag matches the candidate. Both stay below the
+# near-dead kill gap (the factor-3 floor widens that past these adds), so
+# kill-priority always overrides target preference. Shared as script_values
+# (not @-defines) because the selectors and the AI precompute live in different
+# files and @-defines are file-scoped (G09).
+pod_combat_ai_target_pref_wounded_weight = 20
+pod_combat_ai_target_pref_threat_weight  = 25
+# Candidate thresholds the same selectors gate the adds on: a target counts as
+# "wounded" at <= this many empty damage boxes (one past the <=2 kill trigger),
+# and a "threat" at >= this much slot_prowess.
+pod_combat_ai_target_pref_wounded_threshold = 3
+pod_combat_ai_target_pref_threat_threshold  = 12
+
+# Cap on pod_combat_log entries. Each push rebuilds the list (newest-first ordering),
+# so an uncapped log is potentially costly over the combat.
 pod_combat_log_max_entries = 30
 
 ###### CURRENT VALUE ACCESSORS ######
@@ -103,25 +118,11 @@ pod_combat_current_ap_value = {
 	if = { limit = { has_variable = pod_combat_current_ap } value = var:pod_combat_current_ap }
 }
 
-# Pip-row helper consumed by the AP-pip strip in pod_combat_window.gui.
-# Returns the pip index above which pips render as supercharge instead
-# of filled — i.e. the boundary between the two icon types. The pip
-# strip's filled-visibility test is `N <= threshold`, supercharge is
-# `N > threshold` (both gated by `N <= current_ap`).
-#
-# Default = pod_combat_base_ap (6) so when current AP is at or below
-# the cap, the supercharge test `N > 6` never fires in a 6-pip row.
-# When current AP overflows the cap, the threshold collapses to
-#   max(0, 2 * base_ap - current_ap)
-# which places exactly `current_ap - base_ap` pips into the supercharge
-# band at the RIGHT edge of the row:
-#   current = 7  -> threshold = 5  -> pip 6 supercharge, 1-5 filled
-#   current = 8  -> threshold = 4  -> pips 5-6 supercharge, 1-4 filled
-#   current = 9  -> threshold = 3  -> pips 4-6 supercharge, 1-3 filled
-#   current = 13 -> threshold = 0  -> all 6 supercharge (excess beyond
-#                                     2*base isn't expressible in 6 pips)
-# The `min = 0` clamp on the if branch handles the extreme-overcap
-# case so the threshold never goes negative.
+# Boundary pip index for the AP-pip strip (pod_combat_window.gui): pips N <= threshold
+# render filled, N > threshold supercharge (both gated N <= current_ap).
+# Default = base_ap (6) so no supercharge below the cap. On overcap it collapses to
+# max(0, 2*base_ap - current_ap), seating current_ap-base_ap pips at the row's right
+# edge; the min=0 clamp keeps it non-negative past 2*base.
 pod_combat_pip_supercharge_threshold = {
 	value = pod_combat_base_ap
 	if = {
@@ -248,7 +249,7 @@ pod_combat_slot_total_damage_sv = {
 		value = var:slot_char.POD_total_damage_boxes
 		min = 0
 	}
-	if = {
+	else_if = {
 		limit = { has_variable = slot_char var:slot_char = { is_alive = no } }
 		value = pod_combat_slot_max_hp_value
 	}
@@ -259,11 +260,10 @@ pod_combat_slot_agg_damage_sv = {
 		limit = { has_variable = slot_char var:slot_char = { is_alive = yes } }
 		value = var:slot_char.POD_aggravated_damage_boxes
 	}
-	if = {
+	else_if = {
 		limit = { has_variable = slot_char var:slot_char = { is_alive = no } }
 		value = pod_combat_slot_max_hp_value
 	}
-	max = pod_combat_slot_total_damage_sv
 }
 pod_combat_slot_morale_pct = {
 	# has_variable guard for consistency with the other slot SVs. Safe in
@@ -283,14 +283,6 @@ pod_combat_slot_soak_value = {
 	min = 0
 	max = 100
 }
-# pod_combat_slot_hit_chance_value was removed after the per-slot
-# display redesigned around PODCombatSlotHitDisplay (renders the
-# signed net tier modifier via pod_combat_slot_hit_net_mod_value)
-# and the PC target header reads slot 0's slot_hit_chance directly.
-# The synthesis-fallback for the pre-calculate_all_hit_chances init
-# window no longer has a consumer either, since neither display
-# path goes through this SV. If a future feature needs an absolute
-# per-slot hit-chance readout, restore from git history.
 pod_combat_slot_prowess_value = {
 	value = var:slot_prowess
 }
@@ -433,19 +425,11 @@ pod_combat_slot_hit_debuff_combat_mag_sv = {
 	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = combat_tier_large_mag  }
 }
 
-# Signed net hit-chance modifier (buffs − debuffs). Sums the four
-# hit-tier magnitude SVs above, adding buffs and subtracting debuffs,
-# so a slot with a tier-2 round buff (+20) AND a tier-1 combat debuff
-# (-10) reports +10. Returns 0 when no hit-tier mods are active. Used
-# by NPC slot cards (slots 1-9) to display "this combatant is currently
-# X% above/below their baseline hit chance" instead of the largely
-# meaningless slot_hit_chance absolute value (which rotates between
-# leader-baseline, last-attack-target, and last-attacker-retaliation
-# depending on what happened most recently — see PODCombatSlotHitDisplay
-# in 00_POD_combat_custom_loc.txt for the display dispatch). The PC slot
-# (slot 0) ignores this SV and keeps the absolute readout because the
-# load_workspace writeback explicitly refreshes slot 0's slot_hit_chance
-# against the PC's currently-selected target every turn.
+# Signed net hit-chance modifier (buffs - debuffs) over the four hit-tier mag SVs.
+# NPC slot cards show this instead of slot_hit_chance, whose absolute value rotates
+# between leader-baseline / last-target / last-retaliation (PODCombatSlotHitDisplay,
+# 00_POD_combat_custom_loc.txt). Slot 0 keeps the absolute readout: its workspace
+# writeback refreshes slot_hit_chance vs the PC's target every turn.
 pod_combat_slot_hit_net_mod_value = {
 	value = 0
 	add      = pod_combat_slot_hit_buff_round_mag_sv
@@ -455,26 +439,10 @@ pod_combat_slot_hit_net_mod_value = {
 }
 
 # ────────────────────────────────────────────────────────────────────
-# Move-story tier magnitudes for combat-log riders.
-#
-# The eight slot mag SVs above read slot-scoped tier vars
-# (slot_X_buff/debuff_round/combat_tier) and feed the per-slot stat
-# recalc. The four SVs below run against a MOVE STORY scope and
-# collapse round-or-combat into a single per-stat magnitude — used by
-# the combat log's pod_combat_log_buff_X_buff / _X_debuff loc strings
-# to surface "+30% Soak" instead of just "+Soak".
-#
-# Move stories carry either soak_buff_round_tier OR soak_buff_combat_tier
-# for a given stat (never both — a move's design is round-duration or
-# combat-duration, not both at once). The SV chains six `if` branches ,
-# over both duration vars each setting `value = @<size>_mag` based on 
-# the matched tier. Plain`if` (not `else_if`) matches the existing slot-mag-SV 
-# pattern; mutual exclusivity is guaranteed by the per-move tier-var pair invariant.
-#
-# Using @combat_tier_*_mag rather than tier × 10 keeps the magnitude
-# linked to the same constants the slot SVs use, so a balance pass that
-# changed medium from 20 to 25 would propagate to the log row text
-# without needing this block to be re-edited.
+# Move-story-scoped tier magnitudes for combat-log riders: collapse round-OR-combat
+# duration into one per-stat magnitude for the log's +X% Soak/Hit loc strings.
+# A move carries either the _round or the _combat tier var per stat, never both, so
+# the plain `if` chain (not else_if) over both duration vars is safe.
 
 pod_combat_move_soak_buff_mag_value = {
 	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 1 } value = combat_tier_small_mag  }
@@ -551,26 +519,12 @@ pod_combat_log_show_damage_source_value = {
 }
 
 
-# ─── Combat-log result-column visibility probes (THIN READERS) ─────
-# A segment's visibility (and whether a " · " separator precedes it)
-# is decided ONCE, at push time: the segment-visibility bake in
-# pod_combat_push_log_effect (pod_combat_effects.txt) evaluates every
-# segment condition in display order and stamps presence vars on the
-# entry story:
-#   seg_<x>_on  present  ->  the segment renders content
-#   seg_<x>_sep present  ->  a separator precedes it (segment renders
-#                            AND the head or an earlier segment did)
-# Entry / move vars are immutable after the push, so the bake is exact
-# and the SVs below collapse to one has_variable read each. The GUI
-# contract is unchanged: the segment widget's `visible` reads the
-# _visible_value SV, the preceding separator ANDs that SV with the
-# matching _before_ SV (PODSegVisible / PODSegSepVisible macros), so
-# widget, separator, and renderer can never disagree.
-# Rows that never run the bake - system / DoT / mind / daze rows and
-# the round divider - carry no seg vars and read 0 on every segment,
-# exactly as the old computed SVs returned for them.
-# Condition mapping (NAND rider suppression, burst gating, recoil,
-# intent move-var checks): documented at the bake site.
+# ─── Combat-log segment visibility probes (thin readers) ─────
+# Visibility and the preceding " · " separator are baked once at push time in
+# pod_combat_push_log_effect (pod_combat_effects.txt): seg_<x>_on => segment renders,
+# seg_<x>_sep => a separator precedes it. Entry vars are immutable post-push, so each
+# SV below is one has_variable read. Rows that skip the bake carry no seg vars and read
+# 0. Condition mapping documented at the bake site.
 
 pod_combat_log_heal_rider_visible_value = {
 	value = 0
@@ -610,7 +564,9 @@ pod_combat_log_retal_rider_visible_value = {
 # decision seg_<x>_sep (own segment visible AND any earlier content)
 # instead of the old prior-content count. Its only consumer,
 # PODSegSepVisible, ANDs it with the segment's own visible SV, so the
-# composed separator visibility is unchanged.
+# composed separator visibility is unchanged; the old linked
+# accumulator chain (each SV = previous visible + previous
+# accumulator, re-evaluated recursively on every read) is gone.
 
 pod_combat_log_before_heal_value = {
 	value = 0
@@ -807,7 +763,16 @@ pod_combat_log_before_init_debuff_value = {
 # Called on character scope. The GUI reads them via
 # GetPlayer.MakeScope.ScriptValue('...').
 
-pod_combat_atk_count = {
+# Two layers (G07 perf fix):
+#   *_raw  - live every_in_list compute, always correct; used by combat logic and loc.
+#   public - while the loadout editor is open (pod_combat_config_open) read the
+#            *_count_cache host var (refreshed on editor-open + every equip/unequip)
+#            so skills-window pip strips don't re-walk the loadout ~36x/frame;
+#            otherwise fall back to *_raw. config_open is never set mid-fight, so
+#            combat logic never reads the cache and a stale cache can't be observed.
+#            Display-mirror pattern (§7).
+
+pod_combat_atk_count_raw = {
 	every_in_list = {
 		variable = pod_combat_loadout
 		limit = { var:combat_category = flag:ATK }
@@ -815,7 +780,7 @@ pod_combat_atk_count = {
 	}
 }
 
-pod_combat_def_count = {
+pod_combat_def_count_raw = {
 	every_in_list = {
 		variable = pod_combat_loadout
 		limit = { var:combat_category = flag:DEF }
@@ -823,7 +788,7 @@ pod_combat_def_count = {
 	}
 }
 
-pod_combat_ctl_count = {
+pod_combat_ctl_count_raw = {
 	every_in_list = {
 		variable = pod_combat_loadout
 		limit = { var:combat_category = flag:CTL }
@@ -831,7 +796,7 @@ pod_combat_ctl_count = {
 	}
 }
 
-pod_combat_pwr_count = {
+pod_combat_pwr_count_raw = {
 	every_in_list = {
 		variable = pod_combat_loadout
 		limit = { var:combat_category = flag:PWR }
@@ -839,9 +804,49 @@ pod_combat_pwr_count = {
 	}
 }
 
-pod_combat_equipped_count = {
+pod_combat_equipped_count_raw = {
 	every_in_list = {
 		variable = pod_combat_loadout
 		add = 1
 	}
+}
+
+pod_combat_atk_count = {
+	if = {
+		limit = { has_variable = pod_combat_config_open  has_variable = pod_combat_atk_count_cache }
+		value = var:pod_combat_atk_count_cache
+	}
+	else = { value = pod_combat_atk_count_raw }
+}
+
+pod_combat_def_count = {
+	if = {
+		limit = { has_variable = pod_combat_config_open  has_variable = pod_combat_def_count_cache }
+		value = var:pod_combat_def_count_cache
+	}
+	else = { value = pod_combat_def_count_raw }
+}
+
+pod_combat_ctl_count = {
+	if = {
+		limit = { has_variable = pod_combat_config_open  has_variable = pod_combat_ctl_count_cache }
+		value = var:pod_combat_ctl_count_cache
+	}
+	else = { value = pod_combat_ctl_count_raw }
+}
+
+pod_combat_pwr_count = {
+	if = {
+		limit = { has_variable = pod_combat_config_open  has_variable = pod_combat_pwr_count_cache }
+		value = var:pod_combat_pwr_count_cache
+	}
+	else = { value = pod_combat_pwr_count_raw }
+}
+
+pod_combat_equipped_count = {
+	if = {
+		limit = { has_variable = pod_combat_config_open  has_variable = pod_combat_equipped_count_cache }
+		value = var:pod_combat_equipped_count_cache
+	}
+	else = { value = pod_combat_equipped_count_raw }
 }

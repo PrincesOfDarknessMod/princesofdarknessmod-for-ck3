@@ -61,21 +61,14 @@ pod_combat_close_window = {
 			pod_combat_end_combat_effect = yes
 		}
 		else = {
-			# Concede inline: PC = loser unconditionally, enemy/0's
-			# char wins. is_over flip hands off to the bottom-bar End
-			# Combat for the standard cleanup path.
-			save_scope_as = combat_pc
-			if = {
-				limit = {
-					has_variable = pod_combat_enemy_leader_slot
-					var:pod_combat_enemy_leader_slot = { has_variable = slot_char }
-				}
-				set_variable = {
-					name  = pod_combat_winner
-					value = var:pod_combat_enemy_leader_slot.var:slot_char
-				}
-			}
-			set_variable = { name = pod_combat_loser value = scope:combat_pc }
+			# Concede: PC = loser, the first ALIVE enemy = winner (the enemy
+			# leader may already be KO'd - C16). Atomic winner+loser pair (C17).
+			# is_over flip hands off to the bottom-bar End Combat for cleanup.
+			pod_combat_set_outcome_pair_effect = { PC_WON = no }
+			# Conceding side = loser: zero its leader slot_morale so the portrait
+			# reads defeated and the leader accrues full Mental Strain at combat
+			# end (same shared slot-find as the auto-resolve path).
+			pod_combat_zero_loser_leader_morale_effect = yes
 			set_variable = { name = pod_combat_is_over value = yes }
 			pod_combat_push_system_log_effect = { MESSAGE_KEY = combat_ended_defeat }
 		}
@@ -207,18 +200,13 @@ pod_combat_toggle_auto_advance = {
 	}
 }
 
-# Advance-one-AI-turn button (the dedicated mid-step entry point). PROLOGUE-FREE
-# by design: it never marks the PC acted or saves the PC workspace, so it is safe
-# to fire repeatedly while an AI is pending. The PC-commit prologue lives ONLY in
-# pod_combat_process_group_turns_effect (reached via pod_combat_end_turn), which
-# is reachable only when the PC is the current actor.
+# Advance-one-AI-turn button (mid-step entry point). PROLOGUE-FREE by design:
+# never marks the PC acted or saves the PC workspace, so it is safe to fire
+# repeatedly while an AI is pending. The PC-commit prologue lives ONLY in
+# pod_combat_process_group_turns_effect (via pod_combat_end_turn).
 #
-# Internally mode-aware so a mid-step toggle-to-auto drains on the next click:
-#  - STEP: take one AI turn, then settle. pc_has_acted routes between the in-round
-#    settle (PC committed -> draining post-PC AI) and the pre-PC settle
-#    (combat-start / round-start, PC not yet acted).
-#  - AUTO (toggled off mid-step): drain the rest of the round in one click, the
-#    same shape as the End-Turn auto branch.
+# Mode-aware so a mid-step toggle-to-auto drains on the next click; pc_has_acted
+# routes the settle in both the STEP and AUTO branches below.
 pod_combat_advance_turn = {
 	scope = character
 
@@ -243,10 +231,24 @@ pod_combat_advance_turn = {
 			}
 		}
 		else = {
-			pod_combat_run_remaining_ai_turns_effect = yes
+			# AUTO. Route on pc_has_acted exactly like the STEP branch above and
+			# pod_combat_process_group_turns_effect: PC already committed -> drain
+			# the remaining post-PC AI, then end the round; PC NOT yet acted
+			# (pre-PC phase, e.g. auto-advance toggled on while an AI leads off) ->
+			# walk the AI up to the PC via the PC-stopping drain (which runs
+			# setup_pc_turn inline). Calling run_remaining with the PC unacted hangs:
+			# its while-limit stays true on the alive+unacted PC, which
+			# advance_one_ai_turn skips without ever marking acted. (C01 fix.)
 			if = {
-				limit = { NOT = { has_variable = pod_combat_is_over } }
-				pod_combat_group_end_round_effect = yes
+				limit = { pod_combat_pc_has_acted_this_round_trigger = yes }
+				pod_combat_run_remaining_ai_turns_effect = yes
+				if = {
+					limit = { NOT = { has_variable = pod_combat_is_over } }
+					pod_combat_group_end_round_effect = yes
+				}
+			}
+			else = {
+				pod_combat_run_pre_pc_ai_turns_effect = yes
 			}
 		}
 	}
@@ -257,9 +259,11 @@ pod_combat_advance_turn = {
 ###### LOADOUT-EDITOR SGUIS
 ######################################################
 
-# Equip / unequip a move. Unequip is always allowed; equip only if
-# the move's category has room (cap = pod_combat_max_per_category).
-# The GUI's `checked` binding reads is_shown = "currently equipped".
+# Equip / unequip a move. Unequip depends only on current loadout membership
+# (always allowed for an equipped move); equip requires the move be unlocked
+# (the generated dispatcher, not can_execute_decision) AND its category have
+# room (cap = pod_combat_max_per_category). The GUI's `checked` binding reads
+# is_shown = "currently equipped".
 pod_combat_loadout_toggle = {
 	scope = character
 	saved_scopes = { story }
@@ -274,48 +278,61 @@ pod_combat_loadout_toggle = {
 
 	is_valid = {
 		exists = scope:story
-		can_execute_decision = scope:story.var:decision
 		OR = {
-			# Equipped — unequip always allowed.
+			# Equipped -> unequip depends ONLY on current loadout membership.
 			is_target_in_variable_list = {
 				name   = pod_combat_loadout
 				target = scope:story
 			}
-			# Not equipped — cap check per combat_category. custom_description
-			# surfaces a friendly "Attack slots full: 4/4" tooltip instead
-			# of the raw trigger; the trigger_if chain keeps it singular.
-			trigger_if = {
-				limit = { scope:story = { var:combat_category = flag:ATK } }
-				custom_description = {
-					text = pod_combat_loadout_atk_full_tt
-					pod_combat_atk_count < pod_combat_max_per_category
+			# Not equipped -> require the move be UNLOCKED and its category have room.
+			AND = {
+				# Unlock gate via the dispatcher, NOT can_execute_decision:
+				# decisions carry the implicit ruler taker-requirement an unlanded PC
+				# fails wholesale. Same unlock check the runtime uses; the generator
+				# builds both surfaces from one gate-line fn, so they cannot drift.
+				# COMBAT_REFERENCE.info §7 (unlock gating).
+				pod_combat_actor_unlocks_move_trigger = { STORY = scope:story ACTOR = root }
+				# Enforce the TOTAL equipped cap independently of the per-category
+				# caps. Redundant today (4 x 4 = 16 == total), but a backstop if the caps
+				# are retuned so categories no longer sum to pod_combat_max_equipped.
+				# LOCKSTEP: the skills-window pip strips bake fixed pip counts, so retuning
+				# the caps means editing those GUI literals too.
+				pod_combat_equipped_count < pod_combat_max_equipped
+				# Cap check per combat_category. custom_description surfaces a friendly
+				# "Attack slots full: 4/4" tooltip; the trigger_if chain keeps it singular.
+				trigger_if = {
+					limit = { scope:story = { var:combat_category = flag:ATK } }
+					custom_description = {
+						text = pod_combat_loadout_atk_full_tt
+						pod_combat_atk_count < pod_combat_max_per_category
+					}
 				}
-			}
-			trigger_else_if = {
-				limit = { scope:story = { var:combat_category = flag:DEF } }
-				custom_description = {
-					text = pod_combat_loadout_def_full_tt
-					pod_combat_def_count < pod_combat_max_per_category
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:DEF } }
+					custom_description = {
+						text = pod_combat_loadout_def_full_tt
+						pod_combat_def_count < pod_combat_max_per_category
+					}
 				}
-			}
-			trigger_else_if = {
-				limit = { scope:story = { var:combat_category = flag:CTL } }
-				custom_description = {
-					text = pod_combat_loadout_ctl_full_tt
-					pod_combat_ctl_count < pod_combat_max_per_category
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:CTL } }
+					custom_description = {
+						text = pod_combat_loadout_ctl_full_tt
+						pod_combat_ctl_count < pod_combat_max_per_category
+					}
 				}
-			}
-			trigger_else_if = {
-				limit = { scope:story = { var:combat_category = flag:PWR } }
-				custom_description = {
-					text = pod_combat_loadout_pwr_full_tt
-					pod_combat_pwr_count < pod_combat_max_per_category
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:PWR } }
+					custom_description = {
+						text = pod_combat_loadout_pwr_full_tt
+						pod_combat_pwr_count < pod_combat_max_per_category
+					}
 				}
-			}
-			trigger_else = {
-				# Required terminator for the trigger_else_if chain.
-				# always = no = don't equip an unknown-category move.
-				always = no
+				trigger_else = {
+					# Required terminator for the trigger_else_if chain.
+					# always = no = don't equip an unknown-category move.
+					always = no
+				}
 			}
 		}
 	}
@@ -339,13 +356,18 @@ pod_combat_loadout_toggle = {
 				target = scope:story
 			}
 		}
+		# Keep the loadout-count display cache in step with the change so the pip
+		# strips stay correct without re-walking the loadout per frame.
+		pod_combat_refresh_loadout_counts_effect = yes
 	}
 }
 
-# Per-row visibility: does the PC meet the move's unlock requirements
-# (can_execute_decision on the hidden decision)? Show-all / compact
-# overrides force every row visible. is_valid stays strict — show-all
-# is a visibility override, not a permissions bypass.
+# Per-row visibility: does the PC meet the move's unlock requirements? Reads the
+# baked pc_can_use flag (set when the editor opens by
+# pod_combat_bake_pc_catalogue_unlocks_effect) instead of can_execute_decision
+# per row per frame - G06 perf fix. Show-all / compact overrides force every row
+# visible; is_valid stays strict (show-all is a visibility override, not a
+# permissions bypass).
 pod_combat_loadout_option = {
 	scope = character
 	saved_scopes = { story }
@@ -353,7 +375,7 @@ pod_combat_loadout_option = {
 	is_shown = {
 		exists = scope:story
 		OR = {
-			can_execute_decision = scope:story.var:decision
+			scope:story = { has_variable = pc_can_use }
 			has_variable = show_all_combat_moves
 			# Compact view implies show-all.
 			has_variable = pod_combat_loadout_compact_view
@@ -362,7 +384,7 @@ pod_combat_loadout_option = {
 
 	is_valid = {
 		exists = scope:story
-		can_execute_decision = scope:story.var:decision
+		scope:story = { has_variable = pc_can_use }
 	}
 }
 
@@ -1036,6 +1058,10 @@ pod_combat_move_desc = {
 		if = {
 			limit = { scope:story = { has_variable = mind_control } }
 			custom_tooltip = pod_combat_desc_mind_control
+		}
+		if = {
+			limit = { scope:story = { has_variable = summons_combatant } }
+			custom_tooltip = pod_combat_desc_summon
 		}
 	}
 }

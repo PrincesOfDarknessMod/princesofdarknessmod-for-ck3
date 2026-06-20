@@ -89,8 +89,7 @@ POD_execute_combat_move = {
 	}
 
 	# ── 4. CK3 resource costs (PC only) ──────────────────────────
-	# Only the PC (player/0) pays CK3-side costs. AI combatants get
-	# the move's effect at no CK3 cost (their AI turn is free).
+	# Only the PC (player/0) pays CK3-side gold/stress/piety/prestige; AI turns are free.
 	if = {
 		limit = {
 			has_variable = pod_combat_current_actor_team
@@ -656,13 +655,10 @@ POD_execute_combat_move = {
 		set_variable = { name = pod_combat_target_init_bonus value = scope:init_debuff_neg }
 	}
 
-	# ── 14b. Summon a combatant (via the summons_combatant flag) ────
-	# After all in-place effects (tiers/stances/AP), before retaliation — a
-	# freshly-summoned unit shouldn't retaliate on its summon turn. The
-	# damage/AoE phases (§5b-§10) already ran, so a same-cast AoE never hits
-	# the just-summoned unit; it fights from the NEXT round (the add sets
-	# slot_has_acted = 1). The glue is hidden_effect-wrapped (tooltip-build
-	# safety); caster = var:pod_combat_actor_char on the acting team.
+	# ── 14b. Summon a combatant ──────────────────────────────────
+	# Placed after the damage/AoE phases so a same-cast AoE never hits the just-summoned
+	# unit, and before retaliation so it can't counter on its summon turn (it acts NEXT
+	# round; the add sets slot_has_acted = 1). Glue is hidden_effect-wrapped (tooltip-build).
 	if = {
 		limit = { $STORY$ = { has_variable = summons_combatant } }
 		pod_combat_summon_combatant_glue_effect = { MOVE_STORY = $STORY$ }
@@ -693,6 +689,10 @@ POD_execute_combat_move = {
 				has_variable = pod_combat_last_heal_amount
 				has_variable = pod_combat_last_morale_heal_amount
 				has_variable = pod_combat_last_retal_fired
+				# C29: self_damage recoil is applied once to the actor, not per AoE
+				# target, so the per-target rows never carry it - emit the wrap-up
+				# row to surface it (else an AoE+self_damage move's recoil is silent).
+				has_variable = pod_combat_last_self_damage
 			}
 		}
 		pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
@@ -860,6 +860,15 @@ pod_combat_apply_team_enemy_hp_damage = {
 		pod_combat_load_target_from_story_effect = yes
 		scope:host = {
 			pod_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = target }
+			# Drain self-heal survivor: the per-target push helper clears the host
+			# last_* result pair, so the §9 on_hp_damage rider can't see it after the
+			# loop. Latch a surviving flag (excluded from the per-target clear) so the
+			# actor heals once if ANY enemy took HP damage. Reuses the rider's own
+			# predicate to stay in lockstep. Set BEFORE the push helper clears.
+			if = {
+				limit = { pod_combat_result_code_indicates_hp_damage_trigger = yes }
+				set_variable = pod_combat_aoe_any_hp_damage
+			}
 		}
 		pod_combat_save_target_to_story_effect = yes
 		pod_combat_aoe_check_target_alive_effect = yes
@@ -900,17 +909,18 @@ pod_combat_apply_team_enemy_morale_damage = {
 
 pod_combat_apply_team_ally_hp_heal = {
 	# $STORY$ = move story. See pod_combat_apply_team_enemy_hp_damage for the row pattern.
-	# The empty<length limit skips full-HP allies: the heal is a no-op there but
-	# the body would still push a noise row ("healed 0") and burn a round trip.
+	# The heal-useful limit skips allies this heal can't help: a superficial heal on
+	# an aggravated-only-wounded (or full-HP) ally heals 0, so admitting it would push
+	# a noise row ("healed 0") and burn a round trip. pod_combat_slot_heal_is_useful_trigger
+	# is heal-type aware (aggravated -> any wound; superficial -> superficial boxes
+	# present), keeping this admit in lockstep with the AI team-heal keep.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
 			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_ally_filter_trigger = yes
-			var:slot_char = {
-				POD_empty_damage_boxes < POD_health_track_length
-			}
+			pod_combat_slot_heal_is_useful_trigger = { SLOT = this STORY = $STORY$ }
 		}
 		pod_combat_load_target_from_story_effect = yes
 		scope:host = {
@@ -981,9 +991,6 @@ pod_combat_apply_team_ally_buffs = {
 				}
 			}
 			set_variable = { name = slot_soak_buff_round_tier value = $STORY$.var:soak_buff_round_tier }
-			var:slot_char = {
-				set_variable = { name = pod_combat_tier_soak_buff_round value = $STORY$.var:soak_buff_round_tier }
-			}
 		}
 		if = {
 			limit = {
@@ -994,9 +1001,6 @@ pod_combat_apply_team_ally_buffs = {
 				}
 			}
 			set_variable = { name = slot_soak_buff_combat_tier value = $STORY$.var:soak_buff_combat_tier }
-			var:slot_char = {
-				set_variable = { name = pod_combat_tier_soak_buff_combat value = $STORY$.var:soak_buff_combat_tier }
-			}
 		}
 		# Tier hit buffs: slot var only (hit chance is workspace-local).
 		if = {
@@ -1033,6 +1037,33 @@ pod_combat_apply_team_ally_buffs = {
 			# Idempotent slot-stealth applicator (flag + +30 hit_chance).
 			pod_combat_apply_stealth_slot_effect = yes
 		}
+		# Char-bridge soak mirrors LAST - a single scope switch after all the
+		# slot-local writes above, so no inline slot read/write ever follows a switch
+		# (the every_in_list iteration-scope-corruption trap). Guarded on the CHAR's
+		# own mirror var (kept in lockstep with the slot tier) + $STORY$, never the
+		# now-suspect slot vars. POD_soak_chance reads these char vars.
+		var:slot_char = {
+			if = {
+				limit = {
+					$STORY$ = { has_variable = soak_buff_round_tier }
+					OR = {
+						NOT = { has_variable = pod_combat_tier_soak_buff_round }
+						var:pod_combat_tier_soak_buff_round < $STORY$.var:soak_buff_round_tier
+					}
+				}
+				set_variable = { name = pod_combat_tier_soak_buff_round value = $STORY$.var:soak_buff_round_tier }
+			}
+			if = {
+				limit = {
+					$STORY$ = { has_variable = soak_buff_combat_tier }
+					OR = {
+						NOT = { has_variable = pod_combat_tier_soak_buff_combat }
+						var:pod_combat_tier_soak_buff_combat < $STORY$.var:soak_buff_combat_tier
+					}
+				}
+				set_variable = { name = pod_combat_tier_soak_buff_combat value = $STORY$.var:soak_buff_combat_tier }
+			}
+		}
 	}
 }
 
@@ -1057,9 +1088,6 @@ pod_combat_apply_team_enemy_debuffs = {
 				}
 			}
 			set_variable = { name = slot_soak_debuff_round_tier value = $STORY$.var:soak_debuff_round_tier }
-			var:slot_char = {
-				set_variable = { name = pod_combat_tier_soak_debuff_round value = $STORY$.var:soak_debuff_round_tier }
-			}
 		}
 		if = {
 			limit = {
@@ -1070,9 +1098,6 @@ pod_combat_apply_team_enemy_debuffs = {
 				}
 			}
 			set_variable = { name = slot_soak_debuff_combat_tier value = $STORY$.var:soak_debuff_combat_tier }
-			var:slot_char = {
-				set_variable = { name = pod_combat_tier_soak_debuff_combat value = $STORY$.var:soak_debuff_combat_tier }
-			}
 		}
 		if = {
 			limit = {
@@ -1109,6 +1134,31 @@ pod_combat_apply_team_enemy_debuffs = {
 		if = {
 			limit = { $STORY$ = { has_variable = remove_guard } }
 			remove_variable = slot_is_guarding
+		}
+		# Char-bridge soak-debuff mirrors LAST (see pod_combat_apply_team_ally_buffs)
+		# - one scope switch after all slot-local writes, guarded on the CHAR's own
+		# mirror var + $STORY$, never the iteration-suspect slot vars.
+		var:slot_char = {
+			if = {
+				limit = {
+					$STORY$ = { has_variable = soak_debuff_round_tier }
+					OR = {
+						NOT = { has_variable = pod_combat_tier_soak_debuff_round }
+						var:pod_combat_tier_soak_debuff_round < $STORY$.var:soak_debuff_round_tier
+					}
+				}
+				set_variable = { name = pod_combat_tier_soak_debuff_round value = $STORY$.var:soak_debuff_round_tier }
+			}
+			if = {
+				limit = {
+					$STORY$ = { has_variable = soak_debuff_combat_tier }
+					OR = {
+						NOT = { has_variable = pod_combat_tier_soak_debuff_combat }
+						var:pod_combat_tier_soak_debuff_combat < $STORY$.var:soak_debuff_combat_tier
+					}
+				}
+				set_variable = { name = pod_combat_tier_soak_debuff_combat value = $STORY$.var:soak_debuff_combat_tier }
+			}
 		}
 	}
 }

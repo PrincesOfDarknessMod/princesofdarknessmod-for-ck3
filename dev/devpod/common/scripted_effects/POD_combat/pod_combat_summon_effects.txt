@@ -24,7 +24,8 @@ pod_combat_add_ally_midfight_effect = {
 	# own scope, so a var: chain would throw. Runs in the combat-host (PC) scope.
 	# Opposing leader (discipline CASTER + hit-chance baseline) = enemy leader.
 	# limit bail also keeps the var reads tooltip-build-safe. add_ally self-guards
-	# the soft cap; if hit, no slot is created and the re-find no-ops.
+	# the soft cap; if hit, no slot is created and the success gate below (F4) skips
+	# the seat finalize/log so nothing phantom-joins.
 	if = {
 		limit = {
 			has_variable = pod_combat_player_team_size
@@ -33,11 +34,51 @@ pod_combat_add_ally_midfight_effect = {
 		}
 		# Snapshot landing position BEFORE the add (add_ally seats at team_size then bumps it).
 		save_scope_value_as = { name = pod_combat_summon_pos value = var:pod_combat_player_team_size }
+		# Opposing-leader baseline (discipline CASTER + hit-chance prowess). The enemy
+		# leader pointer is the ORIGINAL position-0 slot, never re-pointed on leader
+		# death, so a dead leader would baseline this seat against a corpse (C31). Seed
+		# the leader unconditionally (always set), then if it is DEAD override with the
+		# rear-most LIVING enemy; if none lives, the seeded (dead) leader stays.
 		save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:pod_combat_enemy_leader_slot.var:slot_prowess }
 		var:pod_combat_enemy_leader_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+		if = {
+			limit = { NOT = { var:pod_combat_enemy_leader_slot = { pod_combat_slot_char_is_alive_trigger = yes } } }
+			ordered_in_list = {
+				variable = pod_combat_active_slots
+				limit = {
+					pod_combat_slot_is_enemy_trigger = yes
+					pod_combat_slot_char_is_alive_trigger = yes
+				}
+				order_by = { value = 0 subtract = var:team_position }
+				position = 0
+				save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:slot_prowess }
+				var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+			}
+		}
 		POD_combat_duel_add_ally_effect = { CHARACTER = $CHARACTER$ }
-		pod_combat_init_one_midfight_slot_effect = { TEAM = player }
-		pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
+		# Add_ally drops a seat past pod_combat_max_team_size and leaves the team-size
+		# counter put. Gate the finalize/log/flag on the counter actually bumping past the
+		# snapshot - a capped add otherwise posts a phantom "joins the fray" row and
+		# death-gate-flags a character who never entered the fight (and a deferred
+		# reinforcement would be silently consumed).
+		if = {
+			limit = { var:pod_combat_player_team_size > scope:pod_combat_summon_pos }
+			pod_combat_init_one_midfight_slot_effect = { TEAM = player }
+			pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
+			# Non-fatal duel: a mid-fight seat must also carry the death gate. The
+			# finalize stamp (pod_combat_apply_nonfatal_flag_effect) only covers the
+			# initial roster, so without this a reinforcement/summon could DIE from a
+			# filled wound track in a fatality=no fight. Host scope here, so sc_context
+			# reads bare; the end-combat cap + strip iterate pod_combat_active_slots
+			# (now incl. this slot), so it is capped and stripped like any other. (F2 fix.)
+			if = {
+				limit = {
+					has_variable = pod_combat_sc_context
+					var:pod_combat_sc_context.var:fatality = flag:no
+				}
+				$CHARACTER$ = { add_character_flag = pod_combat_nonfatal_active }
+			}
+		}
 	}
 }
 
@@ -50,11 +91,41 @@ pod_combat_add_enemy_midfight_effect = {
 			var:pod_combat_pc_slot = { has_variable = slot_char }
 		}
 		save_scope_value_as = { name = pod_combat_summon_pos value = var:pod_combat_enemy_team_size }
+		# Opposing-leader baseline - mirror of the ally twin (C31). Opposing side is the
+		# player team; the PC slot is the leader pointer. Seed the PC, then if the PC is
+		# dead override with the rear-most LIVING player-team member (the PC is normally
+		# alive mid-fight - its death ends combat - so this is defensive).
 		save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:pod_combat_pc_slot.var:slot_prowess }
 		var:pod_combat_pc_slot.var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+		if = {
+			limit = { NOT = { var:pod_combat_pc_slot = { pod_combat_slot_char_is_alive_trigger = yes } } }
+			ordered_in_list = {
+				variable = pod_combat_active_slots
+				limit = {
+					pod_combat_slot_is_player_team_trigger = yes
+					pod_combat_slot_char_is_alive_trigger = yes
+				}
+				order_by = { value = 0 subtract = var:team_position }
+				position = 0
+				save_scope_value_as = { name = pod_combat_summon_opp_prowess value = var:slot_prowess }
+				var:slot_char = { save_scope_as = pod_combat_summon_opp_leader }
+			}
+		}
 		POD_combat_duel_add_enemy_effect = { CHARACTER = $CHARACTER$ }
-		pod_combat_init_one_midfight_slot_effect = { TEAM = enemy }
-		pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
+		# Success gate - see the ally twin above for the rationale.
+		if = {
+			limit = { var:pod_combat_enemy_team_size > scope:pod_combat_summon_pos }
+			pod_combat_init_one_midfight_slot_effect = { TEAM = enemy }
+			pod_combat_push_system_log_named_effect = { MESSAGE_KEY = combatant_joins  CHARACTER = $CHARACTER$ }
+			# Non-fatal death gate for mid-fight seats - see the ally twin above. (F2 fix.)
+			if = {
+				limit = {
+					has_variable = pod_combat_sc_context
+					var:pod_combat_sc_context.var:fatality = flag:no
+				}
+				$CHARACTER$ = { add_character_flag = pod_combat_nonfatal_active }
+			}
+		}
 	}
 }
 
@@ -215,10 +286,6 @@ pod_combat_summon_combatant_glue_effect = {
 				gender_female_chance = 50
 				save_scope_as = pod_combat_new_summon
 			}
-			# Temp marker: backstops a future on_game_start orphan-sweep (primary despawn
-			# is the pod_combat_summoned_chars list below). Lifecycle, so set here for
-			# every recipe instead of in each recipe branch.
-			scope:pod_combat_new_summon = { add_character_flag = pod_combat_summoned_temp }
 			pod_combat_apply_summon_recipe_effect = { CHARACTER = scope:pod_combat_new_summon  MOVE_STORY = $MOVE_STORY$ }
 			# Team-specific entry points, so branch on the actor's team flag.
 			if = {

@@ -1,49 +1,16 @@
 ﻿##################################################
 # Combat-PoD — Single Combat Effect Override
 ##################################################
-# Redirects the PoD/vanilla duel system to the Combat-PoD minigame when
-# (a) exactly one side is the player character AND (b) the
-# `pod_combat_enabled` game rule is on AND (c) the duel is not
-# story-predetermined. Four fall-through paths route to PoD's original
-# logic (single-combat) or the group auto-resolve branch (group-combat):
-#   - NPC-vs-NPC duels — preserves base-game balance for fights the player
-#     never sees.
-#   - PC-vs-PC duels — the minigame UI is single-perspective; in MP only
-#     one PC would see it, so we deterministically resolve instead.
-#   - Any duel when `pod_combat_enabled` is off — lets the player disable
-#     the minigame globally without breaking duel events. Anyone debugging
-#     "why isn't the minigame firing?" should check this rule first.
-#   - FIXED = sc_attacker / sc_defender duels — vanilla honors the
-#     predetermined winner correctly; the minigame's in-fight outcome
-#     would otherwise contradict the story-specified result. Group-combat
-#     equivalent: the auto-resolve branch checks FIXED before its
-#     prowess coin flip, so PC-involved group fights with FIXED skip the
-#     minigame and pick the listed side.
+# Redirects PoD/vanilla duels to the Combat-PoD minigame when exactly one
+# side is the PC, the pod_combat_enabled rule is on, and FIXED is unset. All
+# other cases fall through to PoD's original body (Part 4): NPC-vs-NPC,
+# PC-vs-PC (minigame UI is single-perspective), rule off, and FIXED duels
+# (vanilla honors the story-specified winner). Params match the original.
 #
-# The override accepts the same parameters as the original:
-#   $SC_INITIATOR$, $SC_ATTACKER$, $SC_DEFENDER$
-#   $FATALITY$, $FIXED$, $LOCALE$
-#   $OUTPUT_EVENT$, $INVALIDATION_EVENT$
-#
-# For PC-involved duels the minigame handoff stashes the entire caller
-# context (sc_* refs, rule flags, follow-up event ID, parent-event aliases)
-# on a POD_combat_sc_context story_cycle anchored on Charon. The PC carries
-# a single pointer variable (pod_combat_sc_context → the story). When combat
-# ends, pod_combat_end_combat_effect fires pod_combat.9999 immediately 
-# that event reads through the pointer, restores all scopes from the story's
-# variables, applies DEATH-ONLY outcomes, fires the original PoD follow-up,
-# and cleans up by ending the story plus removing the one pointer var.
-# Wounds were already written to PoD health tracks LIVE during move
-# execution by the damage helpers in pod_combat_effects.txt.
-# pod_combat_route_to_pod_damage delegates to POD_increase_wounds_hostile_effect
-# inside each damage application, so the loser's wound track is current
-# by the time combat ends. pod_combat_apply_nonfatal_effect (called from
-# pod_combat_end_combat_effect BEFORE pod_combat.9999) only caps the
-# loser's track to ≥1 empty box in `fatality = no` duels and strips the
-# pod_combat_nonfatal_active flag from every combatant — it does NOT
-# apply combat damage. pod_combat.9999 explicitly skips re-applying
-# wounds for the same reason; see its `# Apply death-only outcomes`
-# block for the per-fatality-mode behaviour.
+# Post-combat flow lives in pod_combat.9999 (reads the PC's pod_combat_sc_context
+# pointer to restore scopes + fire the follow-up). Wounds are written LIVE during
+# move execution, so end-of-combat applies death-only outcomes; full handoff in
+# COMBAT_REFERENCE.info.
 ##################################################
 
 configure_start_single_combat_effect = {
@@ -63,13 +30,8 @@ configure_start_single_combat_effect = {
 		name = invalidation_event
 		value = event_id:$INVALIDATION_EVENT$
 	}
-	# Save FIXED here (in addition to the per-branch saves below)
-	# so the Part-3 gate can read scope:fixed to route
-	# story-predetermined duels through PoD's vanilla body. The
-	# minigame can't reliably rig itself to match a specified
-	# winner without undermining player agency, so we hand FIXED
-	# duels back to vanilla instead. Which already implements the
-	# "force the listed side to win" semantics correctly.
+	# Hoisted before the per-branch saves so the Part-3 gate can read
+	# scope:fixed (FIXED duels route to vanilla, which honors the winner).
 	save_scope_value_as = { name = fixed value = flag:$FIXED$ }
 
 	# ── Part 2: Self-match invalidation (same as original) ──
@@ -83,13 +45,9 @@ configure_start_single_combat_effect = {
 		debug_log_scopes = yes
 	}
 
-	# ── Part 3: PC-involved branch — launch the Combat-PoD minigame ──
-	# Only active when the pod_combat_system game rule is enabled (default).
-	# When disabled, falls through to Part 4 which runs PoD's original
-	# vanilla duel logic for all combats including PC-involved ones.
-	# Also falls through when FIXED specifies a predetermined winner —
-	# vanilla honors FIXED by forcing the listed side to win, while the
-	# minigame's in-fight outcome would override the story.
+	# -- Part 3: PC-involved branch - launch the Combat-PoD minigame --
+	# Fall-through cases (rule off, FIXED, PC-vs-PC) are covered in the
+	# file header and the limit block below.
 	else_if = {
 		limit = {
 			has_game_rule = pod_combat_enabled
@@ -129,12 +87,9 @@ configure_start_single_combat_effect = {
 		# The PC is excluded from auto-shift (they may prefer human form
 		# or have already shifted manually).
 
-		# Dispatch to the minigame launcher. One branch per side so the
-		# duel builder (create / add / finalize) runs in the PC's scope.
-		# INVALIDATION_EVENT is NOT passed through. Part 2 above already
-		# fired the invalidation event via scope:invalidation_event when
-		# attacker == defender, and the launcher doesn't need to retain
-		# the event id for downstream use.
+		# One branch per side so the duel builder runs in the PC's scope.
+		# INVALIDATION_EVENT isn't passed: Part 2 already fired it on the
+		# attacker==defender self-match, and the launcher doesn't reuse it.
 		if = {
 			limit = { scope:sc_attacker = { is_ai = no } }
 			scope:sc_attacker = {
@@ -163,23 +118,13 @@ configure_start_single_combat_effect = {
 	}
 
 	# ────────────────────────────────────────────────────────────────────
-	# Part 4: Fall-through branch — PoD's original duel body, ADAPTED.
-	#
-	# This is a verbatim port of PoD's `configure_start_single_combat_effect`
-	# body (the post-scope-setup `if = { limit = attacker != defender }`
-	# clause) with two deliberate adaptations:
-	#   1. Both POD_shapeshift_fera_warform_effect call sites further
-	#      down carry an `is_ai = yes` guard so PC-side fera don't
-	#      auto-shapeshift in this fallback path.
-	#   2. Signature-weapon and shirtlessness setup were lightly
-	#      reorganized to fold cleanly with the scope-setup hoisted to
-	#      Part 1 above.
-	# This branch fires for AI-vs-AI duels (preserved verbatim semantics
-	# from PoD), for PC-vs-PC duels (the minigame can't run a UI for two
-	# PCs simultaneously), for PC duels when `pod_combat_enabled` is off
-	# (the game-rule-disabled path), AND for PC duels with FIXED set so
-	# the story-specified winner is honored. The legacy body implements
-	# all four cases consistently.
+	# Part 4: Fall-through - PoD's original duel body, ADAPTED. Verbatim port of
+	# PoD's attacker!=defender clause with two deltas:
+	#   1. Both POD_shapeshift_fera_warform_effect sites add an is_ai=yes guard so
+	#      PC-side fera don't auto-shapeshift in this fallback.
+	#   2. Signature-weapon / shirtlessness setup reordered to fold with the
+	#      Part-1 scope hoist.
+	# Fires for every non-minigame case (see header).
 	# ────────────────────────────────────────────────────────────────────
 	else = {
 		hidden_effect = { remove_single_combat_info_effect = yes }
@@ -310,23 +255,10 @@ configure_start_single_combat_effect = {
 # Combat-PoD minigame launcher — called from configure_start_single_combat_effect
 ##################################################
 #
-# Runs in the PC's scope. Builds a POD_combat_sc_context story_cycle on
-# Charon to stash the PoD duel metadata (sc_* refs, rule flags,
-# follow-up event id, parent-event aliases) as story variables. The PC
-# carries a single pointer var (pod_combat_sc_context) into the story
-# so pod_combat.9999 can reconstruct scopes and fire the original
-# follow-up event when the minigame ends, then hands off to the duel
-# builder (POD_combat_create_duel_effect / add / finalize).
-#
-# Parameters:
-#   $OPPONENT$     — the non-PC combatant (character scope)
-#   $OUTPUT_EVENT$ — follow-up event fired on sc_initiator at end
-#   $FATALITY$     — flag: default / possible / no / always / practice
-#   $FIXED$        — flag: sc_attacker / sc_defender / no
-#   $LOCALE$       — flag: battlefield / terrain_scope / throne_room / etc.
-# (INVALIDATION_EVENT is NOT a launcher parameter — the self-match
-#  invalidation fires from the override's Part 2 BEFORE the launcher
-#  runs, so the launcher doesn't need to carry the event id.)
+# Runs in the PC's scope; builds the POD_combat_sc_context story (sc_*
+# refs, rule flags, follow-up id, parent aliases) and hands off to the
+# duel builder. pod_combat.9999 reads it back at combat end.
+# Param contract is documented on pod_combat_sc_launch_minigame_effect below.
 ##################################################
 
 ##################################################
@@ -416,6 +348,7 @@ pod_combat_sc_stash_parent_aliases_effect = {
 	scope:actor            ?= { scope:sc_ctx = { set_variable = { name = alias_actor            value = scope:actor } } }
 	scope:parent           ?= { scope:sc_ctx = { set_variable = { name = alias_parent           value = scope:parent } } }
 	scope:aggressor_vassal ?= { scope:sc_ctx = { set_variable = { name = alias_aggressor_vassal value = scope:aggressor_vassal } } }
+	scope:defender_vassal  ?= { scope:sc_ctx = { set_variable = { name = alias_defender_vassal  value = scope:defender_vassal } } }
 	scope:distant_knight   ?= { scope:sc_ctx = { set_variable = { name = alias_distant_knight   value = scope:distant_knight } } }
 	scope:snitch           ?= { scope:sc_ctx = { set_variable = { name = alias_snitch           value = scope:snitch } } }
 	scope:strong_leader    ?= { scope:sc_ctx = { set_variable = { name = alias_strong_leader    value = scope:strong_leader } } }

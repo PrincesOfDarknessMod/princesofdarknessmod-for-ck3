@@ -136,6 +136,16 @@ story only holds the `slot_char` pointer; the SVs read
 | `pod_combat_slot_agg_damage_sv` | aggravated wound boxes |
 | `pod_combat_slot_total_damage_sv` | total wound boxes filled |
 
+> **Why not cached?** Caching HP on the slot story was tried earlier
+> and rejected. Stale cache between turns vs PoD's wound writes
+> caused constant desync. Deriving HP live keeps display and
+> gameplay reads in lockstep with PoD's canonical state.
+>
+> The one sanctioned exception is the **wound-bar display mirror**
+> (`slot_mirror_total` / `_agg` / `_maxhp`): the combat window reads
+> these plain slot vars instead of the `*_sv` chain for perf, and they
+> are refreshed from the SVs at every HP-change chokepoint. Display-only,
+> never a logic source. See *HP cache rejected* in §7.
 
 ### Per-slot stance flags (on the `POD_combat_slot` story)
 
@@ -182,16 +192,24 @@ can read it without crossing into the slot-story scope.
 | `pod_combat_target_*` | target's stats (loaded from `selected_target` slot) |
 | `pod_combat_current_hit_chance` | active attacker's hit chance this attack |
 
-Most tier, stance, retaliation, spirit, and `base_*` fields exist on
-both sides — load/save effects walk slot stories and write into /
-read back from the matching workspace mirror. As of the workspace-mirror
-symmetrization, the mirrors are **fully symmetric**: every field —
-including `slot_init_bonus`, `slot_ap_drain`, and `slot_energy_used` — is
+Most tier, stance, retaliation, and `base_*` fields exist on both sides -
+load/save effects walk slot stories and write into / read back from the
+matching workspace mirror. Those mirrors are symmetric: every such field
+(including `slot_init_bonus`, `slot_ap_drain`, and `slot_energy_used`) is
 loaded and saved on BOTH the actor and target side. Both sides flow
 through one parametric pair, `pod_combat_load_side_from_story_helper` /
 `pod_combat_save_side_to_story_helper` (`SIDE = actor|target`); the four
 public load/save effects (`load_actor` / `load_target` / `save_actor` /
 `save_target`) are thin wrappers over them.
+
+Exception - the two spirit-capability flags are LOAD-ONLY.
+`slot_can_damage_spirit` / `slot_incorporeal_spirit` are mirrored at load
+but deliberately NOT written back at save: they are write-once facts set in
+`pod_combat_init_slot_from_character_effect` (from `POD_can_damage_spirit_trigger`
+/ `POD_can_be_killed_physically_trigger`, static trait/perk/artifact facts) and
+never mutate mid-fight, so the slot copy can't diverge from the mirror. A move
+that changed spirit capability mid-fight would break this and need both a
+save-helper writeback and a slot-story writer.
 
 A few fields only have a live reader on one side (e.g. `slot_energy_used`
 feeds the actor-side AI energy-attrition weighting; the target-side
@@ -222,6 +240,7 @@ the full statement and enforcement strategy.
 | `pod_combat_last_outcome` | top-level outcome flag (`flag:attack` / `heal` / `morale_damage` / `morale_healed` / `utility`) — see §4 |
 | `pod_combat_last_attack_result` | inner attack resolution (`flag:hp_damage` / `soaked` / `missed` / `dodged` / `stealthed` / `guard_blocked`); only meaningful when outcome=attack |
 | `pod_combat_last_retal_fired` | overlay flag — 1 when retaliation fired on this row, absent otherwise |
+| `pod_combat_aoe_any_hp_damage` | AoE "any target took HP damage" latch - set in the `team_enemy` damage loop, read by the `on_hp_damage` heal rider so AoE drains (`river_of_blood`, `shintai_of_blood`) self-heal once if any enemy was hit. Needed because the per-target log clear wipes `last_outcome`/`last_attack_result` mid-loop; reset with the other `last_*` vars at the §2 reset + cleanup |
 
 The move story is no longer host-side; `push_log` receives it as an
 explicit `MOVE_STORY` parameter from `POD_execute_combat_move §16`.
@@ -740,15 +759,16 @@ Stat is `soak` or `hit`, direction is `buff` or `debuff`, duration is
 
 - The tier stat categories change (currently `soak`, `hit`).
 - Tier magnitudes change (the ±10/20/30 small/medium/large values).
-  These are hardcoded in lockstep across THREE files — CK3 `@`-constants
-  are file-scoped, so the value can't be shared: `pod_combat_tier_effects.txt`
-  (`@*_buff_mag`, workspace/slot recalc), `pod_combat_values.txt`
-  (`@combat_tier_*_mag`, GUI display SVs), and `POD_health_track_values.txt`
-  (bare `10/20/30` in `POD_soak_chance` — the soak the wound pipeline
-  actually rolls). NOTE: the move-side tier setters in
-  `pod_combat_move_init_effects.txt` carry only the tier ORDINAL (1/2/3),
-  not the magnitude, so they are NOT part of this lockstep. Stealth's hit
-  bonus is also outside it: a single designer-tunable SV,
+  These are single-sourced: the `combat_tier_small_mag` /
+  `combat_tier_medium_mag` / `combat_tier_large_mag` script_values in
+  `pod_combat_values.txt` are cross-file constants read by name (NOT
+  `@`-macros) everywhere they apply: `pod_combat_tier_effects.txt`
+  (workspace/slot recalc), the GUI display SVs in `pod_combat_values.txt`,
+  and `POD_soak_chance` in `POD_health_track_values.txt` (the soak the wound
+  pipeline actually rolls). Retune by editing those three SV definitions only;
+  there is no lockstep to maintain. The move-side tier setters in
+  `pod_combat_move_init_effects.txt` carry only the tier ORDINAL (1/2/3), not 
+  the magnitude. Stealth's hit bonus is also outside it: a single designer-tunable SV,
   `pod_combat_stealth_hit_bonus` (default 30, `pod_combat_values.txt`),
   feeds the recalc core's STEALTH_BONUS param and the slot-recalc mirror.
 
@@ -816,6 +836,29 @@ the call untouched. Each new reaction stays a few lines of declaration.
 
 Knowledge from the trenches. These are mistakes that have already
 been made — reading them spares re-making them.
+
+### HP cache rejected
+
+Caching HP on the slot story was tried and reverted. Stale cache
+between turns vs PoD's wound writes was a constant source of desync.
+Live SVs that derive HP from the character's PoD wound vars
+(`POD_empty_damage_boxes` etc.) keep display and gameplay reads in
+lockstep with PoD's canonical state. The cost is a small SV on every
+read; the alternative was cache-invalidation bugs on every move.
+
+**Sanctioned exception: the wound-bar display mirror.** The combat
+window's wound pips read three plain slot vars (`slot_mirror_total` /
+`slot_mirror_agg` / `slot_mirror_maxhp`) written by
+`pod_combat_write_slot_hp_mirror_effect`, refreshed at the
+`pod_combat_save_workspace_effect` and `pod_combat_tick_dots_effect`
+tails (all-slots) and seeded at `pod_combat_init_slot_from_character_effect`
+(per-slot). This is NOT the rejected logic cache: it is display-only
+(the wound system stays authoritative; game logic and the AI never read
+the mirror), and it is rewritten at every HP-change chokepoint before
+the GUI next renders, so it cannot go stale. It exists because the GUI
+re-derived the `pod_combat_slot_*_sv` chain ~80x per slot card per frame,
+which the profiler flagged as hot. **Do NOT revert the GUI to the live
+SVs** - that reintroduces the per-frame fanout this mirror removes.
 
 ### Tooltip-build / `hidden_effect_new_object`
 
