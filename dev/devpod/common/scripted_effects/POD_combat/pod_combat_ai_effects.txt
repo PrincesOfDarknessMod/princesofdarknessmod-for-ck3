@@ -19,8 +19,8 @@
 @ai_repeat_prev2        = -12
 
 # Need-based bonuses.
-@ai_heal_needed         = 30   # hp_heal when applicable hp track has room
 @ai_morale_heal_low     = 30   # morale_heal when morale below threshold
+@ai_morale_heal_early   = 12   # smaller proactive morale top-up in the pre-shaken band
 @ai_defense_when_hurt   = 15   # guard / dodge / stealth / soak-buff while hp < max
 @ai_hitbuff_low_acc     = 15   # hit_buff while hit_chance ≤ threshold
 
@@ -29,7 +29,7 @@
 # Separate from the generic spam gate: stacking both penalties floored a
 # round hit-buff out of contention, so the AI never refreshed an expired one
 # late-turn. -12 keeps a late refresh pickable while still discouraging it.
-@ai_round_buff_lateap   = -12  # round hit-buff specifically, low AP remaining
+@ai_round_buff_lateap   = -6   # round hit-buff specifically, low AP remaining (softened from -12: with -8 spam the old -20 stack buried a genuinely-needed late refresh)
 
 # Tier-size preference (buffs AND debuffs) — tier 3 buys 3× the
 # effect for the same AP cost, so bias toward it. Tier 2 is pinned
@@ -37,6 +37,16 @@
 @ai_tier_small          = -5   # tier 1 (small  / 10%)
 @ai_tier_medium         = 0    # tier 2 (medium / 20%) — neutral baseline
 @ai_tier_large          = 10   # tier 3 (large  / 30%)
+@ai_buff_undersized     = -8   # extra penalty on a buff/debuff when an affordable, strictly-larger tier of the SAME stat is held (steer to the bigger version)
+@ai_spirit_gate_wasted    = -25  # physical attack vs an incorporeal target the actor can't hurt (guaranteed whiff)
+@ai_spirit_gate_viable    = 15   # damage move that CAN connect with an incorporeal target
+@ai_aoe_multi_enemy       = 12   # team_enemy damage while 2+ enemies of the actor are alive
+@ai_hitdebuff_advantage   = 10   # hit_debuff aimed at an accurate enemy (drag a real threat down)
+@ai_combat_buff_reward    = 8    # combat-duration buff/debuff early in the fight (outlasts a round buff)
+@ai_cheap_finish_tempo    = 12   # affordable damage when AP is running low (press, don't dawdle on utility)
+@ai_energy_high_cost_lowap = -15 # heavy move (energy_cost >= 3) when AP is tight (avoid stranding the turn)
+@ai_thresh_lowap_expensive = 3   # "AP tight" ceiling for the heavy-move penalty
+@ai_control_defend        = 10   # control (mind-control / AP-drain) while wounded vs an accurate threat
 
 # Remove-guard bias.
 @ai_remove_guard_hit    = 15   # target IS guarding
@@ -47,6 +57,7 @@
 @ai_bypass_stealth      = 15   # bypass_stealth vs stealthed target
 @ai_cash_in_stealth     = 20   # actor stealthed → spend the +30 hit window
 @ai_aggravated_vs_soak  = 20   # high-soak target → bias aggravated
+@ai_superficial_vs_soak = -30  # mundane superficial attack (no aggravated, no elemental source) vs a >=70% soak wall
 @ai_weakness_exploit    = 25   # damage_source matches target splat weakness
 
 # Finish bonuses.
@@ -77,7 +88,8 @@
 @ai_weight_floor        = 1
 
 # Comparison thresholds read by the modifier `limit`s.
-@ai_thresh_morale_shaken   = 10   # morale-heal trigger
+@ai_thresh_morale_shaken   = 10   # morale-heal trigger (below = shaken, full bonus)
+@ai_thresh_morale_early    = 15   # morale-heal early band ceiling (shaken..this = proactive)
 @ai_thresh_hit_low         = 30   # hit_penalty_low fires at-or-below
 @ai_thresh_hit_mid         = 40   # hit_penalty_mid fires at-or-below
 @ai_thresh_hit_buff_band   = 50   # hitbuff_low_acc fires at-or-below
@@ -160,7 +172,8 @@
 
 # ── B3: CRITICAL HEAL ──────────────────────────────────────────
 # A dying actor (at its last box) with no finishable enemy to kill instead gets
-# +20 heal weight ON TOP of @ai_heal_needed (+30 -> effective +50), so it tops up
+# +20 heal weight ON TOP of the scaled base heal (the pod_combat_ai_heal_weight_* host vars,
+# ~+30 when dying -> effective ~+50), so it tops up
 # rather than trading a doomed strike. enemy_finishable is precomputed once per
 # turn in GROUP (pod_combat_ai_flag_finishable_enemy_effect).
 @ai_heal_critical         = 20   # extra heal weight for a dying actor with no kill available
@@ -541,6 +554,40 @@ pod_combat_ai_select_and_execute_move_effect = {
 		#                       anti-repetition history.
 		save_scope_as = combat_host
 
+		# Deficit-scaled heal weights, precomputed in host scope (where the actor HP
+		# script_values resolve). A random_in_list weight `add` takes only flat numbers /
+		# @consts / var refs - NOT a named script_value or inline math - so the curve is
+		# computed here and the heal modifiers read it via add = scope:combat_host.var:X.
+		# Recomputed each AI action; curve = base + (damaged fraction of the track) * span.
+		if = {
+			limit = { pod_combat_actor_sup_ceiling_value > 0 }
+			set_variable = {
+				name = pod_combat_ai_heal_weight_superficial
+				value = {
+					value = pod_combat_actor_sup_ceiling_value
+					subtract = pod_combat_actor_hp_value
+					divide = pod_combat_actor_sup_ceiling_value
+					multiply = pod_combat_ai_heal_span_value
+					add = pod_combat_ai_heal_base_value
+				}
+			}
+		}
+		else = { set_variable = { name = pod_combat_ai_heal_weight_superficial  value = pod_combat_ai_heal_base_value } }
+		if = {
+			limit = { pod_combat_actor_max_hp_value > 0 }
+			set_variable = {
+				name = pod_combat_ai_heal_weight_aggravated
+				value = {
+					value = pod_combat_actor_max_hp_value
+					subtract = pod_combat_actor_hp_value
+					divide = pod_combat_actor_max_hp_value
+					multiply = pod_combat_ai_heal_span_value
+					add = pod_combat_ai_heal_base_value
+				}
+			}
+		}
+		else = { set_variable = { name = pod_combat_ai_heal_weight_aggravated  value = pod_combat_ai_heal_base_value } }
+
 		var:pod_combat_actor_char = {
 			save_scope_as = ai_actor
 
@@ -711,12 +758,12 @@ pod_combat_ai_select_and_execute_move_effect = {
 						this = scope:ai_actor.var:pod_combat_ai_prev2_move
 					}
 
-					# Heal when hurt, split by heal_type so +30 only fires
+					# Heal when hurt, split by heal_type so the scaled weight only fires
 					# where the heal can do something: superficial caps at
 					# sup_ceiling, aggravated caps at max_hp. A heal with no
 					# heal_type fires neither branch (safe default).
 					modifier = {
-						add = @ai_heal_needed
+						add = scope:combat_host.var:pod_combat_ai_heal_weight_superficial
 						has_variable = hp_heal
 						has_variable = heal_type
 						var:heal_type = flag:superficial
@@ -725,7 +772,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 					modifier = {
-						add = @ai_heal_needed
+						add = scope:combat_host.var:pod_combat_ai_heal_weight_aggravated
 						has_variable = hp_heal
 						has_variable = heal_type
 						var:heal_type = flag:aggravated
@@ -734,7 +781,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 					# B3 critical heal: actor at its last box and no finishable enemy to
-					# kill instead -> stack an extra heal incentive over @ai_heal_needed
+					# kill instead -> stack an extra heal incentive over the scaled base heal
 					# (so a dying AI tops up rather than trading a doomed strike). Gated
 					# on hp_heal + heal_type so it rides the same heals the base bonus
 					# does. enemy_finishable is precomputed once per turn in GROUP
@@ -755,6 +802,17 @@ pod_combat_ai_select_and_execute_move_effect = {
 						add = @ai_morale_heal_low
 						has_variable = morale_heal
 						scope:combat_host = { var:pod_combat_actor_morale < @ai_thresh_morale_shaken }
+					}
+					# Proactive morale top-up in the pre-shaken band (shaken..early): top
+					# up before it breaks, but smaller than the shaken bonus so a genuine
+					# crisis still outweighs it.
+					modifier = {
+						add = @ai_morale_heal_early
+						has_variable = morale_heal
+						scope:combat_host = {
+							var:pod_combat_actor_morale >= @ai_thresh_morale_shaken
+							var:pod_combat_actor_morale <= @ai_thresh_morale_early
+						}
 					}
 					# Guard when hurt.
 					modifier = {
@@ -867,6 +925,26 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
+					# ── Undersized-buff downgrade ───────────────────
+					# On top of the flat tier preference: if the candidate buff/debuff
+					# has an affordable strictly-larger tier of the SAME stat in the
+					# loadout this action, push the AI off the smaller one toward the
+					# bigger version. Per-stat so the affordable-larger scan only looks
+					# at the matching kind.
+					modifier = {
+						add = @ai_buff_undersized
+						OR = {
+							AND = { has_variable = soak_buff_round_tier    pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = soak_buff_round_tier } }
+							AND = { has_variable = soak_buff_combat_tier   pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = soak_buff_combat_tier } }
+							AND = { has_variable = soak_debuff_round_tier  pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = soak_debuff_round_tier } }
+							AND = { has_variable = soak_debuff_combat_tier pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = soak_debuff_combat_tier } }
+							AND = { has_variable = hit_buff_round_tier     pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = hit_buff_round_tier } }
+							AND = { has_variable = hit_buff_combat_tier    pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = hit_buff_combat_tier } }
+							AND = { has_variable = hit_debuff_round_tier   pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = hit_debuff_round_tier } }
+							AND = { has_variable = hit_debuff_combat_tier  pod_combat_ai_has_affordable_larger_buff_tier_trigger = { STAT_VAR = hit_debuff_combat_tier } }
+						}
+					}
+
 					# Remove-guard vs guarded target.
 					modifier = {
 						add = @ai_remove_guard_hit
@@ -917,6 +995,24 @@ pod_combat_ai_select_and_execute_move_effect = {
 						has_variable = damage_type
 						var:damage_type = flag:aggravated
 						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							var:pod_combat_target_soak >= @ai_thresh_high_soak
+						}
+					}
+
+					# Complement of the aggravated bias above: a mundane superficial
+					# attack (superficial damage_type, no elemental/special damage_source)
+					# mostly bounces off a high-soak wall, so steer hard off it when the
+					# actor has anything better. damage_type is always set on an hp_damage
+					# move (POD_combat_move_set_hp_damage sets it), so the read is safe;
+					# the weight floor keeps it pickable as a last resort.
+					modifier = {
+						add = @ai_superficial_vs_soak
+						has_variable = hp_damage
+						has_variable = damage_type
+						var:damage_type = flag:superficial
+						var:targeting = flag:single_enemy
+						NOT = { has_variable = damage_source }
 						scope:combat_host = {
 							var:pod_combat_target_soak >= @ai_thresh_high_soak
 						}
@@ -1054,6 +1150,100 @@ pod_combat_ai_select_and_execute_move_effect = {
 						has_variable = retaliate_if_hit
 						scope:combat_host = {
 							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+						}
+					}
+
+					# All additive nudges (constants in the header block). Target/host
+					# workspace reads (incorporeal, hit_chance, AP, energy_used) are all
+					# loaded at scoring time by the group load helper.
+
+					# Spirit gate: a physical attack auto-whiffs an incorporeal target
+					# unless the actor can damage spirits. Steer hard off the wasted swing.
+					modifier = {
+						add = @ai_spirit_gate_wasted
+						has_variable = hp_damage
+						has_variable = checks_spirit_gate
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							has_variable = pod_combat_target_incorporeal_spirit
+							NOT = { has_variable = pod_combat_actor_can_damage_spirit }
+						}
+					}
+					# ...and toward a damage move that CAN connect with it (either the
+					# move bypasses the gate, or the actor can hurt spirits).
+					modifier = {
+						add = @ai_spirit_gate_viable
+						has_variable = hp_damage
+						var:targeting = flag:single_enemy
+						scope:combat_host = { has_variable = pod_combat_target_incorporeal_spirit }
+						OR = {
+							NOT = { has_variable = checks_spirit_gate }
+							scope:combat_host = { has_variable = pod_combat_actor_can_damage_spirit }
+						}
+					}
+					# AoE pays off with multiple live targets. No per-team alive count
+					# exists, so count enemy-of-actor live slots inline (count >= 2),
+					# reusing the summon block's team-compare idiom.
+					modifier = {
+						add = @ai_aoe_multi_enemy
+						has_variable = hp_damage
+						var:targeting = flag:team_enemy
+						scope:combat_host = {
+							any_in_list = {
+								variable = pod_combat_active_slots
+								count >= 2
+								NOT = { var:combat_team = scope:combat_host.var:pod_combat_current_actor_team }
+								pod_combat_slot_is_alive_trigger = yes
+							}
+						}
+					}
+					# Drag a genuinely accurate enemy's hit chance down (debuff-side
+					# mirror of the self hit-buff-when-low bonus).
+					modifier = {
+						add = @ai_hitdebuff_advantage
+						OR = { has_variable = hit_debuff_round_tier  has_variable = hit_debuff_combat_tier }
+						var:targeting = flag:single_enemy
+						scope:combat_host = { has_variable = pod_combat_target_hit_chance  var:pod_combat_target_hit_chance >= @ai_thresh_hit_buff_band }
+					}
+					# A combat-long buff/debuff outlasts a round one, so reward setting
+					# it up early (before much energy is spent).
+					modifier = {
+						add = @ai_combat_buff_reward
+						OR = {
+							has_variable = soak_buff_combat_tier
+							has_variable = hit_buff_combat_tier
+							has_variable = soak_debuff_combat_tier
+							has_variable = hit_debuff_combat_tier
+						}
+						scope:combat_host = { var:pod_combat_actor_energy_used < 2 }
+					}
+					# Low on AP: press affordable damage rather than spend the dwindling
+					# action budget on utility (candidates are already affordability-gated,
+					# so the surviving damage here is the cheap kind).
+					modifier = {
+						add = @ai_cheap_finish_tempo
+						has_variable = hp_damage
+						scope:combat_host = { var:pod_combat_current_ap <= @ai_thresh_late_ap }
+					}
+					# Conversely, avoid committing a heavy move when AP is tight enough
+					# that it would strand the rest of the turn.
+					modifier = {
+						add = @ai_energy_high_cost_lowap
+						has_variable = energy_cost
+						var:energy_cost >= 3
+						scope:combat_host = { var:pod_combat_current_ap <= @ai_thresh_lowap_expensive }
+					}
+					# Control as defense: when wounded and facing an accurate threat,
+					# disabling it (dominate / drain AP) is worth the turn. Target AP is
+					# untracked, so accuracy stands in for "dangerous" (cf. is_ai gate above).
+					modifier = {
+						add = @ai_control_defend
+						OR = { has_variable = mind_control  has_variable = ap_drain }
+						var:targeting = flag:single_enemy
+						scope:combat_host = {
+							pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+							has_variable = pod_combat_target_hit_chance
+							var:pod_combat_target_hit_chance >= @ai_thresh_hit_buff_band
 						}
 					}
 
