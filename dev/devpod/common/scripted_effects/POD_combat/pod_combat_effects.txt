@@ -545,28 +545,12 @@ pod_combat_route_to_pod_damage = {
 	# $COUNT$ = raw damage (PoD multiplies by splat weakness + soak roll).
 	#
 	# Return contract - scope values only, NO host-var side effects:
-	#   scope:damage_dealt       = post-soak/multiplier amount (0 if fully
-	#                              soaked or practice mode)
-	#   scope:attack_result_flag = flag:hp_damage / soaked / utility
-	#                              (utility = practice sentinel; callers
-	#                              always see exactly one of the three)
+	#   scope:damage_dealt       = post-soak/multiplier amount (0 if fully soaked)
+	#   scope:attack_result_flag = flag:hp_damage / soaked (callers always see
+	#                              exactly one of the two)
 	# Each caller decides whether to lift these into pod_combat_last_*;
 	# see the lift sites in pod_combat_apply_damage_payload_effect (main
 	# attack), §8 self-damage (discards), and the retaliation helper.
-
-	# Practice mode: sparring duel - skip the wound pipeline entirely
-	# (morale still applies, tracked on the workspace). Returns
-	# damage_dealt=0 + flag:utility so morale spillover / retaliation /
-	# log-line logic all short-circuit to the utility fallback row.
-	if = {
-		limit = {
-			has_variable = pod_combat_sc_context
-			var:pod_combat_sc_context.var:fatality = flag:practice
-		}
-		save_scope_value_as = { name = damage_dealt       value = 0 }
-		save_scope_value_as = { name = attack_result_flag value = flag:utility }
-	}
-	else = {
 
 	# Snapshot superficial + aggravated counts SEPARATELY (the wound SVs
 	# gate on is_alive, so post reads are 0 on a kill). Separate tracks
@@ -677,7 +661,6 @@ pod_combat_route_to_pod_damage = {
 			}
 		}
 	}
-	}  # end else (non-practice path)
 }
 
 
@@ -1785,6 +1768,13 @@ pod_combat_apply_nonfatal_effect = {
 		# Strip the nonfatal flag AFTER the cap - order matters.
 		pod_combat_clear_nonfatal_flag_effect = yes
 	}
+	else_if = {
+		# Practice spar: real wounds were taken live; undo them by restoring the
+		# pre-fight snapshot, then strip the flag. No cap (the restore overwrites).
+		limit = { pod_combat_is_practice_trigger = yes }
+		pod_combat_restore_practice_wounds_effect = yes
+		pod_combat_clear_nonfatal_flag_effect = yes
+	}
 }
 
 # ─── HEALING EFFECTS ────────────────────────────────────────────────
@@ -1799,42 +1789,29 @@ pod_combat_route_to_pod_heal = {
 	# $AMOUNT$ = boxes to heal (1 HP = 1 box).
 	# Sets scope:heal_applied = actual amount healed (clamped to wounds).
 
-	# Practice mode inflicted no wounds: nothing to heal, return 0.
-	if = {
-		limit = {
-			has_variable = pod_combat_sc_context
-			var:pod_combat_sc_context.var:fatality = flag:practice
+	var:pod_combat_$SIDE$_char = {
+		save_scope_value_as = { name = pre_total_wounds value = POD_total_damage_boxes }
+		if = {
+			limit = { always = $AGGRAVATED$ }
+			POD_heal_aggravated_wound_effect = { COUNT = $AMOUNT$ }
 		}
-		save_scope_value_as = { name = heal_applied value = 0 }
-		# 0 lets the dispatcher render "-" instead of "+0 HP".
-		set_variable = { name = pod_combat_last_heal_amount value = 0 }
-		pod_combat_set_outcome_if_unset_effect = { CODE = heal }
+		else = {
+			POD_heal_superficial_wound_effect = { COUNT = $AMOUNT$ }
+		}
+		save_scope_value_as = { name = post_total_wounds value = POD_total_damage_boxes }
 	}
-	else = {
-		var:pod_combat_$SIDE$_char = {
-			save_scope_value_as = { name = pre_total_wounds value = POD_total_damage_boxes }
-			if = {
-				limit = { always = $AGGRAVATED$ }
-				POD_heal_aggravated_wound_effect = { COUNT = $AMOUNT$ }
-			}
-			else = {
-				POD_heal_superficial_wound_effect = { COUNT = $AMOUNT$ }
-			}
-			save_scope_value_as = { name = post_total_wounds value = POD_total_damage_boxes }
+	save_scope_value_as = {
+		name = heal_applied
+		value = {
+			value = scope:pre_total_wounds
+			subtract = scope:post_total_wounds
+			min = 0
 		}
-		save_scope_value_as = {
-			name = heal_applied
-			value = {
-				value = scope:pre_total_wounds
-				subtract = scope:post_total_wounds
-				min = 0
-			}
-		}
-		# Workspace HP SVs derive from the char on read, so no update here.
-		# Own var keeps pod_combat_last_damage intact on damage+heal moves.
-		set_variable = { name = pod_combat_last_heal_amount value = scope:heal_applied }
-		pod_combat_set_outcome_if_unset_effect = { CODE = heal }
 	}
+	# Workspace HP SVs derive from the char on read, so no update here.
+	# Own var keeps pod_combat_last_damage intact on damage+heal moves.
+	set_variable = { name = pod_combat_last_heal_amount value = scope:heal_applied }
+	pod_combat_set_outcome_if_unset_effect = { CODE = heal }
 }
 
 pod_combat_restore_hp_superficial_effect = {
@@ -1906,7 +1883,11 @@ pod_combat_end_combat_effect = {
 
 	# Batch morale -> Mental Strain into one POD_static_stress_gain pass per combatant from
 	# final morale (replaces the per-event calls that caused the lag spikes).
-	pod_combat_apply_morale_strain_effect = yes
+	# A practice spar leaves no lasting Mental Strain, so skip the whole pass.
+	if = {
+		limit = { NOT = { pod_combat_is_practice_trigger = yes } }
+		pod_combat_apply_morale_strain_effect = yes
+	}
 
 	# Save winner/loser scopes first so the duel-end effect (and any
 	# submod override of it) has named access to the outcome characters.
@@ -2097,5 +2078,53 @@ pod_combat_init_step_preference_effect = {
 		limit = { NOT = { has_global_variable = pod_combat_auto_advance_initialized } }
 		set_global_variable = { name = pod_combat_auto_advance value = yes }
 		set_global_variable = { name = pod_combat_auto_advance_initialized value = yes }
+	}
+}
+
+###### PRACTICE-SPAR WOUND SNAPSHOT / RESTORE ######
+# POD-Integration addition: a practice (fatality = practice) spar now applies REAL
+# wounds live during the fight (so it has stakes), is unkillable (pod_combat_nonfatal_active
+# stamped at finalize), and leaves NO lasting harm - the pre-fight wound state is snapshot
+# at combat start and restored at combat end. Both run in host scope (active-slot list).
+
+# this = a combatant char. Snapshot its wound track (the two damage vars, read via
+# the SVs so an unset track reads 0) for restore at combat end.
+pod_combat_snapshot_one_practice_wounds_effect = {
+	set_variable = { name = pod_combat_practice_sup_snapshot value = POD_superficial_damage_boxes }
+	set_variable = { name = pod_combat_practice_agg_snapshot value = POD_aggravated_damage_boxes }
+}
+
+pod_combat_snapshot_practice_wounds_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		var:slot_char = { pod_combat_snapshot_one_practice_wounds_effect = yes }
+	}
+}
+
+pod_combat_restore_practice_wounds_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		# A combatant summoned mid-fight (after the start snapshot) has no snapshot var;
+		# skip it so the restore never reads an unset var (it keeps its post-summon wounds).
+		limit = { var:slot_char = { has_variable = pod_combat_practice_sup_snapshot } }
+		var:slot_char = {
+			# The wound track is two vars (superficial + aggravated). Restore each to its
+			# snapshot - set when >0, else remove so a pristine combatant keeps an unset track
+			# (no leftover =0 var) - then POD_refresh_health_track re-derives the wound traits.
+			# Silent: no damage/heal interface toast.
+			if = {
+				limit = { var:pod_combat_practice_sup_snapshot > 0 }
+				set_variable = { name = POD_health_damage_num value = var:pod_combat_practice_sup_snapshot }
+			}
+			else = { remove_variable = POD_health_damage_num }
+			if = {
+				limit = { var:pod_combat_practice_agg_snapshot > 0 }
+				set_variable = { name = POD_health_aggravated_damage_num value = var:pod_combat_practice_agg_snapshot }
+			}
+			else = { remove_variable = POD_health_aggravated_damage_num }
+			POD_refresh_health_track = yes
+			remove_variable = pod_combat_practice_sup_snapshot
+			remove_variable = pod_combat_practice_agg_snapshot
+		}
 	}
 }
