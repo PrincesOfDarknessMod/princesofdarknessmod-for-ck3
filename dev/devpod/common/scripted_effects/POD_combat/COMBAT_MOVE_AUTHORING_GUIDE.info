@@ -18,26 +18,28 @@ reads those variables at runtime when a combatant uses the move. You
 never write engine code to add a move. You declare the move's data and
 the engine does the rest.
 
-Authoring a move means producing four artifacts:
+Authoring a move means producing four artifacts (five for a gated move):
 
 | # | Artifact | What it is | Where it lives |
 |---|----------|------------|----------------|
 | 1 | A `POD_init_combat_move` call (plus setters) | Builds the move story_cycle and stamps its mechanics | `devpod/common/scripted_effects/POD_combat/pod_combat_move_list_effects.txt` (or a hand-maintained file — see **Quick start**) |
-| 2 | A hidden decision | Holds the unlock gate (trait / perk / faith checks) | `devpod/common/decisions/POD_Combat/pod_combat_move_decisions.txt` |
+| 2 | A hidden decision | Shows the move's *displayed* unlock requirement in the loadout editor - NOT the real gate (see **Unlock gating**) | `devpod/common/decisions/POD_Combat/pod_combat_move_decisions.txt` |
 | 3 | Three localization keys | Display name, dynamic stat-card desc, flavor tooltip | `devpod/localization/english/gui/POD_combat_l_english.yml` (or any hand-maintained `.yml`) |
 | 4 | A picture (optional) | The card illustration in the loadout editor and combat bar | One of the `@texture_*` constants at the top of the decisions file |
-| 5 | unlocks_move_trigger | This lock the move for the AI | pod_combat_actor_unlocks_move_trigger |
+| 5 | An unlock-dispatcher branch (gated moves only) | The **real** equip / use gate - the trait / perk check, keyed on the move's `SKILL_KEY` under its `CONFIG` | `devpod/common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt` |
 
-Artifacts 1–3 are mandatory. Skip any one and the move fails to load,
-fails to gate, or shows broken text. Artifact 4 is cosmetic, but a
-decision with no `picture` renders a generic placeholder. Artifact 5 is 
-most mandatory since an AI will always be able to use your move if you
-don't create a specific trigger for it.
+Artifacts 1-3 are mandatory: skip any one and the move fails to load or
+shows broken text. Artifact 4 is cosmetic (a decision with no `picture`
+renders a generic placeholder). Artifact 5 is what actually gates the
+move - omit it and the move is **always unlocked** no matter what the
+decision displays, so a gated move needs it, an intentionally open one
+does not (see **Unlock gating**).
 
-The five pieces are wired together by name. The constructor's `DECISION`
-parameter is a decision id; that same id is the prefix of all three loc
-keys; and the engine indexes every move on Charon keyed by its decision
-id. Keep the names in lockstep and everything finds everything else.
+Artifacts 1-4 are wired together by name: the constructor's `DECISION`
+parameter is a decision id, that same id prefixes all three loc keys, and
+the engine indexes every move on Charon by its decision id. The dispatcher
+branch (5) is keyed separately, on the move's `SKILL_KEY` and `CONFIG`.
+Keep the names in lockstep and everything finds everything else.
 
 ---
 
@@ -275,7 +277,7 @@ large). Buffs apply to the actor, debuffs to the target.
 | `POD_combat_move_set_hit_debuff_round = { TIER = N }` | `hit_debuff_round_tier` |
 | `POD_combat_move_set_hit_debuff_combat = { TIER = N }` | `hit_debuff_combat_tier` |
 
-`round` lasts the current round; `combat` lasts the whole fight.
+`round` lasts until the holder's own turn boundary (a buff clears at their next turn start, a debuff at their turn end); `combat` lasts the whole fight. A buff/debuff on an attacking move lands *before* that move's own attack, so hit-buff + attack and soak-debuff + attack combos benefit the same hit.
 Magnitudes live in `pod_combat_tier_effects.txt`. A higher tier
 overwrites a lower one; reapplying the same or lower is blocked by the
 redundancy gate.
@@ -306,7 +308,7 @@ POD_combat_move_set_flag = { NAME = <flag> }
 | `set_guard` | Activates Guard on the actor (next physical attack against them is blocked). |
 | `dodge` | Activates Dodge (next attack auto-misses). |
 | `stealth` | Activates Stealth (next incoming attack auto-misses; actor's next attack gets +30 hit). |
-| `remove_guard` | Strips the target's Guard without dealing damage. |
+| `remove_guard` | Strips the target's Guard before contact resolves (like the bypasses), so a strip-guard + attack lands its own hit. No damage of its own. |
 | `bypass_dodge` | This attack ignores the target's Dodge (strips it before contact resolves). |
 | `bypass_stealth` | This attack breaks the target's Stealth and reverses its +30 hit bonus. |
 | `retaliate_if_hit` | Arms a counter: if the actor is hit (or contacted via guard/soak) next turn, they deal `retaliate_damage` back. |
@@ -394,11 +396,7 @@ is_valid_showing_failures_only = {
 
 # Splat aggregate (anyone with any fera trait)
 is_valid_showing_failures_only = {
-  OR = {
-		POD_is_werewolf_trigger = yes
-		POD_is_bastet_trigger = yes
-		POD_is_mokole_trigger = yes
-	}
+    POD_is_fera_trigger = yes
 }
 
 # Faith gate
@@ -445,7 +443,8 @@ always set one.
 ## Unlock gating
 
 Whether a character can **equip** a move and whether the **AI** will use
-it is decided by one trigger, `pod_combat_actor_unlocks_move_trigger`, in
+it is decided by one trigger, `pod_combat_actor_unlocks_move_trigger`,
+in
 `devpod/common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt`.
 The hidden decision's `is_valid` is *not* this gate - it only supplies
 the card art and the requirement text the editor displays.
@@ -455,17 +454,22 @@ the card art and the requirement text the editor displays.
 `pod_combat_actor_unlocks_move_trigger` is a two-level switch:
  a coarse case on the move's `CONFIG` (config_section), then a
 sub-switch on its `SKILL_KEY`, each leaf testing the actor's trait/perk.
-It is checked at three places:
+Its result gates a move at three surfaces:
 
 | Surface | What it gates |
 |---|---|
-| Loadout editor | whether the PC may equip the move (`pod_combat_skill_guis.txt`) |
-| AI loadout seeding | whether an NPC's auto-built loadout includes the move (`POD_apply_ai_full_loadout`) |
-| PC move execution | whether the PC's click resolves (`POD_can_execute_combat_move`) |
+| Loadout editor | whether the PC may equip the move (the equip toggle in `pod_combat_skill_guis.txt` calls the trigger directly) |
+| AI loadout seeding | whether an NPC's auto-built loadout includes the move (`POD_apply_ai_full_loadout`, direct call) |
+| PC move execution | whether the PC's click resolves (`POD_can_execute_combat_move`) - reads a **baked** `pc_can_use` flag, not the trigger |
 
-(The AI's per-turn pick trusts loadout membership instead of
-re-checking, because the loadout was already filtered through this
-trigger.) 
+The PC-execution gate is **baked**: `pod_combat_bake_one_unlock_effect`
+runs the trigger once per fight and stamps `pc_can_use` on each move
+story, and `POD_can_execute_combat_move` reads that flag instead of
+re-running the switch every GUI frame (unlocks are static mid-combat.) 
+The AI's per-turn pick likewise trusts loadout membership rather than
+re-checking, and loading a saved preset
+(`pod_combat_load_loadout_slot_effect`) re-filters through the trigger
+too.
 
 ### The hand-authored gotcha
 
@@ -624,8 +628,9 @@ get a separate class-repertoire bonus from the AI selector
 
 Buff/debuff tiers are fixed at TIER 1 / 2 / 3 = +/-10 / +/-20 / +/-30.
 Combat-duration tiers are stronger than round-duration because they
-persist all fight, so price them higher. Round-duration tiers reward
-burst-turn timing without snowballing.
+persist all fight, so price them higher. Round-duration tiers clear at
+the holder's next turn (a soak buff still covers the intervening enemy
+phase), so they cost less and don't snowball.
 
 ### Self-damage
 

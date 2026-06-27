@@ -120,9 +120,11 @@ POD_execute_combat_move = {
 		}
 	}
 
-	# ── 5. Target stance bypass ──────────────────────────────────
-	# Strip target dodge/stealth BEFORE damage resolves. bypass_guard has no
-	# runtime var — the generator omits the checks_guard capability flag and the
+	# ── 5. Target stance strip ──────────────────────────────────
+	# Strip target dodge/stealth/guard BEFORE damage resolves, so a strip + attack
+	# combo lands its own attack. bypass_dodge / bypass_stealth are capability flags;
+	# remove_guard (below) is a move effect that also logs. bypass_guard has no
+	# runtime var: the generator omits the checks_guard capability flag and the
 	# contact resolver reads that omission directly.
 	if = {
 		limit = { $STORY$ = { has_variable = bypass_dodge } }
@@ -134,135 +136,32 @@ POD_execute_combat_move = {
 		# hit_chance, else the target keeps a phantom offensive boost. Idempotent.
 		pod_combat_break_stealth_workspace_effect = { SIDE = target }
 	}
+	# remove_guard is a move EFFECT (it logs seg_remove_guard), but it strips the
+	# same kind of target stance, so it runs here too, BEFORE §6, so a strip-guard
+	# + attack move lands its own attack instead of being guard-blocked. AoE strips
+	# each enemy slot's guard in §5b; this workspace write is redundant for
+	# team_enemy (like the §5c target-writes).
+	if = {
+		limit = { $STORY$ = { has_variable = remove_guard } }
+		remove_variable = pod_combat_target_is_guarding
+	}
 
 	# ── 5b. AoE debuff pre-damage broadcast ──────────────────────
 	# team_enemy: broadcast tier debuffs + stance-strips to ALL enemy slots
 	# BEFORE the damage iteration, so each hit respects them on its own target.
 	# §5's workspace strip only touches the pre-AoE target, which each iteration
-	# overwrites. §11/§12 target-writes still run but are redundant for team_enemy.
+	# overwrites. §5c/§12 target-writes still run but are redundant for team_enemy.
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:team_enemy } }
 		pod_combat_apply_team_enemy_debuffs = { STORY = $STORY$ }
 	}
 
-	# ── 6. HP damage dispatch ────────────────────────────────────
-	# Routes single_enemy vs team_enemy AoE. See HP DAMAGE DISPATCH header below.
-	if = {
-		limit = { $STORY$ = { has_variable = hp_damage } }
-		if = {
-			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
-			pod_combat_apply_team_enemy_hp_damage = { STORY = $STORY$ }
-		}
-		else = {
-			# single_enemy (default, most common)
-			pod_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = target }
-		}
-	}
-
-	# ── 7. Morale damage ─────────────────────────────────────────
-	# Own pipeline: auto-hit, no guard, no soak, dodge still works.
-	# Rider gate (here and §8/§9): a *_condition var on the move makes the
-	# payload fire only on hit/miss/contact, read off §6's outcome on the host.
-	# Default (no condition) = fires unconditionally.
-	if = {
-		limit = {
-			$STORY$ = { has_variable = morale_damage }
-			pod_combat_rider_condition_passes_trigger = {
-				STORY     = $STORY$
-				RIDER_VAR = morale_damage_condition
-			}
-		}
-		if = {
-			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
-			pod_combat_apply_team_enemy_morale_damage = { STORY = $STORY$ }
-		}
-		else = {
-			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
-		}
-	}
-
-	# ── 8. Self-damage ───────────────────────────────────────────
-	# Routed through the PoD pipeline like a real hit so wound state stays in
-	# lockstep. REASON=duel (superficial, soakable) not self_mutilation —
-	# overextension, not a permanent wound. Rider-gated (see §7).
-	if = {
-		limit = {
-			$STORY$ = { has_variable = self_damage }
-			pod_combat_rider_condition_passes_trigger = {
-				STORY     = $STORY$
-				RIDER_VAR = self_damage_condition
-			}
-		}
-		pod_combat_deal_hp_damage_bypass_guard_effect = {
-			TARGET_SIDE = actor
-			AMOUNT      = $STORY$.var:self_damage
-			REASON      = duel
-		}
-		# Lift the post-soak recoil amount for the log's recoil segment.
-		# scope:attack_result_flag stays discarded — recoil never overwrites the
-		# main attack's outcome axes.
-		if = {
-			limit = { scope:damage_dealt > 0 }
-			set_variable = { name = pod_combat_last_self_damage value = scope:damage_dealt }
-		}
-	}
-
-	# ── 9. HP heal ───────────────────────────────────────────────
-	# heal_type=aggravated routes to the aggravated variant (also reduces
-	# agg_damage); else superficial (caps at max_hp − agg_damage).
-	# Rider-gated (see §7) on heal_condition — drain heals get
-	# heal_condition=on_hp_damage auto-emitted by the generator's `drain` token.
-	if = {
-		limit = {
-			$STORY$ = { has_variable = hp_heal }
-			pod_combat_rider_condition_passes_trigger = {
-				STORY     = $STORY$
-				RIDER_VAR = heal_condition
-			}
-		}
-		if = {
-			limit = { $STORY$ = { var:targeting = flag:team_ally } }
-			pod_combat_apply_team_ally_hp_heal = { STORY = $STORY$ }
-		}
-		else_if = {
-			# single_ally — chosen ally is loaded into the target workspace, so
-			# SIDE=target heals them instead of the actor.
-			limit = { $STORY$ = { var:targeting = flag:single_ally } }
-			if = {
-				limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
-				pod_combat_restore_hp_aggravated_effect = { SIDE = target AMOUNT = $STORY$.var:hp_heal }
-			}
-			else = {
-				pod_combat_restore_hp_superficial_effect = { SIDE = target AMOUNT = $STORY$.var:hp_heal }
-			}
-		}
-		else_if = {
-			limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
-			pod_combat_restore_hp_aggravated_effect = { SIDE = actor AMOUNT = $STORY$.var:hp_heal }
-		}
-		else = {
-			pod_combat_restore_hp_superficial_effect = { SIDE = actor AMOUNT = $STORY$.var:hp_heal }
-		}
-	}
-
-	# ── 10. Morale heal ──────────────────────────────────────────
-	if = {
-		limit = { $STORY$ = { has_variable = morale_heal } }
-		if = {
-			limit = { $STORY$ = { var:targeting = flag:team_ally } }
-			pod_combat_apply_team_ally_morale_heal = { STORY = $STORY$ }
-		}
-		else_if = {
-			# single_ally — see §9's single_ally branch.
-			limit = { $STORY$ = { var:targeting = flag:single_ally } }
-			pod_combat_restore_morale_effect = { SIDE = target AMOUNT = $STORY$.var:morale_heal }
-		}
-		else = {
-			pod_combat_restore_morale_effect = { SIDE = actor AMOUNT = $STORY$.var:morale_heal }
-		}
-	}
-
-	# ── 11. Tier buffs/debuffs ───────────────────────────────────
+	# ── 5c. Tier buffs/debuffs (applied BEFORE the §6 damage) ──────────
+	# Runs ahead of damage so a buff/debuff + attack in the SAME move lands on
+	# THIS attack: a self hit buff raises pod_combat_current_hit_chance for the
+	# §6 hit roll, and a target soak debuff sets the POD_soak_chance bridge var
+	# before the §6 wound roll. AoE target debuffs are still broadcast to slots in
+	# §5b; the workspace target-writes below stay redundant for team_enemy.
 	# Buffs → actor (pod_combat_actor_*), debuffs → target (pod_combat_target_*).
 	# Soak tiers ALSO bridge to the character as pod_combat_tier_soak_* vars, read
 	# by POD_soak_chance (POD_health_track_values.txt) so wound rolls pick them up;
@@ -416,6 +315,123 @@ POD_execute_combat_move = {
 		pod_combat_recalc_hit_target_effect = yes
 	}
 
+	# ── 6. HP damage dispatch ────────────────────────────────────
+	# Routes single_enemy vs team_enemy AoE. See HP DAMAGE DISPATCH header below.
+	if = {
+		limit = { $STORY$ = { has_variable = hp_damage } }
+		if = {
+			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
+			pod_combat_apply_team_enemy_hp_damage = { STORY = $STORY$ }
+		}
+		else = {
+			# single_enemy (default, most common)
+			pod_combat_apply_single_hp_damage = { STORY = $STORY$ TARGET_SIDE = target }
+		}
+	}
+
+	# ── 7. Morale damage ─────────────────────────────────────────
+	# Own pipeline: auto-hit, no guard, no soak, dodge still works.
+	# Rider gate (here and §8/§9): a *_condition var on the move makes the
+	# payload fire only on hit/miss/contact, read off §6's outcome on the host.
+	# Default (no condition) = fires unconditionally.
+	if = {
+		limit = {
+			$STORY$ = { has_variable = morale_damage }
+			pod_combat_rider_condition_passes_trigger = {
+				STORY     = $STORY$
+				RIDER_VAR = morale_damage_condition
+			}
+		}
+		if = {
+			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
+			pod_combat_apply_team_enemy_morale_damage = { STORY = $STORY$ }
+		}
+		else = {
+			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
+		}
+	}
+
+	# ── 8. Self-damage ───────────────────────────────────────────
+	# Routed through the PoD pipeline like a real hit so wound state stays in
+	# lockstep. REASON=duel (superficial, soakable) not self_mutilation —
+	# overextension, not a permanent wound. Rider-gated (see §7).
+	if = {
+		limit = {
+			$STORY$ = { has_variable = self_damage }
+			pod_combat_rider_condition_passes_trigger = {
+				STORY     = $STORY$
+				RIDER_VAR = self_damage_condition
+			}
+		}
+		pod_combat_deal_hp_damage_bypass_guard_effect = {
+			TARGET_SIDE = actor
+			AMOUNT      = $STORY$.var:self_damage
+			REASON      = duel
+		}
+		# Lift the post-soak recoil amount for the log's recoil segment.
+		# scope:attack_result_flag stays discarded — recoil never overwrites the
+		# main attack's outcome axes.
+		if = {
+			limit = { scope:damage_dealt > 0 }
+			set_variable = { name = pod_combat_last_self_damage value = scope:damage_dealt }
+		}
+	}
+
+	# ── 9. HP heal ───────────────────────────────────────────────
+	# heal_type=aggravated routes to the aggravated variant (also reduces
+	# agg_damage); else superficial (caps at max_hp − agg_damage).
+	# Rider-gated (see §7) on heal_condition — drain heals get
+	# heal_condition=on_hp_damage auto-emitted by the generator's `drain` token.
+	if = {
+		limit = {
+			$STORY$ = { has_variable = hp_heal }
+			pod_combat_rider_condition_passes_trigger = {
+				STORY     = $STORY$
+				RIDER_VAR = heal_condition
+			}
+		}
+		if = {
+			limit = { $STORY$ = { var:targeting = flag:team_ally } }
+			pod_combat_apply_team_ally_hp_heal = { STORY = $STORY$ }
+		}
+		else_if = {
+			# single_ally — chosen ally is loaded into the target workspace, so
+			# SIDE=target heals them instead of the actor.
+			limit = { $STORY$ = { var:targeting = flag:single_ally } }
+			if = {
+				limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
+				pod_combat_restore_hp_aggravated_effect = { SIDE = target AMOUNT = $STORY$.var:hp_heal }
+			}
+			else = {
+				pod_combat_restore_hp_superficial_effect = { SIDE = target AMOUNT = $STORY$.var:hp_heal }
+			}
+		}
+		else_if = {
+			limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
+			pod_combat_restore_hp_aggravated_effect = { SIDE = actor AMOUNT = $STORY$.var:hp_heal }
+		}
+		else = {
+			pod_combat_restore_hp_superficial_effect = { SIDE = actor AMOUNT = $STORY$.var:hp_heal }
+		}
+	}
+
+	# ── 10. Morale heal ──────────────────────────────────────────
+	if = {
+		limit = { $STORY$ = { has_variable = morale_heal } }
+		if = {
+			limit = { $STORY$ = { var:targeting = flag:team_ally } }
+			pod_combat_apply_team_ally_morale_heal = { STORY = $STORY$ }
+		}
+		else_if = {
+			# single_ally — see §9's single_ally branch.
+			limit = { $STORY$ = { var:targeting = flag:single_ally } }
+			pod_combat_restore_morale_effect = { SIDE = target AMOUNT = $STORY$.var:morale_heal }
+		}
+		else = {
+			pod_combat_restore_morale_effect = { SIDE = actor AMOUNT = $STORY$.var:morale_heal }
+		}
+	}
+
 	# ── 12. Non-tier presence flags ──────────────────────────────
 	if = {
 		limit = { $STORY$ = { has_variable = set_guard } }
@@ -430,13 +446,9 @@ POD_execute_combat_move = {
 		# Idempotent — guards the flag so a re-cast doesn't double-bake the +30.
 		pod_combat_apply_stealth_workspace_effect = { SIDE = actor }
 	}
-	if = {
-		limit = { $STORY$ = { has_variable = remove_guard } }
-		remove_variable = pod_combat_target_is_guarding
-	}
 
 	# ── 12b. AoE buff broadcast ──────────────────────────────────
-	# team_ally: extend §11/§12's actor buffs (tiers + stance flags) to ALL ally
+	# team_ally: extend §5c/§12's actor buffs (tiers + stance flags) to ALL ally
 	# slots, plus the soak bridge var on each ally's char so POD_soak_chance picks
 	# it up immediately rather than only on their next turn.
 	if = {
@@ -980,7 +992,7 @@ pod_combat_apply_team_ally_buffs = {
 			pod_combat_aoe_team_ally_filter_trigger = yes
 		}
 		# Tier soak buffs: slot var + char bridge var. Upgrade-only guard
-		# (see §11 of POD_execute_combat_move), here per-slot at write time —
+		# (see §5c of POD_execute_combat_move), here per-slot at write time —
 		# the selection gate only checks the actor's tier, not each iterated ally's.
 		if = {
 			limit = {

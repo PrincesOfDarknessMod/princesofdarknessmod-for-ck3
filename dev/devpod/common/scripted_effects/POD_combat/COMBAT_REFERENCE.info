@@ -203,7 +203,7 @@ system**.
 slot_{stat}_{direction}_{duration}_tier
   stat:      soak | hit
   direction: buff | debuff
-  duration:  round (cleared at round end) | combat (lasts the fight)
+  duration:  round (cleared at the holder's turn boundary) | combat (lasts the fight)
 ```
 
 The eight magnitude script values
@@ -305,16 +305,16 @@ see **Phase ordering rules** below before moving anything.
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`) and set `pod_combat_last_damage = 0`. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
 | §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`). **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. |
-| §5 | Strip the single target's stances: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (which also subtracts the +30 stealth hit bonus). Runs **before** §6 so damage resolves against the stripped state. |
+| §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also subtracts the +30 stealth hit bonus); `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit (a move effect, still logged as `seg_remove_guard` at §16). |
 | §5b | `team_enemy` only: broadcast tier debuffs and stance-strips to **all** enemy slots before the damage loop, so each per-target hit respects them (`pod_combat_apply_team_enemy_debuffs`). |
+| §5c | **Tier buffs/debuffs** — moved ahead of §6 (was §11) so a buff/debuff + attack lands on this move's own attack. Buffs → actor, debuffs → target; each write is **upgrade-only** (first application or a strictly higher tier). A self hit buff recalcs `pod_combat_current_hit_chance` for §6's hit roll; a target soak debuff sets the `pod_combat_tier_soak_*` char-bridge var PoD's wound roll reads. Recalc fires per axis when its tier var was present. See **Tier system**. |
 | §6 | **HP damage dispatch.** Routes `single_enemy` vs `team_enemy`. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the host. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or the team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel` — superficial, soakable). Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
 | §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor / single-ally / `team_ally`. Rider-gated by `heal_condition` (drain moves auto-get `on_hp_damage`). Must run **after** §6 so the rider reads the right outcome. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor / single-ally / `team_ally`. No rider condition. |
-| §11 | Tier buffs (→ actor) and debuffs (→ target). Each write is **upgrade-only** (fires only on first application or a strictly higher tier). Soak tiers also bridge to the character as `pod_combat_tier_soak_*` vars so PoD's wound rolls pick them up. Recalc fires per axis when its tier var was present. See **Tier system**. |
-| §12 | Non-tier stance flags on the actor: `set_guard`, `dodge`, `stealth` (idempotent), and `remove_guard` (strips the target's guard). |
-| §12b | `team_ally` only: broadcast §11/§12's actor buffs (tiers + stance flags + soak bridge var) to all ally slots (`pod_combat_apply_team_ally_buffs`). |
+| §12 | Non-tier stance flags on the actor: `set_guard`, `dodge`, `stealth` (idempotent). (`remove_guard` is a *target* strip and now runs in §5.) |
+| §12b | `team_ally` only: broadcast §5c/§12's actor buffs (tiers + stance flags + soak bridge var) to all ally slots (`pod_combat_apply_team_ally_buffs`). |
 | §13 | Arm retaliation stances on the actor for **next** turn's §15: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte). Amount falls back `retaliate_damage → hp_damage → 1`. Seeds `_agg` and the counter kind (morale wins over a damage source). |
 | §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind/aggravated` on the target's slot (single-target). Kind is seeded as literal flags (default `duel`, per-source override, morale wins); re-apply refreshes. Pushes the per-type "is afflicted" log row. Ticks fire at round end — see **Combat log** / **Turn loop**. |
 | §13c | Mind control (`mind_control` flag): mark the target slot `slot_controlled` (steals one turn). Players are immune; `POD_has_strong_mental_defenses_trigger` blocks unless the caster passes `can_bypass_mental_defenses_trigger`. Blocked casts post a resist row. Single-target only. |
@@ -348,8 +348,10 @@ these hold:
 
 These orderings are required, not stylistic:
 
-- **§5 / §5b before §6.** Damage must resolve against stripped stances.
-  Reversed, hits land on un-stripped dodge/stealth/guard.
+- **§5 / §5b / §5c before §6.** Damage must resolve against stripped
+  stances and applied tiers, so a strip / buff / debuff + attack lands on
+  its own hit. Reversed, hits land on un-stripped dodge/stealth/guard, a
+  pre-buff hit chance, and un-debuffed soak.
 - **§7 / §8 / §9 after §6.** Their rider gates read
   `pod_combat_last_outcome` and `pod_combat_last_attack_result`, both
   written by §6. Reordering breaks the `on_hp_damage` / `on_contact` /
@@ -465,9 +467,9 @@ the soak roll, the splat-weakness multiplier, the damage cap, immunity,
 and the inline death check.
 
 The route helper returns scope values only (no host-var side effects):
-`scope:damage_dealt` (post-soak amount; 0 if fully soaked or in practice
-mode) and `scope:attack_result_flag` (`flag:hp_damage` / `soaked` /
-`utility`). Because the wound SVs read 0 on a dead character, it
+`scope:damage_dealt` (post-soak amount; 0 if fully soaked) and
+`scope:attack_result_flag` (`flag:hp_damage` / `soaked`). Because the
+wound SVs read 0 on a dead character, it
 snapshots superficial and aggravated box counts **separately** before
 the write and takes `max(0, sup_delta) + agg_delta` — a single total-box
 delta would read 0 when PoD's aggravated push-out converts existing
@@ -533,12 +535,12 @@ At creation the slot gets:
 | `combat_team` | `flag:$TEAM$` | identity, source of truth for team |
 | `team_position` | `$POSITION$` | identity, 0 = leader |
 | `slot_alive` | `1` | |
-| `slot_morale` | `pod_combat_max_morale` (20) | defaults to the cap, not 0, so a fresh slot reads alive before real init; the init-time KO check treats `slot_morale <= 0` as a KO predicate |
+| `slot_char` | `$CHARACTER$` | the occupant; set before `slot_morale` so the starting-morale hook can read it |
+| `slot_morale` | `pod_combat_max_morale + pod_combat_starting_morale_modifier_value`, floored at 1 | the modifier is a designer hook (0 by default; §11). Defaults to the cap so a fresh slot reads alive before real init; the init-time KO check treats `slot_morale <= 0` as a KO predicate |
 | `slot_prowess` | `0` | |
 | `slot_soak` | `0` | |
 | `slot_energy_used` | `0` | |
 | `slot_has_acted` | `0` | |
-| `slot_char` | `$CHARACTER$` | the occupant |
 
 The pure-value stats are zero-defaulted so a script_value gate needs
 only a slot-presence check, not a per-field `has_variable`. Gate-style
@@ -706,6 +708,7 @@ every alive slot:
 slot_initiative = slot_prowess
                 + integer_range[1, pod_combat_initiative_roll_max]   (1..30)
                 + slot_init_bonus   (carried from last round's buff/debuff moves, then cleared)
+                + pod_combat_initiative_modifier_value   (designer hook, 0 by default - see §11)
 ```
 
 `pod_combat_initiative_roll_max` (30) is the tunable knob.
@@ -836,8 +839,7 @@ Once `pod_combat_is_over` is set, both are replaced by **End Combat**
 pushes the round-transition log row, ticks active Damage-over-Time burns
 (`pod_combat_tick_dots_effect`, which can itself end combat on a killing
 burn — everything after is guarded on `NOT is_over`), seats due
-reinforcements, rolls next-round initiative, finds the first actor,
-expires round-duration tiers (see **Tier system**), then sets up the PC
+reinforcements, rolls next-round initiative, finds the first actor, then sets up the PC
 turn or begins stepping/draining the next round's pre-PC AI per mode.
 
 ---
@@ -1091,8 +1093,8 @@ every combination of three axes:
 
 - **stat**: `soak` or `hit`
 - **direction**: `buff` or `debuff`
-- **duration**: `round` (cleared at round end) or `combat` (lasts the
-  whole fight)
+- **duration**: `round` (cleared at the holder's own turn boundary, see
+  Cleanup) or `combat` (lasts the whole fight)
 
 On a slot story the variables are named
 `slot_<stat>_<direction>_<duration>_tier` (e.g.
@@ -1168,14 +1170,23 @@ the wound roll.
 
 ### Cleanup
 
+Round-duration tiers expire at each combatant's **own turn boundary**, not at
+round end: a buff clears at the start of the holder's turn (so a self soak buff
+guards the whole enemy phase, then lapses when the holder acts again); a debuff
+at the end of the holder's turn (so it afflicts its victim through that turn).
+Combat-duration tiers persist to combat-end cleanup.
+
 | Effect | When | Clears |
 |--------|------|--------|
-| `pod_combat_revert_round_tiers_effect` | round end | the four `*_round_tier` slot vars + the two `*_soak_*_round` char-bridge vars, then recalcs each slot |
+| `pod_combat_clear_actor_round_buffs_effect` | acting combatant's **turn start** | that slot's `soak_buff_round_tier` / `hit_buff_round_tier` + the `tier_soak_buff_round` char-bridge var, then recalcs the slot |
+| `pod_combat_clear_actor_round_debuffs_effect` | acting combatant's **turn end** | that slot's `soak_debuff_round_tier` / `hit_debuff_round_tier` + the `tier_soak_debuff_round` char-bridge var, then recalcs the slot |
 | `pod_combat_clear_combat_tiers_effect` | combat end | all eight slot tier vars + all four char-bridge soak vars |
 
-Both iterate `pod_combat_active_slots` (filled slots only), so the
-per-slot scope is the slot story; `var:slot_char` switches into the
-participant character for the bridge vars.
+The two round clears find the acting slot by the `current_actor` team/position
+match (called from the turn-setup / turn-end sites in
+`pod_combat_group_effects.txt`); the combat-end clear sweeps every filled slot.
+All run in slot-story scope, with `var:slot_char` switching into the participant
+character for the bridge vars.
 
 ---
 
@@ -1499,14 +1510,18 @@ recorded as the victor.
 `pod_combat_end_combat_effect` is re-entry guarded on
 `pod_combat_active` (the GUI execute and End Combat both call it). It:
 
-1. **Non-fatal cap + strip** (`pod_combat_apply_nonfatal_effect`, only
-   when `fatality = no`): caps each combatant's wound track to keep at
-   least one empty box (peeling a superficial wound first, else an
-   aggravated one), then strips the `pod_combat_nonfatal_active`
+1. **Non-fatal cap / practice restore + strip**
+   (`pod_combat_apply_nonfatal_effect`): for `fatality = no`, caps each
+   combatant's wound track to keep at least one empty box (peeling a
+   superficial wound first, else an aggravated one); for `practice`,
+   restores each combatant's wound track to the snapshot taken at finalize
+   (`pod_combat_restore_practice_wounds_effect`) so the spar leaves no
+   lasting harm. Either way it then strips the `pod_combat_nonfatal_active`
    death-gate flag — in that order, so the inline death check can't fire
-   during the cap pass.
-2. **Morale → Mental Strain** (`pod_combat_apply_morale_strain_effect`):
-   one batched pass over alive combatants. Each takes
+   during the pass.
+2. **Morale → Mental Strain** (`pod_combat_apply_morale_strain_effect`,
+   skipped entirely for `practice` spars): one batched pass over alive
+   combatants. Each takes
    `POD_static_stress_gain` from its final morale deficit —
    `(pod_combat_max_morale − slot_morale) ×
    pod_combat_morale_stress_multiplier` (multiplier = 5). Batched to one
@@ -1824,6 +1839,23 @@ The load and save field lists must stay in lockstep — a field added to
 one but not the other desyncs at every action boundary. If the var is
 set parametrically rather than by a literal `set_variable`, add the
 matching error-suppression entry.
+
+### Add a per-character initiative or starting-morale modifier
+
+Two pre-wired designer hooks let a developer hand any character a flat bonus or penalty to combat initiative, or to the morale they start a fight with, without touching the engine. Both are script_values in `pod_combat_values.txt` (`pod_combat_initiative_modifier_value` / `pod_combat_starting_morale_modifier_value`); both return `0` by default, and both are already summed into the one formula that matters - the per-round roll in `pod_combat_calculate_initiative_effect`, and the starting `slot_morale` in `pod_combat_set_slot_char_effect`. To use one, just fill in its body; nothing else needs wiring.
+
+Each is evaluated on the combatant's **slot** story (`this` = the slot), with the occupant at `var:slot_char`. Branch on the character through it - `var:slot_char` scope-switches are valid inside a script_value (engine precedent: `04_ep2_accolade_values.txt`):
+
+```
+pod_combat_initiative_modifier_value = {
+    value = 0
+    if = { limit = { var:slot_char = { has_trait = brave } } add = 5 }
+}
+```
+
+- Keep the body a **pure read** - conditions plus `add`/`subtract`, no effects.
+- **Initiative** is re-evaluated every round, so it may read live fight state. **Starting morale** is evaluated once at slot creation, which is why `slot_char` is written before `slot_morale` in the constructor.
+- Morale is per-combatant. A positive modifier may push starting morale above the 20 cap (intended head-room); it is floored at 1, so an over-negative value can never start a fighter already KO'd.
 
 ### Add a move
 
