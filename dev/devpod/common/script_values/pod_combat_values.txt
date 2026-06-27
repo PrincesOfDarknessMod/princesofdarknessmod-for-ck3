@@ -55,6 +55,74 @@ pod_combat_max_equipped = 16
 #   == 1   → pure prowess ordering (debug only)
 pod_combat_initiative_roll_max = 30
 
+###### DESIGNER EXTENSION HOOKS ######
+# Three drop-in tuning knobs for handing a single character a flat bonus (or
+# penalty) to combat INITIATIVE, to the morale they START a fight with, or to the
+# action points (AP) they get each turn. All return 0, so out of the box they change
+# nothing - a future developer fills in a body and it flows through the minigame
+# automatically. Each is already summed into the one value that matters (the per-round
+# initiative roll; the starting slot_morale; the per-turn AP budget), so there is
+# nothing else to wire up.
+#
+# Keep each body a pure read (conditions + add / subtract, no effects). The SCOPE
+# differs by hook - see each one's comment. The two slot-scoped hooks reach the
+# character via var:slot_char; the AP hook is evaluated on the acting character
+# directly (`this` is the character). Both var:slot_char and var:pod_combat_actor_char
+# scope-switches are valid inside a script_value (engine precedent:
+# 04_ep2_accolade_values.txt).
+
+pod_combat_initiative_modifier_value = {
+	# Summed into this combatant's initiative each round, alongside prowess, the
+	# d[1..pod_combat_initiative_roll_max] roll, and any carried slot_init_bonus.
+	# Positive = acts sooner. Re-evaluated every round, so it may read live state.
+	value = 0
+	# Brave fighters always act a little sooner:
+	# if = {
+	# 	limit = { var:slot_char = { has_trait = brave } }
+	# 	add = 5
+	# }
+	# Or scale by the character's martial (read in the character's own scope):
+	# var:slot_char = { add = { value = martial  divide = 4 } }
+}
+
+pod_combat_starting_morale_modifier_value = {
+	# Summed into the morale this combatant begins the fight with
+	# (starting morale = pod_combat_max_morale + this, floored at 1). Positive =
+	# enters steadier, negative = enters shaken. Evaluated once, at slot creation.
+	# Morale is tracked per-combatant (each fighter KOs at its own slot_morale <= 0),
+	# so this applies to every fighter independently, not just leaders.
+	value = 0
+	# The steady of nerve hold the line:
+	# if = {
+	# 	limit = { var:slot_char = { has_trait = brave } }
+	# 	add = 4
+	# }
+	# The craven crack sooner:
+	# if = {
+	# 	limit = { var:slot_char = { has_trait = craven } }
+	# 	add = -4
+	# }
+}
+
+pod_combat_ap_modifier_value = {
+	# Summed into this combatant's AP budget at the start of EACH of its turns
+	# (budget = pod_combat_base_ap + this, floored at 0, before any ap_drain is taken
+	# off). Positive = more actions per turn. Evaluated on the ACTING character, so
+	# `this` IS the character - branch on it directly (no var:slot_char here). Read by
+	# both the PC and AI turn-setup paths; re-evaluated each turn, so it may read live state.
+	value = 0
+	# A peerless martial talent gets an extra action:
+	# if = {
+	# 	limit = { martial >= 16 }
+	# 	add = 1
+	# }
+	# The infirm are slower to act:
+	# if = {
+	# 	limit = { has_trait = infirm }
+	# 	add = -1
+	# }
+}
+
 # Morale damage = HP damage * this ratio (pod_combat_route_to_pod_damage spillover,
 # pod_combat_effects.txt). Script value not @-constant: @ refs inside a $PARAM$-using
 # effect don't resolve and crash (same footgun as base_hit's @ bounds in
@@ -106,8 +174,9 @@ pod_combat_ai_target_pref_wounded_threshold = 3
 pod_combat_ai_target_pref_threat_threshold  = 12
 
 # Cap on pod_combat_log entries. Each push rebuilds the list (newest-first ordering),
-# so an uncapped log is potentially costly over the combat.
-pod_combat_log_max_entries = 30
+# so an uncapped log is O(N²) over the combat. Dropped entries are end_story'd so the
+# POD_combat_log_entry story doesn't leak on Charon for the session.
+pod_combat_log_max_entries = 50
 
 ###### CURRENT VALUE ACCESSORS ######
 # Used by GUI and triggers to read combat state.
@@ -634,7 +703,7 @@ pod_combat_log_before_retal_value = {
 }
 # ─── Per-segment visibility (entry scope, thin reads) ──────────────
 # Recoil and the intent segments below: same thin-read shape as the
-# riders above.
+# riders above (segment contract: docs/COMBAT_LOG_REFACTOR_DESIGN.md).
 pod_combat_log_seg_recoil_visible_value = {
 	value = 0
 	if = {
