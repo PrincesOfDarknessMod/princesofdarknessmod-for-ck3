@@ -47,6 +47,7 @@
 @ai_energy_high_cost_lowap = -15 # heavy move (energy_cost >= 3) when AP is tight (avoid stranding the turn)
 @ai_thresh_lowap_expensive = 3   # "AP tight" ceiling for the heavy-move penalty
 @ai_control_defend        = 10   # control (mind-control / AP-drain) while wounded vs an accurate threat
+@ai_bonus_condition_met   = 12   # a bonus move's condition is met at scoring -> nudge to trigger it
 
 # Remove-guard bias.
 @ai_remove_guard_hit    = 15   # target IS guarding
@@ -153,7 +154,7 @@
 @ai_thresh_dot_healthy  = 4    # DoT bonus needs target empty_damage_boxes ≥ this
 @ai_thresh_stun         = 6    # ap_drain ≥ this counts as a full stun (vs partial)
 
-# ── P3: PERSONALITY TARGET PREFERENCE ─────────────────────────
+# ── PERSONALITY TARGET PREFERENCE ─────────────────────────
 # Temperament biases WHO gets hit, not just which move. Derived ONCE per combat
 # in pod_combat_apply_personality_profile_effect (a single mutually-exclusive
 # pod_combat_ai_target_pref flag off the summed/clamped bias vars), then read as
@@ -180,7 +181,7 @@
 @ai_thresh_heal_critical  = 1    # actor_hp_value ≤ this (at its last box) = "dying"
 
 
-# Per-actor personality precompute.
+# per-actor personality precompute.
 # Runs ONCE per combat on scope:ai_actor (the acting NPC), writing the seven bias
 # vars the PERSONALITY BAND reads at candidate-scoring time. Cleared at the
 # AI-character cleanup site (slot init + group teardown), NOT host teardown.
@@ -189,7 +190,7 @@
 # LAST. The three cross-axis vars (_dot/_control/_savage) clamp because multiple
 # compatible traits write them (e.g. sadistic + ambitious both writing _control);
 # the four category vars clamp because many opposed-pair-independent traits stack
-# them (~+76 worst-case ATK unclamped). See @ai_pers_clamp_cat for why that would
+# them (~+76 worst-case ATK unclamped) - see @ai_pers_clamp_cat for why that would
 # otherwise let a dying aggressive AI skip the heal. Magnitudes are the @ai_pers_*
 # constants in the tuning header.
 pod_combat_apply_personality_profile_effect = {
@@ -444,8 +445,8 @@ pod_combat_apply_personality_profile_effect = {
 		set_variable = { name = pod_combat_pers_bias_pwr value = @ai_pers_clamp_cat_neg }
 	}
 
-	# Derive a single mutually-exclusive target preference from 
-	# the FINAL clamped biases, read by the GROUP target selectors.
+	# derive a single mutually-exclusive target
+	# preference from the FINAL clamped biases, read by the GROUP target selectors.
 	# Wounded takes precedence (lethality reads first): a cruel/sadistic actor
 	# (high _dot or _savage) finishes the hurt; an ambitious/dominating actor (high
 	# _control) hunts the dangerous. Left unset otherwise -> selectors stay neutral.
@@ -524,7 +525,7 @@ pod_combat_ai_try_action_effect = {
 		# A controlled (dominated) turn that has run out of own-side targets to
 		# betray (refresh just set pod_combat_turn_control_fizzled) stops acting for
 		# the rest of the turn rather than executing a move against a dead slot.
-		# No-op on a normal turn - the flag is never set.
+		# No-op on a normal turn - the flag is never set. (C02/C27 mid-turn fizzle.)
 		if = {
 			limit = { NOT = { has_variable = pod_combat_turn_control_fizzled } }
 			pod_combat_ai_select_and_execute_move_effect = yes
@@ -535,6 +536,31 @@ pod_combat_ai_try_action_effect = {
 			# tries' is_over gate.
 			pod_combat_save_workspace_effect = yes
 		}
+	}
+}
+
+# Caches whether ONE bonus-mode loadout move's condition is currently met, as
+# the flag pod_combat_ai_bonus_met on the move story, for the
+# @ai_bonus_condition_met weight modifier to read as a flat has_variable.
+# Called per bonus move from the selector's precompute loop (below) - in effect
+# scope each move is a saved scope (scope:precompute_bonus_move), so the
+# condition trigger's STORY stays stable inside its own $ACTOR$ / target
+# scope-switches, which prev/this would NOT in a weight modifier.
+# The move story is shared, but AI turns are sequential and the loop refreshes
+# every bonus move right before that actor scores, so no stale cross-actor read.
+pod_combat_ai_precompute_bonus_met_effect = {
+	# this = a bonus-mode POD_combat_move; HOST = combat host, ACTOR = acting AI.
+	save_temporary_scope_as = precompute_bonus_move
+	if = {
+		limit = {
+			$HOST$ = {
+				pod_combat_move_condition_met_trigger = { STORY = scope:precompute_bonus_move  ACTOR = $ACTOR$ }
+			}
+		}
+		set_variable = pod_combat_ai_bonus_met
+	}
+	else = {
+		remove_variable = pod_combat_ai_bonus_met
 	}
 }
 
@@ -593,7 +619,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 
 			# Personality profile precompute (fallback). The PRIMARY site is the
 			# hoist in pod_combat_execute_ai_turn_effect, which runs this BEFORE the
-			# first target selection; this guarded copy is a no-op once that
+			# first target selection (C13); this guarded copy is a no-op once that
 			# fired and only computes here if the hoist somehow did not. Runs once per
 			# combat (guard var on the AI char, cleared at the slot-init / group-
 			# teardown AI cleanup) so the weight block only READS the bias vars.
@@ -603,6 +629,19 @@ pod_combat_ai_select_and_execute_move_effect = {
 					pod_combat_apply_personality_profile_effect = yes
 					set_variable = pod_combat_pers_profile_done
 				}
+			}
+
+			# Bonus-condition met-status precompute (before the random_in_list).
+			# The @ai_bonus_condition_met weight modifier can't call the condition
+			# trigger itself: a weight modifier can't bind a saved scope, and
+			# prev/this re-anchor inside the trigger's own $ACTOR$ / target
+			# scope-switches (so $STORY$.var reads there fetch the wrong scope).
+			# Evaluate it here, where each move is a saved scope, and cache a flat
+			# flag the modifier reads. (Same shape as the heal-weight precompute.)
+			every_in_list = {
+				variable = pod_combat_loadout
+				limit = { has_variable = cond_mode  var:cond_mode = flag:bonus }
+				pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
 			}
 
 			# Iteration scope = the candidate story. save_temporary_scope_as
@@ -618,7 +657,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						# Dynamic-only validation: loadout membership already
 						# proves the unlock (seeded through the dispatcher at
 						# fight finalize / mid-fight seat), so skip the
-						# generated unlock switch per candidate.
+						# unlock switch per candidate.
 						pod_combat_move_is_usable_now_trigger = {
 							STORY = scope:ai_candidate_move
 							ACTOR = scope:ai_actor
@@ -756,6 +795,17 @@ pod_combat_ai_select_and_execute_move_effect = {
 						add = @ai_repeat_prev2
 						scope:ai_actor = { has_variable = pod_combat_ai_prev2_move }
 						this = scope:ai_actor.var:pod_combat_ai_prev2_move
+					}
+					# Conditional bonus would fire right now -> nudge toward triggering it
+					# (the move's base effect is weighted separately). met-status is
+					# precomputed per loadout move into the flag pod_combat_ai_bonus_met
+					# (pod_combat_ai_precompute_bonus_met_effect, run just before this
+					# random_in_list) because a weight modifier can't pass a saved scope to
+					# the condition trigger and prev/this re-anchor inside the trigger's own
+					# scope-switches; the modifier just reads the cached flat flag here.
+					modifier = {
+						add = @ai_bonus_condition_met
+						has_variable = pod_combat_ai_bonus_met
 					}
 
 					# Heal when hurt, split by heal_type so the scaled weight only fires
@@ -1152,6 +1202,7 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
+					# ===== scenario sharpening =====
 					# All additive nudges (constants in the header block). Target/host
 					# workspace reads (incorporeal, hit_chance, AP, energy_used) are all
 					# loaded at scoring time by the group load helper.
@@ -1527,7 +1578,7 @@ pod_combat_ai_swap_to_ally_target_effect = {
 			# ACTUALLY help (heal-type-aware), so the most-wounded weight below can't
 			# steer a superficial heal onto an aggravated-only ally (heals 0). A
 			# non-heal single_ally move (no hp_heal/morale_heal) skips this gate and
-			# admits any alive ally as before. Matches the selector's heal-need
+			# admits any alive ally as before. Matches the selector's C05 heal-need
 			# gate, so for a heal admitted there a helpable ally is guaranteed here.
 			trigger_if = {
 				limit = {

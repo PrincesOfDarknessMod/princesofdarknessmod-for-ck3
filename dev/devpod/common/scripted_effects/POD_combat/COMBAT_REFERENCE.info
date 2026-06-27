@@ -6,7 +6,7 @@ contract in their own headers.
 
 **Reading the section numbers.** Top-level sections are numbered
 `§1`-`§11`; those are the anchors code comments point at. Inside §2,
-the phases of `POD_execute_combat_move` are *also* numbered `§0`-`§16`
+the phases of `POD_execute_combat_move` are *also* numbered `§0`-`§17`
 - a separate, local sequence. So a `§5` in a tier file means the Tier
 system section, while a `§5` beside the stance-strip phase means that
 phase. Context decides which; both numberings are stable.
@@ -303,6 +303,7 @@ see **Phase ordering rules** below before moving anything.
 | §0 | Save the host as `scope:combat_host`. Long-lived; AoE iteration bodies re-enter host scope through it without their own root-save. |
 | §1 | Spend `ap_cost` AP (`pod_combat_spend_ap_effect`). |
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`) and set `pod_combat_last_damage = 0`. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
+| §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5c `hit`, §6 `damage`/`change_type`, §7 `morale_damage`, §9 `self_heal`/`heal_target`, §12 `stance_*`, §14 `ap_refund`/`ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.). |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
 | §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`). **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. |
 | §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also subtracts the +30 stealth hit bonus); `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit (a move effect, still logged as `seg_remove_guard` at §16). |
@@ -322,6 +323,7 @@ see **Phase ordering rules** below before moving anything.
 | §14b | `summons_combatant`: seat a new combatant on the caster's team mid-fight (`pod_combat_summon_combatant_glue_effect`). After the damage phases (a same-cast AoE can't hit the new unit), before §15 (it can't counter on its summon turn); it acts next round. |
 | §15 | **Reaction phase.** Fire any retaliation the target armed on a previous turn (`pod_combat_check_retaliation_effect`). Skipped for `team_enemy` AoE (a reaction can only fire on one workspace target). See **Reactions**. |
 | §16 | Push the combat-log row (`pod_combat_push_log_effect`). AoE-aware gate, below. |
+| §17 | Bonus teardown: clear `pod_combat_bonus_active` / `pod_combat_bonus_damage` / `pod_combat_bonus_aggravated` so they never leak into a nested reaction execution or the next move (remove-on-unset is a safe no-op). |
 
 ### The §16 log gate
 
@@ -1581,12 +1583,12 @@ Code-side entry points and where they live.
 |---|---|
 | `pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. |
 | `pod_combat_move_list_effects.txt` | The move catalogue: one `POD_init_combat_move` block per move, plus analyzer-suppression blocks. |
-| `pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§16 phase contract above. |
+| `pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§17 phase contract above. |
 | `pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
 | `pod_combat_group_effects.txt` | Duel builder (`POD_combat_create_duel_effect` / `_duel_add_ally_effect` / `_duel_add_enemy_effect` / `_finalize_duel_effect` + the `pod_combat_init_all_slots_effect` dispatcher), workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
 | `pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
 | `pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
-| `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file — see `scripts/python/POD-Combat/AI_LOGIC_GUIDE.md` for the per-modifier rationale. |
+| `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file for the per-modifier rationale. |
 | `PoD_override_single_combat_effects.txt` | Same-key redeclaration that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. Renamed from `z_Combat-PoD_override_single_combat_effects.txt` (z_ prefix dropped). |
 
 ### Scripted triggers
@@ -1933,8 +1935,7 @@ rendering, and the combat-log dispatcher.
 
 #### Adding a combat-log segment
 
-The append-only recipe (segment contract:
-`docs/COMBAT_LOG_REFACTOR_DESIGN.md`):
+The append-only recipe:
 
 1. **Bake block** in `pod_combat_push_log_effect`
    (`pod_combat_effects.txt`): copy an existing segment block into

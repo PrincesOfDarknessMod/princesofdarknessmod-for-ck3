@@ -7,7 +7,7 @@
 # Helpers live in pod_combat_effects.txt (damage/soak/retaliation),
 # pod_combat_tier_effects.txt (tier recalc), pod_combat_group_effects.txt (slot load/save).
 #
-# Phase contract (§0 → §16) and load-bearing anti-invariants: COMBAT_REFERENCE.info §2.
+# Phase contract (§0 → §17) and load-bearing anti-invariants: COMBAT_REFERENCE.info §2.
 # Read that before reordering anything.
 
 
@@ -55,12 +55,58 @@ POD_execute_combat_move = {
 		pod_combat_spend_ap_effect = { AMOUNT = $STORY$.var:ap_cost }
 	}
 
+	# ── 1b. once_per: mark this move used on the actor's slot ─────
+	# Add the move story to the actor slot's round / combat used-list (per the
+	# move's once_per); the usability gates reject a move already in the list.
+	# Match the actor's slot by its occupant (var:slot_char) - the same key the gate
+	# uses; scope:combat_host (saved at §0) holds the actor-char pointer.
+	if = {
+		limit = {
+			$STORY$ = { has_variable = once_per }
+			scope:combat_host = { has_variable = pod_combat_actor_char }
+		}
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_actor_char } }
+			if = {
+				limit = { $STORY$ = { var:once_per = flag:round } }
+				add_to_variable_list = { name = slot_moves_used_round target = $STORY$ }
+			}
+			else = {
+				add_to_variable_list = { name = slot_moves_used_combat target = $STORY$ }
+			}
+		}
+	}
+
 	# ── 2. Result reset + log metadata ───────────────────────────
 	# Clear stale pod_combat_last_* so absence = "no outcome yet". Clear list
 	# lives in the helper so adding a "last" field is one edit shared across
 	# here, push_log's post-capture clear, and combat-end cleanup.
 	pod_combat_clear_last_result_vars_effect = yes
 	set_variable = { name = pod_combat_last_damage value = 0 }
+
+	# ── 2b. Bonus condition pre-evaluation ───────────────────────
+	# cond_mode = bonus: evaluate the state condition ONCE, here in host scope
+	# (root = host, acting char = pod_combat_actor_char). A set
+	# pod_combat_bonus_active then lets each effect phase grant its bonus.
+	# (gate mode is enforced pre-execution in the usability triggers, not here.)
+	if = {
+		limit = {
+			has_variable = pod_combat_actor_char
+			$STORY$ = { has_variable = cond_mode  var:cond_mode = flag:bonus }
+			pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = var:pod_combat_actor_char }
+		}
+		set_variable = pod_combat_bonus_active
+		# §6 bonus host vars, consumed by the damage pipeline / aggravated check.
+		if = {
+			limit = { $STORY$ = { var:bonus_effect = flag:damage } }
+			set_variable = { name = pod_combat_bonus_damage value = $STORY$.var:bonus_value }
+		}
+		else_if = {
+			limit = { $STORY$ = { var:bonus_effect = flag:change_type } }
+			set_variable = pod_combat_bonus_aggravated
+		}
+	}
 
 	# ── 3. Energy cost (splat-agnostic) ──────────────────────────
 	# POD_splat_agnostic_energy_cost routes to the CURRENT scope's splat pool, so
@@ -88,8 +134,9 @@ POD_execute_combat_move = {
 		}
 	}
 
-	# ── 4. CK3 resource costs (PC only) ──────────────────────────
-	# Only the PC (player/0) pays CK3-side gold/stress/piety/prestige; AI turns are free.
+	# ── 4. CK3 resource costs + gains (PC only) ──────────────────
+	# Only the PC (player/0) pays CK3-side gold/stress/piety/prestige and reaps the
+	# steal_gold / gain_dread primitives; AI turns touch no CK3 resources.
 	if = {
 		limit = {
 			has_variable = pod_combat_current_actor_team
@@ -117,6 +164,31 @@ POD_execute_combat_move = {
 				value = $STORY$.var:prestige_cost
 				multiply = -1
 			}
+		}
+
+		# Phase 4 gains. steal_gold transfers from the target, clamped to what it
+		# actually has so a broke victim never mints gold for the PC; gain_dread
+		# adds to the actor. this = the player/0 actor here (the PC-only gate),
+		# so the actor-side reads are direct, same as the costs above.
+		if = {
+			limit = {
+				$STORY$ = { has_variable = steal_gold }
+				has_variable = pod_combat_target_char
+			}
+			var:pod_combat_target_char = {
+				save_temporary_scope_value_as = {
+					name = pod_combat_stolen_gold
+					value = { value = $STORY$.var:steal_gold  max = gold  min = 0 }
+				}
+				# add_gold rejects negative values, so debit the victim with
+				# remove_short_term_gold (the clamp above keeps it <= their gold).
+				remove_short_term_gold = scope:pod_combat_stolen_gold
+			}
+			add_gold = scope:pod_combat_stolen_gold
+		}
+		if = {
+			limit = { $STORY$ = { has_variable = gain_dread } }
+			add_dread = $STORY$.var:gain_dread
 		}
 	}
 
@@ -315,6 +387,23 @@ POD_execute_combat_move = {
 		pod_combat_recalc_hit_target_effect = yes
 	}
 
+	# Bonus hit chance for THIS attack when the move's condition held (§2b).
+	# Sits on top of any tier recalc above; clamped to the same 95 ceiling.
+	if = {
+		limit = {
+			has_variable = pod_combat_bonus_active
+			has_variable = pod_combat_current_hit_chance
+			$STORY$ = { var:bonus_effect = flag:hit }
+		}
+		change_variable = { name = pod_combat_current_hit_chance add = $STORY$.var:bonus_value }
+		# Re-cap at the recalc's 95 ceiling. No 20 floor needed: the generator
+		# rejects a negative bonus_value, so a bump can only raise the chance.
+		if = {
+			limit = { var:pod_combat_current_hit_chance > 95 }
+			set_variable = { name = pod_combat_current_hit_chance value = 95 }
+		}
+	}
+
 	# ── 6. HP damage dispatch ────────────────────────────────────
 	# Routes single_enemy vs team_enemy AoE. See HP DAMAGE DISPATCH header below.
 	if = {
@@ -349,6 +438,16 @@ POD_execute_combat_move = {
 		else = {
 			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
 		}
+	}
+
+	# Bonus morale damage when the move's condition held (set §2b). Independent
+	# of the base morale gate, so a move can carry ONLY this conditional morale.
+	if = {
+		limit = {
+			has_variable = pod_combat_bonus_active
+			$STORY$ = { var:bonus_effect = flag:morale_damage }
+		}
+		pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:bonus_value }
 	}
 
 	# ── 8. Self-damage ───────────────────────────────────────────
@@ -415,6 +514,17 @@ POD_execute_combat_move = {
 		}
 	}
 
+	# Bonus heal when the move's condition held (set §2b). Independent of the
+	# base hp_heal gate; superficial. self_heal -> actor, heal_target -> target.
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:self_heal } }
+		pod_combat_restore_hp_superficial_effect = { SIDE = actor AMOUNT = $STORY$.var:bonus_value }
+	}
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:heal_target } }
+		pod_combat_restore_hp_superficial_effect = { SIDE = target AMOUNT = $STORY$.var:bonus_value }
+	}
+
 	# ── 10. Morale heal ──────────────────────────────────────────
 	if = {
 		limit = { $STORY$ = { has_variable = morale_heal } }
@@ -444,6 +554,21 @@ POD_execute_combat_move = {
 	if = {
 		limit = { $STORY$ = { has_variable = stealth } }
 		# Idempotent — guards the flag so a re-cast doesn't double-bake the +30.
+		pod_combat_apply_stealth_workspace_effect = { SIDE = actor }
+	}
+
+	# Bonus stance for the actor when the move's condition held (set §2b). The
+	# stance is encoded in bonus_effect (no value), so bonus_value stays unused.
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:stance_guard } }
+		set_variable = { name = pod_combat_actor_is_guarding value = yes }
+	}
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:stance_dodge } }
+		set_variable = { name = pod_combat_actor_is_dodging value = yes }
+	}
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:stance_stealth } }
 		pod_combat_apply_stealth_workspace_effect = { SIDE = actor }
 	}
 
@@ -636,23 +761,53 @@ POD_execute_combat_move = {
 		limit = { $STORY$ = { has_variable = ap_gain } }
 		change_variable = { name = pod_combat_current_ap add = $STORY$.var:ap_gain }
 	}
+
+	# Bonus AP refund when the condition held (set §2b). The generator caps
+	# bonus_value below ap_cost, so the move still costs at least 1 AP net.
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:ap_refund } }
+		change_variable = { name = pod_combat_current_ap add = $STORY$.var:bonus_value }
+	}
 	# AP-drain / init-debuff write the target workspace mirrors; save_target
 	# pushes them to the slot. Consumed at different times:
 	#   * slot_ap_drain — target's NEXT TURN start (pod_combat_apply_ap_drain_effect).
 	#   * slot_init_bonus — ROUND END, read off the slot directly by
 	#     pod_combat_calculate_initiative_effect (outside the workspace lifecycle).
+	# Effective AP drain = base ap_drain (if any) + bonus ap_drain (cond_mode=bonus,
+	# bonus_effect=ap_drain, condition held at §2b). Summed FIRST so the take-max
+	# below weighs this move's full drain, not the base alone - a bonus added after
+	# the take-max could bleed onto another attacker's larger pending value.
 	if = {
-		limit = { $STORY$ = { has_variable = ap_drain } }
+		limit = {
+			OR = {
+				$STORY$ = { has_variable = ap_drain }
+				AND = {
+					has_variable = pod_combat_bonus_active
+					$STORY$ = { var:bonus_effect = flag:ap_drain }
+				}
+			}
+		}
+		save_scope_value_as = {
+			name = effective_ap_drain
+			value = {
+				value = 0
+				if = { limit = { $STORY$ = { has_variable = ap_drain } } add = $STORY$.var:ap_drain }
+				if = {
+					limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:ap_drain } }
+					add = $STORY$.var:bonus_value
+				}
+			}
+		}
 		# Take-max, never overwrite: slot_ap_drain round-trips through this mirror, so a
 		# teammate's small drain landing after a full drain (ap_drain_6 = the stun) must
 		# not shrink the pending value.
 		if = {
 			limit = { NOT = { has_variable = pod_combat_target_ap_drain } }
-			set_variable = { name = pod_combat_target_ap_drain value = $STORY$.var:ap_drain }
+			set_variable = { name = pod_combat_target_ap_drain value = scope:effective_ap_drain }
 		}
 		else_if = {
-			limit = { var:pod_combat_target_ap_drain < $STORY$.var:ap_drain }
-			set_variable = { name = pod_combat_target_ap_drain value = $STORY$.var:ap_drain }
+			limit = { var:pod_combat_target_ap_drain < scope:effective_ap_drain }
+			set_variable = { name = pod_combat_target_ap_drain value = scope:effective_ap_drain }
 		}
 	}
 	if = {
@@ -709,6 +864,13 @@ POD_execute_combat_move = {
 		}
 		pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
 	}
+
+	# ── 17. Bonus teardown ───────────────────────────────────────
+	# Consumed by the bonus phases above; clear so it never leaks into a nested
+	# reaction execution or the next move (remove on unset = safe no-op).
+	remove_variable = pod_combat_bonus_active
+	remove_variable = pod_combat_bonus_damage
+	remove_variable = pod_combat_bonus_aggravated
 }
 
 
@@ -738,7 +900,12 @@ pod_combat_apply_single_hp_damage = {
 	$STORY$ = { save_scope_as = current_move }
 
 	if = {
-		limit = { $STORY$ = { has_variable = damage_type var:damage_type = flag:aggravated } }
+		limit = {
+			OR = {
+				$STORY$ = { has_variable = damage_type var:damage_type = flag:aggravated }
+				scope:combat_host = { has_variable = pod_combat_bonus_aggravated }
+			}
+		}
 		pod_combat_dispatch_damage_pipeline = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel_aggravated }
 	}
 	else = {
@@ -796,9 +963,19 @@ pod_combat_dispatch_damage_pipeline = {
 	}
 	if = {
 		limit = { scope:contact_result = 0 }
+		save_scope_value_as = {
+			name = effective_hp_damage
+			value = {
+				value = $STORY$.var:hp_damage
+				if = {
+					limit = { scope:combat_host = { has_variable = pod_combat_bonus_damage } }
+					add = scope:combat_host.var:pod_combat_bonus_damage
+				}
+			}
+		}
 		pod_combat_apply_damage_payload_effect = {
 			TARGET_SIDE = $TARGET_SIDE$
-			AMOUNT      = $STORY$.var:hp_damage
+			AMOUNT      = scope:effective_hp_damage
 			REASON      = $REASON$
 		}
 	}
@@ -1049,7 +1226,7 @@ pod_combat_apply_team_ally_buffs = {
 			# Idempotent slot-stealth applicator (flag + +30 hit_chance).
 			pod_combat_apply_stealth_slot_effect = yes
 		}
-		# Char-bridge soak mirrors LAST - a single scope switch after all the
+		# C04: char-bridge soak mirrors LAST - a single scope switch after all the
 		# slot-local writes above, so no inline slot read/write ever follows a switch
 		# (the every_in_list iteration-scope-corruption trap). Guarded on the CHAR's
 		# own mirror var (kept in lockstep with the slot tier) + $STORY$, never the
@@ -1147,7 +1324,7 @@ pod_combat_apply_team_enemy_debuffs = {
 			limit = { $STORY$ = { has_variable = remove_guard } }
 			remove_variable = slot_is_guarding
 		}
-		# Char-bridge soak-debuff mirrors LAST (see pod_combat_apply_team_ally_buffs)
+		# C04: char-bridge soak-debuff mirrors LAST (see pod_combat_apply_team_ally_buffs)
 		# - one scope switch after all slot-local writes, guarded on the CHAR's own
 		# mirror var + $STORY$, never the iteration-suspect slot vars.
 		var:slot_char = {

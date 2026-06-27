@@ -7,10 +7,29 @@
 # serves every PC/UI path (execute_move SGUI is_valid); the AI runtime uses the
 # dynamic-only mirror pod_combat_move_is_usable_now_trigger below. The loadout
 # editor's pool (pod_combat_loadout_option) also reads the baked pc_can_use flag.
-# The unlock is baked once per fight / per editor-open (running the FULL generated
+# The unlock is baked once per fight / per editor-open (running the FULL 
 # dispatcher per move - pod_combat_bake_*_unlocks_effect in
 # pod_combat_group_effects.txt) so the expensive switch is off the per-frame path
 
+# once_per usage limiter: yes if $ACTOR$'s slot has already used $STORY$ within its
+# once_per window (the round-list or combat-list, per the move's once_per duration).
+# Match the slot by its occupant character (var:slot_char) - stable and
+# scope-independent, unlike the host current-actor pointers. Shared by both gates.
+# is_target_in_variable_list on a never-created list reads as "not present", so no
+# list-existence guard is needed.
+pod_combat_actor_has_used_move_trigger = {
+	any_in_list = {
+		variable = pod_combat_active_slots
+		limit = { var:slot_char = { this = $ACTOR$ } }
+		trigger_if = {
+			limit = { $STORY$ = { var:once_per = flag:round } }
+			is_target_in_variable_list = { name = slot_moves_used_round target = $STORY$ }
+		}
+		trigger_else = {
+			is_target_in_variable_list = { name = slot_moves_used_combat target = $STORY$ }
+		}
+	}
+}
 
 # Gates mirrored minus the unlock dispatcher by pod_combat_move_is_usable_now_trigger (below) - keep gate lists in lockstep.
 POD_can_execute_combat_move = {
@@ -24,6 +43,7 @@ POD_can_execute_combat_move = {
 	# Unlock gate: read the per-fight baked pc_can_use flag instead of
 	# re-running the unlock dispatcher every GUI frame (the documented
 	# PC-turn hotspot; unlocks are static mid-combat).
+	# ($ACTOR$ is still consumed by the energy gate below.)
 	$STORY$ = { has_variable = pc_can_use }
 
 	trigger_if = {
@@ -69,6 +89,20 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 		}
 		prestige >= $STORY$.var:prestige_cost
+	}
+
+	# State-condition gate (cond_mode = gate): usable only when the condition
+	# holds. Dynamic, both PC and AI.
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = cond_mode  var:cond_mode = flag:gate } }
+		pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
+	}
+
+	# once_per usage limiter: block re-use within the move's round / combat
+	# window. 
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = once_per } }
+		NOT = { pod_combat_actor_has_used_move_trigger = { STORY = $STORY$  ACTOR = $ACTOR$ } }
 	}
 
 	# stress_cost adds stress on execution — it's always "affordable"
@@ -274,7 +308,7 @@ POD_can_execute_combat_move = {
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
 
-	# Summon-capacity gate. A summons_combatant move can't seat a new combatant
+	# C26: summon-capacity gate. A summons_combatant move can't seat a new combatant
 	# once the caster's side is at pod_combat_max_team_size (the glue pre-checks and
 	# no-ops, so without this the button looks live but the click wastes AP/energy).
 	# current_actor_team = the caster's side on either turn; has_variable-guarded since
@@ -317,8 +351,8 @@ POD_can_execute_combat_move = {
 # already proves the unlock (POD_apply_ai_full_loadout filters the catalogue
 # through the same dispatcher once, at fight finalize / mid-fight seat;
 # unlocks are static trait/perk facts and the combat window pauses the sim).
-# Gate rationale comments live on the canonical copies above; only deltas
-# are commented.
+# Skipping the per-candidate dispatcher walk is the dominant AI-turn perf win. 
+# Gate rationale comments live on the canonical copies above; only deltas are commented.
 pod_combat_move_is_usable_now_trigger = {
 	# $STORY$ / $ACTOR$: same contract as POD_can_execute_combat_move.
 
@@ -365,6 +399,19 @@ pod_combat_move_is_usable_now_trigger = {
 			pod_combat_is_player_turn_trigger = yes
 		}
 		prestige >= $STORY$.var:prestige_cost
+	}
+
+	# State-condition gate (cond_mode = gate): usable only when the condition
+	# holds. Dynamic, both PC and AI. 
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = cond_mode  var:cond_mode = flag:gate } }
+		pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
+	}
+
+	# once_per usage limiter (lockstep with POD_can_execute_combat_move).
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = once_per } }
+		NOT = { pod_combat_actor_has_used_move_trigger = { STORY = $STORY$  ACTOR = $ACTOR$ } }
 	}
 
 	# Duplicate-stance / reaction guard.
@@ -527,7 +574,7 @@ pod_combat_move_is_usable_now_trigger = {
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
 
-	# Summon-capacity gate (mirror of POD_can_execute_combat_move; plain trigger,
+	# C26: summon-capacity gate (mirror of POD_can_execute_combat_move; plain trigger,
 	# no PC tooltip). Don't let the AI pick a summon when its side is full - the glue
 	# would no-op and waste the turn.
 	trigger_if = {
@@ -690,6 +737,174 @@ pod_combat_rider_condition_passes_trigger = {
 	# RIDER_CONDITIONS, so this guards only misconfigured data.
 	trigger_else = {
 		always = no
+	}
+}
+
+######################################################
+###### STATE CONDITION (gate / bonus)
+######################################################
+# $STORY$ = the move; $ACTOR$ = the acting
+# character (the "user"). Evaluated in HOST scope: round / morale / stance read
+# host workspace vars; the user is $ACTOR$, the target is var:pod_combat_target_char
+# (morale via the pod_combat_*_morale mirrors). cond_target routes single-subject
+# predicates to user vs target; a target predicate with no loaded target fails.
+# Phase 1 predicates (combat state) only - character / relational / outcome cases
+# are added later (this is built to absorb the outcome-rider predicates so the two
+# condition axes can merge). Guarded for unset workspace vars (tooltip walks).
+pod_combat_move_condition_met_trigger = {
+	switch = {
+		trigger = $STORY$.var:cond_predicate
+
+		# global (host round)
+		flag:first_round = {
+			trigger_if = { limit = { has_variable = pod_combat_round } var:pod_combat_round = 1 }
+			trigger_else = { always = no }
+		}
+		flag:round_min = {
+			trigger_if = { limit = { has_variable = pod_combat_round } var:pod_combat_round >= $STORY$.var:cond_threshold }
+			trigger_else = { always = no }
+		}
+
+		# HP, live from the character's PoD wound track
+		flag:undamaged = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { POD_empty_damage_boxes = POD_health_track_length }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { POD_empty_damage_boxes = POD_health_track_length } }
+		}
+		flag:hp_missing = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { POD_empty_damage_boxes <= { value = POD_health_track_length  subtract = $STORY$.var:cond_threshold } }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { POD_empty_damage_boxes <= { value = POD_health_track_length  subtract = $STORY$.var:cond_threshold } } }
+		}
+
+		# morale, via the host workspace mirror
+		flag:full_morale = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_morale }
+				var:pod_combat_target_morale = pod_combat_max_morale
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else_if = { limit = { has_variable = pod_combat_actor_morale } var:pod_combat_actor_morale = pod_combat_max_morale }
+			trigger_else = { always = no }
+		}
+		flag:morale_missing = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_morale }
+				var:pod_combat_target_morale <= { value = pod_combat_max_morale  subtract = $STORY$.var:cond_threshold }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else_if = { limit = { has_variable = pod_combat_actor_morale } var:pod_combat_actor_morale <= { value = pod_combat_max_morale  subtract = $STORY$.var:cond_threshold } }
+			trigger_else = { always = no }
+		}
+
+		# stance flags (has_variable is unset-safe)
+		flag:has_guard = {
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_guarding }
+			trigger_else = { has_variable = pod_combat_actor_is_guarding }
+		}
+		flag:has_dodge = {
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_dodging }
+			trigger_else = { has_variable = pod_combat_actor_is_dodging }
+		}
+		flag:has_stealth = {
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_stealthed }
+			trigger_else = { has_variable = pod_combat_actor_is_stealthed }
+		}
+
+		# Character status (vanilla character triggers; scope-switch to the char by
+		# cond_target, same routing as the HP case above). cond_threshold is the
+		# minimum: prestige_level / piety_level are 0-5 ranks, dread is 0-100.
+		flag:prestige_level_min = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { prestige_level >= $STORY$.var:cond_threshold }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { prestige_level >= $STORY$.var:cond_threshold } }
+		}
+		flag:piety_level_min = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { piety_level >= $STORY$.var:cond_threshold }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { piety_level >= $STORY$.var:cond_threshold } }
+		}
+		flag:dread_min = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { dread >= $STORY$.var:cond_threshold }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { dread >= $STORY$.var:cond_threshold } }
+		}
+
+		# Relational (opinion): the USER ($ACTOR$) judges the TARGET. cond_target is
+		# flag:relational. The target is reached via root.var (root = host on entry,
+		# the §0 invariant) so it survives the $ACTOR$ scope-switch. cond_threshold is
+		# the opinion magnitude; the negative side flips the sign in the compare.
+		flag:relation_positive = {
+			trigger_if = {
+				limit = { has_variable = pod_combat_target_char }
+				$ACTOR$ = { opinion = { target = root.var:pod_combat_target_char  value >= $STORY$.var:cond_threshold } }
+			}
+			trigger_else = { always = no }
+		}
+		flag:relation_negative = {
+			trigger_if = {
+				limit = { has_variable = pod_combat_target_char }
+				$ACTOR$ = { opinion = { target = root.var:pod_combat_target_char  value <= { value = $STORY$.var:cond_threshold  multiply = -1 } } }
+			}
+			trigger_else = { always = no }
+		}
+
+		# Equipped artifact by slot type (any_character_artifact iterates the char's
+		# artifacts; artifact_slot_type is the equipment slot - primary_armament = the
+		# weapon slot, armor = the armor slot). Boolean, so cond_threshold is unused.
+		flag:has_weapon_artifact = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = primary_armament } }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { any_character_artifact = { is_equipped = yes  artifact_slot_type = primary_armament } } }
+		}
+		flag:has_armor_artifact = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = armor } }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { any_character_artifact = { is_equipped = yes  artifact_slot_type = armor } } }
+		}
+
+		# Identifier predicates: route to the char (has_trait) / run in $ACTOR$
+		# (target_known_secret), then a sub-dispatch switches on cond_param
+		# to the literal trait / secret_type (pod_combat_condition_dispatch_triggers.txt).
+		flag:has_trait = {
+			trigger_if = {
+				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
+				var:pod_combat_target_char = { pod_combat_cond_has_trait_trigger = { STORY = $STORY$ } }
+			}
+			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
+			trigger_else = { $ACTOR$ = { pod_combat_cond_has_trait_trigger = { STORY = $STORY$ } } }
+		}
+		flag:target_known_secret = {
+			trigger_if = {
+				limit = { has_variable = pod_combat_target_char }
+				$ACTOR$ = { pod_combat_cond_known_secret_trigger = { STORY = $STORY$ } }
+			}
+			trigger_else = { always = no }
+		}
+
+		# Unknown predicate - fail closed (generator validates cond_predicate).
+		fallback = { always = no }
 	}
 }
 
