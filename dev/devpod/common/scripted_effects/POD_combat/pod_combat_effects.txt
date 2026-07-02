@@ -487,6 +487,16 @@ pod_combat_apply_ap_drain_effect = {
 			set_variable = { name = pod_combat_current_ap value = 0 }
 		}
 		remove_variable = pod_combat_actor_ap_drain
+		# Also drop the slot-side source. The mirror-only removal relied on this
+		# turn's first save to strip slot_ap_drain, but any load_workspace before
+		# that save (a PC target-card click; the team-AoE dispatchers' tail
+		# reload) re-copied it into the mirror and the save wrote it back, so a
+		# one-shot drain re-applied at every subsequent turn start.
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_char = { this = scope:daze_log_victim } }
+			remove_variable = slot_ap_drain
+		}
 		# Consumption log row: full drain reads as a stun, partial as dazed.
 		if = {
 			limit = { var:pod_combat_current_ap <= 0 }
@@ -1973,6 +1983,59 @@ pod_combat_duel_end_effect = {
 	# the inline death check fire during the cap pass).
 }
 
+# Host (PC) died LIVE mid-fight (fatal duel wound, or any external death).
+# The click-driven end path is unreachable from then on: the combat window
+# binds to the dead character's vars and events do not fire on the dead, so
+# without this hook the fight orphans permanently - engaged_in_single_combat
+# sticks on the opponent (blocking their future duels and diarchy checks),
+# summons persist, and the Charon-owned stories leak. Called from PoD's
+# POD_on_death (root = the dying host; pod_combat_active is removed at the
+# start of the normal end path, so this never double-fires on it).
+#
+# Dead-host contract: var READS on the dead host are tolerated, var MUTATION
+# errors - so this releases externals and ends stories only, leaving the dead
+# host's own combat vars inert in save data (harmless; the heir is a different
+# character). The in-flight turn that dealt the killing blow may still error
+# until the round processing unwinds; that burst is bounded and pre-existing.
+pod_combat_host_died_release_effect = {
+	# Per-combatant releases (mutations on OTHER, living characters). Dead
+	# combatants need no release; their modifiers and vars are inert.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = { var:slot_char = { is_alive = yes } }
+		var:slot_char = {
+			POD_clear_discipline_battle_effect = yes
+			remove_character_modifier = pod_combat_duel_active
+			remove_character_flag = pod_combat_nonfatal_active
+			remove_variable = engaged_in_single_combat
+		}
+	}
+	# Despawn summoned temporaries; they never outlive their fight. Runs after
+	# the release loop so var:slot_char still resolved to a live char there.
+	if = {
+		limit = { has_variable_list = pod_combat_summoned_chars }
+		every_in_list = {
+			variable = pod_combat_summoned_chars
+			limit = { is_alive = yes }
+			death = { death_reason = death_disappearance }
+		}
+	}
+	# End the Charon-owned stories (story mutation, not host mutation). The
+	# host's list vars keep their now-dead story refs; that is inert save data.
+	every_in_list = {
+		variable = pod_combat_active_slots
+		end_story = yes
+	}
+	every_in_list = {
+		variable = pod_combat_log
+		end_story = yes
+	}
+	if = {
+		limit = { has_variable = pod_combat_sc_context }
+		var:pod_combat_sc_context = { end_story = yes }
+	}
+}
+
 # ─── CLEANUP ───────────────────────────────────────────────────────
 
 pod_combat_cleanup_effect = {
@@ -2058,6 +2121,7 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_actor_hit_chance
 	remove_variable = pod_combat_target_hit_chance
 	remove_variable = pod_combat_current_hit_chance
+	remove_variable = pod_combat_ai_picked
 	# Log entries: end_story each, clear the list, and clear the rebuild
 	# scratch list (defensive against a push that errored mid-rebuild).
 	every_in_list = {

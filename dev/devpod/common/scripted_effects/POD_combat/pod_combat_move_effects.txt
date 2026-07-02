@@ -170,25 +170,31 @@ POD_execute_combat_move = {
 		# actually has so a broke victim never mints gold for the PC; gain_dread
 		# adds to the actor. this = the player/0 actor here (the PC-only gate),
 		# so the actor-side reads are direct, same as the costs above.
+		# Practice spars leave no lasting transfers (the contract that restores
+		# wounds and skips strain), so the gains skip too - no risk-free
+		# gold-theft or dread loop against sparring partners.
 		if = {
-			limit = {
-				$STORY$ = { has_variable = steal_gold }
-				has_variable = pod_combat_target_char
-			}
-			var:pod_combat_target_char = {
-				save_temporary_scope_value_as = {
-					name = pod_combat_stolen_gold
-					value = { value = $STORY$.var:steal_gold  max = gold  min = 0 }
+			limit = { NOT = { pod_combat_is_practice_trigger = yes } }
+			if = {
+				limit = {
+					$STORY$ = { has_variable = steal_gold }
+					has_variable = pod_combat_target_char
 				}
-				# add_gold rejects negative values, so debit the victim with
-				# remove_short_term_gold (the clamp above keeps it <= their gold).
-				remove_short_term_gold = scope:pod_combat_stolen_gold
+				var:pod_combat_target_char = {
+					save_temporary_scope_value_as = {
+						name = pod_combat_stolen_gold
+						value = { value = $STORY$.var:steal_gold  max = gold  min = 0 }
+					}
+					# add_gold rejects negative values, so debit the victim with
+					# remove_short_term_gold (the clamp above keeps it <= their gold).
+					remove_short_term_gold = scope:pod_combat_stolen_gold
+				}
+				add_gold = scope:pod_combat_stolen_gold
 			}
-			add_gold = scope:pod_combat_stolen_gold
-		}
-		if = {
-			limit = { $STORY$ = { has_variable = gain_dread } }
-			add_dread = $STORY$.var:gain_dread
+			if = {
+				limit = { $STORY$ = { has_variable = gain_dread } }
+				add_dread = $STORY$.var:gain_dread
+			}
 		}
 	}
 
@@ -423,12 +429,36 @@ POD_execute_combat_move = {
 	# Rider gate (here and §8/§9): a *_condition var on the move makes the
 	# payload fire only on hit/miss/contact, read off §6's outcome on the host.
 	# Default (no condition) = fires unconditionally.
+	# The conditional bonus (bonus_effect = morale_damage, held at §2b) folds
+	# into the SAME deal call as the base amount: one call per target consumes
+	# the target's stance exactly once for the combined total (a second
+	# independent call pierced the dodge/stealth the base call had just
+	# consumed) and the logged amount is the true total. A bonus-only move (no
+	# base morale_damage) takes the same path with a base of 0, including the
+	# team_enemy broadcast (the team applier reads the combined scope value).
 	if = {
 		limit = {
-			$STORY$ = { has_variable = morale_damage }
+			OR = {
+				$STORY$ = { has_variable = morale_damage }
+				AND = {
+					has_variable = pod_combat_bonus_active
+					$STORY$ = { var:bonus_effect = flag:morale_damage }
+				}
+			}
 			pod_combat_rider_condition_passes_trigger = {
 				STORY     = $STORY$
 				RIDER_VAR = morale_damage_condition
+			}
+		}
+		save_scope_value_as = {
+			name = pod_combat_morale_deal_total
+			value = {
+				value = 0
+				if = { limit = { $STORY$ = { has_variable = morale_damage } } add = $STORY$.var:morale_damage }
+				if = {
+					limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:morale_damage } }
+					add = $STORY$.var:bonus_value
+				}
 			}
 		}
 		if = {
@@ -436,18 +466,8 @@ POD_execute_combat_move = {
 			pod_combat_apply_team_enemy_morale_damage = { STORY = $STORY$ }
 		}
 		else = {
-			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
+			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = scope:pod_combat_morale_deal_total }
 		}
-	}
-
-	# Bonus morale damage when the move's condition held (set §2b). Independent
-	# of the base morale gate, so a move can carry ONLY this conditional morale.
-	if = {
-		limit = {
-			has_variable = pod_combat_bonus_active
-			$STORY$ = { var:bonus_effect = flag:morale_damage }
-		}
-		pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:bonus_value }
 	}
 
 	# ── 8. Self-damage ───────────────────────────────────────────
@@ -494,9 +514,10 @@ POD_execute_combat_move = {
 			pod_combat_apply_team_ally_hp_heal = { STORY = $STORY$ }
 		}
 		else_if = {
-			# single_ally — chosen ally is loaded into the target workspace, so
+			# single_ally / single_pc — the beneficiary is loaded into the target
+			# workspace (the ally by the PC's picker, the PC by the AI swap), so
 			# SIDE=target heals them instead of the actor.
-			limit = { $STORY$ = { var:targeting = flag:single_ally } }
+			limit = { $STORY$ = { OR = { var:targeting = flag:single_ally  var:targeting = flag:single_pc } } }
 			if = {
 				limit = { $STORY$ = { has_variable = heal_type var:heal_type = flag:aggravated } }
 				pod_combat_restore_hp_aggravated_effect = { SIDE = target AMOUNT = $STORY$.var:hp_heal }
@@ -538,7 +559,14 @@ POD_execute_combat_move = {
 			else = { POD_splat_agnostic_energy_gain = { COUNT = $STORY$.var:bonus_value } }
 		}
 		if = {
-			limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:energy_drain }  has_variable = pod_combat_target_char }
+			limit = {
+				has_variable = pod_combat_bonus_active
+				$STORY$ = { var:bonus_effect = flag:energy_drain }
+				has_variable = pod_combat_target_char
+				# Practice contract: no lasting harm to the partner - a real
+				# energy drain would persist past the spar.
+				NOT = { pod_combat_is_practice_trigger = yes }
+			}
 			var:pod_combat_target_char = { POD_splat_agnostic_energy_loss = { COUNT = $STORY$.var:bonus_value } }
 		}
 
@@ -550,8 +578,8 @@ POD_execute_combat_move = {
 			pod_combat_apply_team_ally_morale_heal = { STORY = $STORY$ }
 		}
 		else_if = {
-			# single_ally — see §9's single_ally branch.
-			limit = { $STORY$ = { var:targeting = flag:single_ally } }
+			# single_ally / single_pc — see §9's branch.
+			limit = { $STORY$ = { OR = { var:targeting = flag:single_ally  var:targeting = flag:single_pc } } }
 			pod_combat_restore_morale_effect = { SIDE = target AMOUNT = $STORY$.var:morale_heal }
 		}
 		else = {
@@ -918,6 +946,17 @@ POD_execute_combat_move = {
 	# ── 17. Bonus teardown ───────────────────────────────────────
 	# Consumed by the bonus phases above; clear so it never leaks into a nested
 	# reaction execution or the next move (remove on unset = safe no-op).
+	# Revert the §5.9 hit bonus first: it mutated the live workspace mirror,
+	# which only rebuilds on a recalc, so without this it kept boosting every
+	# later attack this turn. The recalc restores the exact tier+stealth value.
+	if = {
+		limit = {
+			has_variable = pod_combat_bonus_active
+			has_variable = pod_combat_current_hit_chance
+			$STORY$ = { var:bonus_effect = flag:hit }
+		}
+		pod_combat_recalc_hit_actor_effect = yes
+	}
 	remove_variable = pod_combat_bonus_active
 	remove_variable = pod_combat_bonus_damage
 	remove_variable = pod_combat_bonus_aggravated
@@ -1120,6 +1159,8 @@ pod_combat_apply_team_enemy_morale_damage = {
 	# $STORY$ = move story
 	# See pod_combat_apply_team_enemy_hp_damage for the per-target
 	# row pattern — same shape, morale-damage payload instead of HP.
+	# AMOUNT is §7's combined base+bonus scope value, so a held conditional
+	# bonus broadcasts to every swept target and shows in each per-target row.
 	save_scope_as = host
 	every_in_list = {
 		variable = pod_combat_active_slots
@@ -1129,7 +1170,7 @@ pod_combat_apply_team_enemy_morale_damage = {
 		}
 		pod_combat_load_target_from_story_effect = yes
 		scope:host = {
-			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = $STORY$.var:morale_damage }
+			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = scope:pod_combat_morale_deal_total }
 		}
 		pod_combat_save_target_to_story_effect = yes
 		pod_combat_aoe_check_target_alive_effect = yes
