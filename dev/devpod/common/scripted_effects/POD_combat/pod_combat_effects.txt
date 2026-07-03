@@ -39,36 +39,26 @@ pod_combat_set_retal_fired_effect = {
 	set_variable = { name = pod_combat_last_retal_fired value = 1 }
 }
 
-# Clear every host-scope `pod_combat_last_*` transient from a move's
-# execution. Called from §2 of POD_execute_combat_move, push_log, and
-# cleanup; one central list keeps those sites from drifting.
-# The AoE heal latch (pod_combat_aoe_any_hp_damage) is cleared ONLY here, not in
-# the per-target variant below, so it survives the AoE damage loop into the §9
-# heal rider; this full clear resets it per move and at cleanup.
+# Full clear of every host-scope `pod_combat_last_*` transient plus the AoE
+# state vars. Called from §2 of POD_execute_combat_move and cleanup;
+# push_log calls the per-target variant instead.
+# Delegates the shared last_* list to the per-target variant below
+# (one central list), then clears the four vars that must SURVIVE an AoE
+# iteration: self_damage (recoil applies once to the actor; §16's wrap-up
+# gate reads it after the loop), pushed_rows (§16's tripwire), burst_index
+# (advances across the iteration), and any_hp_damage (the §9 heal latch).
 pod_combat_clear_last_result_vars_effect = {
-	remove_variable = pod_combat_last_outcome
-	remove_variable = pod_combat_last_attack_result
-	remove_variable = pod_combat_last_retal_fired
-	remove_variable = pod_combat_last_retal_agg
-	remove_variable = pod_combat_last_retal_morale
-	remove_variable = pod_combat_last_retal_source
-	remove_variable = pod_combat_last_heal_amount
-	remove_variable = pod_combat_last_morale_damage_amount
-	remove_variable = pod_combat_last_morale_heal_amount
-	remove_variable = pod_combat_last_retal_damage
-	remove_variable = pod_combat_last_damage
+	pod_combat_clear_per_target_state_effect = yes
 	remove_variable = pod_combat_last_self_damage
 	remove_variable = pod_combat_aoe_phase_pushed_rows
 	remove_variable = pod_combat_aoe_iter_burst_index
 	remove_variable = pod_combat_aoe_any_hp_damage
 }
 
-# Per-target-row variant: clears the same last_* vars but keeps the three AoE
-# state vars live (pod_combat_aoe_phase_pushed_rows, _iter_burst_index,
-# _any_hp_damage): pushed_rows so §16 can gate on it, burst_index so it keeps
-# advancing across the iteration, and any_hp_damage as the heal latch into the
-# §9 rider (see the full clear above). Called after each per-target push_log
-# inside an AoE iterator.
+# Per-target-row variant: the shared last_* clear list. Keeps self_damage and
+# the three AoE state vars live (see the full clear above for why each must
+# survive the iteration). Called after each per-target push_log inside an AoE
+# iterator; the full clear delegates here.
 pod_combat_clear_per_target_state_effect = {
 	remove_variable = pod_combat_last_outcome
 	remove_variable = pod_combat_last_attack_result
@@ -81,8 +71,22 @@ pod_combat_clear_per_target_state_effect = {
 	remove_variable = pod_combat_last_morale_heal_amount
 	remove_variable = pod_combat_last_retal_damage
 	remove_variable = pod_combat_last_damage
+	remove_variable = pod_combat_last_energy_gain
+	remove_variable = pod_combat_last_energy_drain
 }
 
+
+# Presence-flag toggle behind the loadout-editor UI SGUIs (category filter
+# buttons, show-all, compact view). $FLAG$ = the host flag var to flip.
+pod_combat_toggle_pc_flag_effect = {
+	if = {
+		limit = { has_variable = $FLAG$ }
+		remove_variable = $FLAG$
+	}
+	else = {
+		set_variable = $FLAG$
+	}
+}
 
 # ─── RESOURCE MANIPULATION ────────────────────────────────────────
 
@@ -124,7 +128,7 @@ pod_combat_apply_reaction_if_triggered_effect = {
 			has_variable = $TRIGGER_VAR$
 			$CONDITION_TRIGGER$ = yes
 		}
-		pod_combat_apply_retaliation_helper = {
+		pod_combat_apply_retaliation_effect = {
 			ACTOR_SIDE      = $ACTOR_SIDE$
 			RETALIATOR_SIDE = $RETALIATOR_SIDE$
 			AMOUNT_VAR      = $TRIGGER_VAR$
@@ -134,7 +138,7 @@ pod_combat_apply_reaction_if_triggered_effect = {
 		remove_variable = $TRIGGER_VAR$
 		remove_variable = $AGG_FLAG_VAR$
 		remove_variable = $KIND_VAR$
-		# G03: clear the tooltip-only morale companion too, else it orphans on the
+		# Clear the tooltip-only morale companion too, else it orphans on the
 		# slot and mislabels a LATER plain/elemental counter as Morale on the
 		# slot-card status tooltip (PODCombatStatusRetaliationText).
 		remove_variable = $MORALE_FLAG_VAR$
@@ -143,7 +147,7 @@ pod_combat_apply_reaction_if_triggered_effect = {
 
 pod_combat_check_retaliation_effect = {
 	# Reaction phase - damage_type inheritance / soak / host-var
-	# contract live on pod_combat_apply_retaliation_helper below.
+	# contract live on pod_combat_apply_retaliation_effect below.
 	#
 	# $TARGET_SIDE$ = side holding the retaliation stance (almost
 	#                 always "target": the AI/PC attacks, target retaliates).
@@ -174,7 +178,7 @@ pod_combat_check_retaliation_effect = {
 	}
 }
 
-pod_combat_apply_retaliation_helper = {
+pod_combat_apply_retaliation_effect = {
 	# $ACTOR_SIDE$      = side taking retaliation (original attacker).
 	# $RETALIATOR_SIDE$ = side dishing out retaliation (original target).
 	# $AMOUNT_VAR$      = workspace var holding retaliation damage.
@@ -208,7 +212,7 @@ pod_combat_apply_retaliation_helper = {
 		# pod_combat_last_retal_damage is captured per-branch because HP must
 		# record the post-soak amount while morale records the armed amount.
 		if = {
-			# Morale counter - erodes will, not flesh. C14: a REFLEX (bypass-guard),
+			# Morale counter - erodes will, not flesh. A REFLEX (bypass-guard),
 			# so unlike the deliberate pod_combat_deal_morale_damage_effect it does NOT
 			# consume the target's stance. Cap at current morale and log the ACTUAL
 			# loss (armed amount over-counts past a near-broken target).
@@ -271,7 +275,7 @@ pod_combat_apply_retaliation_helper = {
 
 pod_combat_deal_typed_retal_damage_effect = {
 	# Sourced retaliation: map the $KIND_VAR$ source flag to a PoD death_reason and
-	# deal it bypass-guard (the reflex path). Mirrors pod_combat_dispatch_by_source
+	# deal it bypass-guard (the reflex path). Mirrors pod_combat_dispatch_by_source_effect
 	# (identity in 7 of 8; holy -> true_faith). Aggravated-ness comes from the source's
 	# PoD weakness mapping, so no separate agg flag is needed here.
 	# $TARGET_SIDE$ = who takes the counter. $AMOUNT$ = pre-soak amount.
@@ -411,8 +415,9 @@ pod_combat_push_mind_log_effect = {
 
 # DoT-tick log row. Reads scopes saved by pod_combat_tick_dots_effect: combat_host
 # (round), dot_log_victim (entry.actor), dot_log_amount (entry.dot_tick_amount).
-# MESSAGE_KEY = dot_tick (HP burn) or dot_tick_morale. The element type lives on the
-# Burning status icon, not this row, so no kind is stamped here.
+# MESSAGE_KEY = dot_tick / dot_tick_<element> / dot_tick_agg (HP burn) or
+# dot_tick_morale. The element rides the key (per-element dispatch in the tick
+# loop), so no kind var is stamped on the row.
 pod_combat_push_dot_tick_log_effect = {
 	hidden_effect_new_object = {
 		character:POD_wraith_01 = {
@@ -438,7 +443,8 @@ pod_combat_push_dot_tick_log_effect = {
 # DoT application log row (one-time, at cast). Reads scopes saved by §13b of
 # POD_execute_combat_move: combat_host (round), dot_applied_victim (entry.actor),
 # dot_applied_amount (entry.dot_tick_amount), dot_applied_rounds (entry.dot_applied_rounds).
-# MESSAGE_KEY = dot_applied (HP) or dot_applied_morale.
+# MESSAGE_KEY = dot_applied / dot_applied_<element> / dot_applied_agg (HP) or
+# dot_applied_morale.
 pod_combat_push_dot_applied_log_effect = {
 	hidden_effect_new_object = {
 		character:POD_wraith_01 = {
@@ -538,7 +544,7 @@ pod_combat_push_ap_drain_log_effect = {
 ###### POD WOUND-SYSTEM INTEGRATION HELPERS
 ######################################################
 # Shims that route combat damage through PoD's wound pipeline
-# (POD_increase_wounds_hostile_effect → POD_apply_wound_boxes →
+# (POD_increase_wounds_hostile_effect -> POD_apply_wound_boxes ->
 # POD_health_death_check_effect), which owns soak / splat-weakness /
 # aggravated classification / cap / immunity / wound-box overflow / the
 # inline death check. Combat keeps only what PoD has no concept of: hit
@@ -549,10 +555,10 @@ pod_combat_push_ap_drain_log_effect = {
 # through PoD's standard pipeline (suppressing would need a custom
 # POD_increase_wounds_* path that skips the interface call).
 
-pod_combat_route_to_pod_damage = {
+pod_combat_route_to_pod_damage_effect = {
 	# $TARGET_SIDE$ = "actor" or "target"
 	# $REASON$ = death_reason suffix (no "death_" prefix). Routed values
-	#            map lives in pod_combat_dispatch_by_source
+	#            map lives in pod_combat_dispatch_by_source_effect
 	#            (pod_combat_move_effects.txt).
 	# $COUNT$ = raw damage (PoD multiplies by splat weakness + soak roll).
 	#
@@ -568,7 +574,7 @@ pod_combat_route_to_pod_damage = {
 	# gate on is_alive, so post reads are 0 on a kill). Separate tracks
 	# are required for PoD's aggravated push-out: agg damage on an
 	# already-wounded target converts existing superficial into
-	# aggravated (5 sup → 2 sup + 3 agg on a 3-agg hit), so total boxes
+	# aggravated (5 sup -> 2 sup + 3 agg on a 3-agg hit), so total boxes
 	# are unchanged and a naive post_total - pre_total delta reads as 0,
 	# falsely classifying the hit as soaked. Per-track delta clamped at 0
 	# mirrors PoD's total_wounds_gained (see POD_apply_wound_boxes).
@@ -624,7 +630,7 @@ pod_combat_route_to_pod_damage = {
 				min      = 0
 			}
 		}
-		# max(0, sup_delta) + agg_delta - see push-out note above.
+		# max(0, sup_delta) + max(0, agg_delta) - see push-out note above.
 		save_scope_value_as = {
 			name = damage_dealt
 			value = {
@@ -679,13 +685,13 @@ pod_combat_route_to_pod_damage = {
 pod_combat_deal_hp_damage_bypass_guard_effect = {
 	# $TARGET_SIDE$ = "actor" or "target" - who takes damage.
 	# $AMOUNT$ = damage amount (raw, pre-soak, pre-multiplier)
-	# $REASON$ = death reason suffix - see pod_combat_route_to_pod_damage.
+	# $REASON$ = death reason suffix - see pod_combat_route_to_pod_damage_effect.
 	#
 	# Bare PoD damage write - no guard / stance / spirit / hit-roll.
 	# The contact resolver handled those before the payload; self-damage
 	# and retaliation call this directly to skip the resolver on purpose.
-	# Return contract inherited from pod_combat_route_to_pod_damage.
-	pod_combat_route_to_pod_damage = {
+	# Return contract inherited from pod_combat_route_to_pod_damage_effect.
+	pod_combat_route_to_pod_damage_effect = {
 		TARGET_SIDE = $TARGET_SIDE$
 		REASON      = $REASON$
 		COUNT       = $AMOUNT$
@@ -787,16 +793,16 @@ pod_combat_consume_target_stance_effect = {
 }
 
 # ── UNIFIED CONTACT RESOLVER ──────────────────────────────────────
-# Walks the pre-damage decision tree (spirit gate → stance consume →
-# hit roll → guard check) off the move story's capability flags.
+# Walks the pre-damage decision tree (spirit gate -> stance consume ->
+# hit roll -> guard check) off the move story's capability flags.
 #
 # Capability flags (set on scope:current_move at move-init time):
 #   checks_spirit_gate - physical attacks pass through incorporeal
 #                        spirits unless actor has can_damage_spirit.
-#   checks_stance      - stealth → dodge consumption gates damage.
-#   requires_hit_roll  - roll pod_combat_current_hit_chance vs 100;
+#   checks_stance - stealth -> dodge consumption gates damage.
+#   requires_hit_roll - roll pod_combat_current_hit_chance vs 100;
 #                        off for supernatural/mental (auto-hit).
-#   checks_guard       - consume target's _is_guarding and block.
+#   checks_guard - consume target's _is_guarding and block.
 #
 # Outputs scope:contact_result - integers LOCAL to this resolver,
 # NOT the result-flag values above:
@@ -904,7 +910,7 @@ pod_combat_check_guard_effect = {
 # Fires only on contact_result = 0 (hit); the resolver handled the rest.
 # Owns the log entry, so it lifts the route helper's scope exports into
 # pod_combat_last_damage + the outcome/attack_result pair (other lift
-# sites are listed on pod_combat_route_to_pod_damage).
+# sites are listed on pod_combat_route_to_pod_damage_effect).
 pod_combat_apply_damage_payload_effect = {
 	# $TARGET_SIDE$ = "actor" or "target"
 	# $AMOUNT$      = damage amount (raw, pre-soak)
@@ -914,15 +920,9 @@ pod_combat_apply_damage_payload_effect = {
 		AMOUNT      = $AMOUNT$
 		REASON      = $REASON$
 	}
-	# Practice-mode flag:utility = no real attack: don't promote to
-	# outcome=attack - leave the outcome vars for
-	# the if-unset writers (morale/heal) and the utility fallback.
-	if = {
-		limit = { NOT = { scope:attack_result_flag = flag:utility } }
-		set_variable = { name = pod_combat_last_damage         value = scope:damage_dealt }
-		set_variable = { name = pod_combat_last_outcome       value = flag:attack }
-		set_variable = { name = pod_combat_last_attack_result value = scope:attack_result_flag }
-	}
+	set_variable = { name = pod_combat_last_damage        value = scope:damage_dealt }
+	set_variable = { name = pod_combat_last_outcome       value = flag:attack }
+	set_variable = { name = pod_combat_last_attack_result value = scope:attack_result_flag }
 }
 
 
@@ -1017,7 +1017,7 @@ pod_combat_zero_loser_leader_morale_effect = {
 # Host-scoped. scope:pod_combat_enemy_victor = the enemy-side victor: the lowest-
 # position ALIVE enemy slot's char, falling back to the enemy leader (enemy/0) only
 # when every enemy is KO'd - so a downed leader is never recorded as the enemy's
-# victor (C16). Seed with the leader char first (enemy/0 is populated at init) so the
+# victor. Seed with the leader char first (enemy/0 is populated at init) so the
 # scope is never unset; the alive-scan overrides it whenever an enemy still stands.
 pod_combat_save_enemy_victor_effect = {
 	if = {
@@ -1039,10 +1039,10 @@ pod_combat_save_enemy_victor_effect = {
 
 # Host-scoped. Writes pod_combat_winner + pod_combat_loser ATOMICALLY - the consumer
 # POD_combat_restore_sc_context_effect gates on BOTH, so a half-set pair silently
-# downgrades a decisive result to a draw (C17). PC_WON = yes -> PC wins, enemy LEADER
+# downgrades a decisive result to a draw. PC_WON = yes -> PC wins, enemy LEADER
 # loses (the duel's primary opponent, matching the prior attribution; the sc_context
 # is_alive guard skips re-killing a corpse). PC_WON = no -> the first ALIVE enemy wins
-# (C16), PC loses. Both branches set both vars, so the pair is never half-written.
+# PC loses. Both branches set both vars, so the pair is never half-written.
 pod_combat_set_outcome_pair_effect = {
 	save_scope_as = combat_pc
 	pod_combat_save_enemy_victor_effect = yes
@@ -1070,8 +1070,9 @@ pod_combat_auto_resolve_effect = {
 	# prowess for each combatant. Reading the slot var avoids a per-
 	# iteration scope flip into var:slot_char.
 	#
-	# Winner / loser are the TEAM LEADERS (player/0 / enemy/0), matching
-	# the contract pod_combat_check_group_victory_effect already uses.
+	# Winner / loser are written by the shared pod_combat_set_outcome_pair_effect
+	# (PC vs the enemy leader, crediting the first ALIVE enemy when the leader
+	# is down) - the same contract pod_combat_check_group_victory_effect uses.
 	# The post-combat dispatcher routes off these two character refs.
 
 	# Player team prowess sum (alive only). PREV walks back to the host
@@ -1134,7 +1135,7 @@ pod_combat_auto_resolve_effect = {
 
 	# Resolve. Winner/loser written atomically via the shared helper. PC win
 	# (>= on the prowess-sum roll) -> PC beats the enemy leader; else the first
-	# ALIVE enemy wins (C16/C17). The post-combat dispatcher routes off
+	# ALIVE enemy wins. The post-combat dispatcher routes off
 	# pod_combat_winner / pod_combat_loser as in a normal victory.
 	if = {
 		limit = { scope:player_score >= scope:enemy_score }
@@ -1144,9 +1145,7 @@ pod_combat_auto_resolve_effect = {
 		pod_combat_set_outcome_pair_effect = { PC_WON = no }
 	}
 
-	# Zero the loser leader's slot_morale so the portrait reads defeated and
-	# the leader accrues full Mental Strain at combat end. (The old workspace
-	# pod_combat_target_morale write drove nothing - the bar binds slot_morale.)
+	# Rationale on pod_combat_zero_loser_leader_morale_effect.
 	pod_combat_zero_loser_leader_morale_effect = yes
 	set_variable = { name = pod_combat_is_over value = yes }
 	# System log: combat ends. Outcome flag picks victory vs
@@ -1166,24 +1165,24 @@ pod_combat_auto_resolve_effect = {
 # story_cycles in the PC's pod_combat_log variable list. Each entry
 # captures a snapshot of one resolved move:
 #
-#   move                  - story scope of the executed move. The GUI
+#   move - story scope of the executed move. The GUI
 #                            reads name, capability flags, damage_source /
 #                            _type, targeting, and stance/buff/debuff flags
 #                            off this scope.
-#   actor / target        - character refs (target optional: self / team_*
+#   actor / target - character refs (target optional: self / team_*
 #                            moves may skip)
-#   damage                - int HP damage (morale uses morale_damage_amount)
-#   heal_amount           - int HP healed when the move heals
-#   morale_damage_amount  - int morale loss when the move drops morale
-#   morale_heal_amount    - int morale restored when the move heals it
-#   retal_damage          - int damage from a triggered retaliation
+#   damage - int HP damage (morale uses morale_damage_amount)
+#   heal_amount - int HP healed when the move heals
+#   morale_damage_amount - int morale loss when the move drops morale
+#   morale_heal_amount - int morale restored when the move heals it
+#   retal_damage - int damage from a triggered retaliation
 #                            (captured pre-restore so the counter renders
 #                            even when the original was blocked / soaked)
 #   outcome / attack_result / retal_fired
-#                         - three-axis flag model (see COMBAT_REFERENCE.info
+# - three-axis flag model (see COMBAT_REFERENCE.info
 #                            §4; dispatch tables in pod_combat_log_custom_loc.txt).
 #   seg_<x>_on / seg_<x>_sep
-#                         - segment visibility / separator marks baked once
+# - segment visibility / separator marks baked once
 #                            at push (bake banner inside push_log); the
 #                            pod_combat_log_*_visible_value / _before_* SVs
 #                            are thin reads of these.
@@ -1200,8 +1199,8 @@ pod_combat_auto_resolve_effect = {
 # story_cycle doesn't leak on Charon for the rest of the session.
 #
 # Caller contract:
-#   - scope:combat_host points at the combat host (the PC).
-#   - scope:new_log_entry points at the freshly-created log entry story.
+# - scope:combat_host points at the combat host (the PC).
+# - scope:new_log_entry points at the freshly-created log entry story.
 # Parameterless - purely scope-driven.
 pod_combat_prepend_capped_log_entry_effect = {
 	scope:combat_host = {
@@ -1242,9 +1241,9 @@ pod_combat_push_log_effect = {
 	#                  explicitly (not via a host-var handoff) so push_log
 	#                  carries no shared-state dependency on its caller.
 	#
-	# Reads the host's per-turn pod_combat_last_* transients (damage,
-	# heal_amount, morale_damage/heal_amount, retal_damage) plus the
-	# actor/target char refs onto matching entry vars; each field is
+	# Reads the host's per-turn pod_combat_last_* transients (damage, heal /
+	# morale amounts, self_damage, energy_gain / _drain, retal_*) plus the
+	# actor/target char refs onto matching entry vars; the core fields are
 	# catalogued in the section header above. The outcome / attack_result
 	# / retal_fired three-axis model is in COMBAT_REFERENCE.info §4 -
 	# adding a flag is a coordinated edit across §4, PODCombatLogResultText,
@@ -1331,6 +1330,14 @@ pod_combat_push_log_effect = {
 			limit = { scope:combat_host = { has_variable = pod_combat_last_self_damage } }
 			set_variable = { name = self_damage value = scope:combat_host.var:pod_combat_last_self_damage }
 		}
+		if = {
+			limit = { scope:combat_host = { has_variable = pod_combat_last_energy_gain } }
+			set_variable = { name = energy_gain value = scope:combat_host.var:pod_combat_last_energy_gain }
+		}
+		if = {
+			limit = { scope:combat_host = { has_variable = pod_combat_last_energy_drain } }
+			set_variable = { name = energy_drain value = scope:combat_host.var:pod_combat_last_energy_drain }
+		}
 		# Retaliation damage, in its own var so the counter renders even
 		# when the original attack was blocked / soaked (entry.damage = 0).
 		if = {
@@ -1397,13 +1404,13 @@ pod_combat_push_log_effect = {
 		# SVs in pod_combat_values.txt are thin has_variable reads of these
 		# vars. Rows that skip this bake (system / DoT / mind / daze rows)
 		# carry no seg vars and read as all-invisible, same as before.
-		# Conditions are verbatim from the old per-tick SV bodies:
-		#   - heal / morale riders: amount captured and > 0, NAND outcome
+		# Segment conditions:
+		# - heal / morale riders: amount captured and > 0, NAND outcome
 		#     equals the segment's primary (NAND, not NOT: outcome is always
 		#     stamped above, so a multi-child NOT (= NOR) would be
 		#     permanently false and silently kill the rider).
-		#   - retal rider: retal_fired overlay present, never suppressed.
-		#   - recoil + intent segments: burst-gated via the shared trigger
+		# - retal rider: retal_fired overlay present, never suppressed.
+		# - recoil + intent segments: burst-gated via the shared trigger
 		#     (entry's aoe_burst_index was captured above) so move-level
 		#     lines render once per AoE burst, not once per target row.
 		# seg_bake_prior is the running "any earlier content" counter; the
@@ -1478,7 +1485,7 @@ pod_combat_push_log_effect = {
 			# wrap-up row - never a per-target burst row. So it is NOT burst-gated
 			# (matching its sibling actor-side riders heal/morale_heal/retal above);
 			# the burst gate would wrongly hide it on the wrap-up row, whose stale
-			# aoe_burst_index is the LAST per-target index, not 0 (C29).
+			# aoe_burst_index is the LAST per-target index, not 0.
 			limit = {
 				has_variable = self_damage
 				var:self_damage > 0
@@ -1637,6 +1644,38 @@ pod_combat_push_log_effect = {
 				limit = { var:seg_bake_prior > 0 }
 				set_variable = { name = seg_init_debuff_sep value = 1 }
 			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		# Energy bonus segments (outcome-style, like recoil): keyed on the
+		# entry vars mirrored from the §9b lifts, so they render only when
+		# the bonus condition held (and, for drain, outside practice). The
+		# per-target clear removes the lifts after the first row that
+		# captures them, so at most one row per move carries the segment.
+		# Not burst-gated - the transients are stamped after the §6/§7
+		# per-target pushes, and the wrap-up row's stale burst index would
+		# wrongly hide them (see seg_recoil above).
+		if = {
+			limit = {
+				has_variable = energy_gain
+				var:energy_gain > 0
+			}
+			set_variable = { name = seg_energy_gain_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_energy_gain_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = {
+				has_variable = energy_drain
+				var:energy_drain > 0
+			}
+			set_variable = { name = seg_energy_drain_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_energy_drain_sep value = 1 }
+			}
 			# Kept on the last segment too: appending a new segment stays a
 			# pure block copy.
 			change_variable = { name = seg_bake_prior add = 1 }
@@ -1730,9 +1769,12 @@ pod_combat_push_system_log_named_effect = {
 # move execution (the damage helpers in pod_combat_effects.txt call
 # POD_increase_wounds_* immediately); this effect runs once at combat
 # end, BEFORE cleanup, and only handles fatality-mode postprocessing:
-#   - fatality = no  →  cap every populated slot's wound track to leave
+# - fatality = no  ->  cap every populated slot's wound track to leave
 #                       one empty box, then strip pod_combat_nonfatal_active.
-#   - fatality = always / default / practice  →  no-op.
+# - fatality = practice -> restore each pre-fight wound snapshot (see the
+#                       practice-spar section at the bottom of this file),
+#                       then strip the flag.
+# - fatality = always / default  ->  no-op.
 
 pod_combat_apply_nonfatal_effect = {
 	# Only fatality = no acts. During the fight its inline death check is
@@ -1740,8 +1782,8 @@ pod_combat_apply_nonfatal_effect = {
 	# POD_can_die_from_wounds, scripted_triggers/POD_disciplines_triggers.txt),
 	# so wounds accumulate but
 	# nobody dies; here we cap the track THEN strip the flag (order
-	# matters - see below). practice writes no HP at all; default lets
-	# damage persist as-is.
+	# matters - see below). practice takes real wounds live and restores
+	# its snapshot in the else_if below; default lets damage persist as-is.
 
 	if = {
 		limit = {
@@ -1793,11 +1835,11 @@ pod_combat_apply_nonfatal_effect = {
 # Mirror the damage side: scope-switch to the target, call PoD's heal
 # effect, re-derive workspace HP from the wound state.
 
-pod_combat_route_to_pod_heal = {
+pod_combat_route_to_pod_heal_effect = {
 	# $SIDE$ = "actor" or "target"
-	# $AGGRAVATED$ = yes  → POD_heal_aggravated_wound_effect (agg boxes;
+	# $AGGRAVATED$ = yes  -> POD_heal_aggravated_wound_effect (agg boxes;
 	#                       can push out into superficial)
-	#                no   → POD_heal_superficial_wound_effect (superficial only)
+	#                no   -> POD_heal_superficial_wound_effect (superficial only)
 	# $AMOUNT$ = boxes to heal (1 HP = 1 box).
 	# Sets scope:heal_applied = actual amount healed (clamped to wounds).
 
@@ -1830,7 +1872,7 @@ pod_combat_restore_hp_superficial_effect = {
 	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = superficial HP to restore (aggravated untouched; PoD
 	#            clamps to current superficial count).
-	pod_combat_route_to_pod_heal = {
+	pod_combat_route_to_pod_heal_effect = {
 		SIDE       = $SIDE$
 		AGGRAVATED = no
 		AMOUNT     = $AMOUNT$
@@ -1841,7 +1883,7 @@ pod_combat_restore_hp_aggravated_effect = {
 	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = aggravated HP to restore (rare/potent: Obeah Mend,
 	#            high-tier Fortitude, soul-drain).
-	pod_combat_route_to_pod_heal = {
+	pod_combat_route_to_pod_heal_effect = {
 		SIDE       = $SIDE$
 		AGGRAVATED = yes
 		AMOUNT     = $AMOUNT$
@@ -1893,8 +1935,7 @@ pod_combat_end_combat_effect = {
 	# Nonfatal cap + flag strip (header explains the mode handling).
 	pod_combat_apply_nonfatal_effect = yes
 
-	# Batch morale -> Mental Strain into one POD_static_stress_gain pass per combatant from
-	# final morale (replaces the per-event calls that caused the lag spikes).
+	# Morale -> Mental Strain (rationale on pod_combat_apply_morale_strain_effect).
 	# A practice spar leaves no lasting Mental Strain, so skip the whole pass.
 	if = {
 		limit = { NOT = { pod_combat_is_practice_trigger = yes } }
@@ -2073,7 +2114,7 @@ pod_combat_cleanup_effect = {
 	# the host; cleared by group_cleanup + slot-init.)
 	remove_variable = pod_combat_ai_saved_enemy_target_team
 	remove_variable = pod_combat_ai_saved_enemy_target_position
-	# per-AI-turn finishable-enemy flag (set in pod_combat_ai_flag_finishable_enemy_effect);
+	# Per-AI-turn finishable-enemy flag (set in pod_combat_ai_flag_finishable_enemy_effect);
 	# host var, never re-cleared in-fight, so strip it here or it leaks into the next fight.
 	remove_variable = pod_combat_ai_enemy_finishable
 	# Per-AI-action deficit-scaled heal weights (set in the selector's host-scope

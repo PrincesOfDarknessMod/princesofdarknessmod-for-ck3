@@ -3,9 +3,10 @@
 ######################################################
 # Generic move-validation triggers: read move attributes off the
 # story_cycle scope, called on the combat-host (PC) scope.
-# POD_can_execute_combat_move (baked pc_can_use unlock flag + dynamic gates)
+# Both validators wrap the shared pod_combat_move_dynamic_gates_trigger:
+# POD_can_execute_combat_move_trigger (baked pc_can_use unlock flag + the gates)
 # serves every PC/UI path (execute_move SGUI is_valid); the AI runtime uses the
-# dynamic-only mirror pod_combat_move_is_usable_now_trigger below. The loadout
+# unlock-free pod_combat_move_is_usable_now_trigger below. The loadout
 # editor's pool (pod_combat_loadout_option) also reads the baked pc_can_use flag.
 # The unlock is baked once per fight / per editor-open (running the FULL 
 # dispatcher per move - pod_combat_bake_*_unlocks_effect in
@@ -31,41 +32,20 @@ pod_combat_actor_has_used_move_trigger = {
 	}
 }
 
-# Gates mirrored minus the unlock dispatcher by pod_combat_move_is_usable_now_trigger (below) - keep gate lists in lockstep.
-POD_can_execute_combat_move = {
-	# $STORY$ = the POD_combat_move story_cycle
-	# $ACTOR$ = character whose unlock gate (splat/trait/perk) is tested.
-	#          On AI turns this differs from the host (PC); workspace
-	#          reads (AP, energy) still resolve against root = the host.
 
-	NOT = { pod_combat_is_over_trigger = yes }
+######################################################
+###### SHARED DYNAMIC GATES
+######################################################
 
-	# Unlock gate: read the per-fight baked pc_can_use flag instead of
-	# re-running the unlock dispatcher every GUI frame (the documented
-	# PC-turn hotspot; unlocks are static mid-combat).
-	# ($ACTOR$ is still consumed by the energy gate below.)
-	$STORY$ = { has_variable = pc_can_use }
-
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = ap_cost }
-		}
-		pod_combat_can_afford_ap_trigger = { COST = $STORY$.var:ap_cost }
-	}
-
-	# Energy: the splat-agnostic reserve check resolves against the scope
-	# it runs on, so wrap in $ACTOR$ to hit the acting character's pool
-	# (bare it would read the host/PC pool on AI turns).
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = energy_cost }
-		}
-		$ACTOR$ = {
-			POD_has_enough_splat_agnostic_energy_reserves = { AMOUNT = $STORY$.var:energy_cost }
-		}
-	}
-
-	# CK3 resource costs are PC-only — AI combatants spend nothing, so
+# Every dynamic gate the two validators share, in one place. Callers wrap it:
+# POD_can_execute_combat_move_trigger fronts the baked unlock proof, then
+# AP/energy; pod_combat_move_is_usable_now_trigger hoists AP/energy first
+# (cheapest-first for the AI's per-candidate walk). The AP + energy gates
+# stay in the WRAPPERS - adding them here too would double-evaluate them.
+# $STORY$ = the POD_combat_move story_cycle; $ACTOR$ = the acting character
+# (unlock/energy side); workspace reads resolve against root = the host.
+pod_combat_move_dynamic_gates_trigger = {
+	# CK3 resource costs are PC-only - AI combatants spend nothing, so
 	# gold/piety/prestige gates apply only on the player turn.
 	trigger_if = {
 		limit = {
@@ -105,9 +85,9 @@ POD_can_execute_combat_move = {
 		NOT = { pod_combat_actor_has_used_move_trigger = { STORY = $STORY$  ACTOR = $ACTOR$ } }
 	}
 
-	# stress_cost adds stress on execution — it's always "affordable"
+	# stress_cost adds stress on execution - it's always "affordable"
 
-	# Duplicate-stance / reaction guard — reject re-applying a stance the
+	# Duplicate-stance / reaction guard - reject re-applying a stance the
 	# actor already holds (mirror: pod_combat_ai_effects.txt,
 	# pod_combat_ai_select_and_execute_move_effect's NAND block). Without
 	# it the bonus double-bakes and needs two separate consumes to revert.
@@ -132,12 +112,13 @@ POD_can_execute_combat_move = {
 		has_variable = pod_combat_actor_retaliate_miss
 	}
 
-	# Tier-redundancy guard — reject a tier buff/debuff at or below the
-	# current tier (upgrade-only contract; see the §11 rationale in
-	# pod_combat_move_effects.txt). Strict `<` matches the AI guard.
+	# Tier-redundancy guard - reject a tier buff/debuff at or below the
+	# current tier (upgrade-only contract; canonical rationale on
+	# pod_combat_upgrade_tier_var_effect in pod_combat_move_effects.txt).
+	# Strict `<` matches the AI guard.
 	# Gate mechanics: pod_combat_tier_upgrade_only_trigger (below).
 	# Covers workspace single-target tiers only; AoE downgrades are
-	# guarded at write time in pod_combat_apply_team_ally_buffs /
+	# guarded at write time in pod_combat_apply_team_ally_buffs_effect /
 	# _team_enemy_debuffs.
 	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier }
 	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier }
@@ -148,12 +129,12 @@ POD_can_execute_combat_move = {
 	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_round_tier }
 	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_combat_tier }
 
-	# Heal-utility gate — block self-targeted heal-only moves (no damage
+	# Heal-utility gate - block self-targeted heal-only moves (no damage
 	# rider) when the actor is already at the cap the heal can't exceed
 	# (mirrors the AI selector's gate in pod_combat_ai_effects.txt).
 	# Scoped to targeting = flag:self (and untargeted heals, which the
 	# generator defaults to actor-self). single_ally / team_ally heals
-	# stay clickable — the actor's HP isn't the target, and the player
+	# stay clickable - the actor's HP isn't the target, and the player
 	# may intentionally heal a wounded ally while full.
 	trigger_if = {
 		limit = {
@@ -173,7 +154,7 @@ POD_can_execute_combat_move = {
 		custom_description = {
 			text = pod_combat_cant_heal_already_full_desc
 			OR = {
-				# Superficial heals stop at sup_ceiling (= max_hp −
+				# Superficial heals stop at sup_ceiling (= max_hp -
 				# agg_boxes): aggravated wounds pin the track top, so
 				# this can be a no-op even while hp < max_hp.
 				AND = {
@@ -199,7 +180,7 @@ POD_can_execute_combat_move = {
 		}
 	}
 
-	# Targeting validity, player turn only — the PC picked a slot via
+	# Targeting validity, player turn only - the PC picked a slot via
 	# pod_combat_pc_target_*. AI eval skips this (the AI swap effects
 	# choose the target after move choice).
 	trigger_if = {
@@ -254,7 +235,7 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_pc }
 		}
-		# Protect-the-PC moves target player/0 — direct pointer check
+		# Protect-the-PC moves target player/0 - direct pointer check
 		# rather than any_in_list, since it's a single-slot probe.
 		custom_description = {
 			text = pod_combat_targeting_need_pc_alive_tt
@@ -268,7 +249,7 @@ POD_can_execute_combat_move = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:team_enemy }
 		}
-		# At least one alive enemy slot. No pc_target dependency → no
+		# At least one alive enemy slot. No pc_target dependency -> no
 		# scope save (all filters are on the slot story itself).
 		any_in_list = {
 			variable = pod_combat_active_slots
@@ -308,7 +289,7 @@ POD_can_execute_combat_move = {
 		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
 	}
 
-	# C26: summon-capacity gate. A summons_combatant move can't seat a new combatant
+	# Summon-capacity gate. A summons_combatant move can't seat a new combatant
 	# once the caster's side is at pod_combat_max_team_size (the glue pre-checks and
 	# no-ops, so without this the button looks live but the click wastes AP/energy).
 	# current_actor_team = the caster's side on either turn; has_variable-guarded since
@@ -339,22 +320,59 @@ POD_can_execute_combat_move = {
 	# without a valid enemy.
 }
 
+# PC/UI validator: baked unlock flag + resource gates + the shared dynamic
+# gate list above.
+POD_can_execute_combat_move_trigger = {
+	# $STORY$ = the POD_combat_move story_cycle
+	# $ACTOR$ = character whose unlock gate (splat/trait/perk) is tested.
+	#          On AI turns this differs from the host (PC); workspace
+	#          reads (AP, energy) still resolve against root = the host.
+
+	NOT = { pod_combat_is_over_trigger = yes }
+
+	# Unlock gate: read the per-fight baked pc_can_use flag instead of
+	# re-running the unlock dispatcher every GUI frame (the documented
+	# PC-turn hotspot; unlocks are static mid-combat). COMBAT_PERF_NOTES.md
+	# P1. ($ACTOR$ is still consumed by the energy gate below.)
+	$STORY$ = { has_variable = pc_can_use }
+
+	trigger_if = {
+		limit = {
+			$STORY$ = { has_variable = ap_cost }
+		}
+		pod_combat_can_afford_ap_trigger = { COST = $STORY$.var:ap_cost }
+	}
+
+	# Energy: the splat-agnostic reserve check resolves against the scope
+	# it runs on, so wrap in $ACTOR$ to hit the acting character's pool
+	# (bare it would read the host/PC pool on AI turns).
+	trigger_if = {
+		limit = {
+			$STORY$ = { has_variable = energy_cost }
+		}
+		$ACTOR$ = {
+			POD_has_enough_splat_agnostic_energy_reserves = { AMOUNT = $STORY$.var:energy_cost }
+		}
+	}
+
+	pod_combat_move_dynamic_gates_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
+}
+
 
 ######################################################
 ###### DYNAMIC-ONLY VALIDATOR (AI runtime)
 ######################################################
 
-# Mirror of POD_can_execute_combat_move minus the unlock dispatcher re-proof
-# (pod_combat_actor_unlocks_move_trigger) - keep gate lists in lockstep.
-# The AI selector limit and its post-pick recheck call this instead of the
-# full validator: the AI picks from pod_combat_loadout, and membership
-# already proves the unlock (POD_apply_ai_full_loadout filters the catalogue
-# through the same dispatcher once, at fight finalize / mid-fight seat;
-# unlocks are static trait/perk facts and the combat window pauses the sim).
-# Skipping the per-candidate dispatcher walk is the dominant AI-turn perf win. 
-# Gate rationale comments live on the canonical copies above; only deltas are commented.
+# POD_can_execute_combat_move_trigger minus the unlock proof. The AI selector
+# limit and its post-pick recheck call this instead of the full validator:
+# the AI picks from pod_combat_loadout, and membership already proves the
+# unlock (POD_apply_ai_full_loadout filters the catalogue through the same
+# dispatcher once, at fight finalize / mid-fight seat; unlocks are static
+# trait/perk facts and the combat window pauses the sim). Skipping the
+# generated per-candidate dispatcher walk is the dominant AI-turn perf win
+# (docs/perf-mindcontrol-2026-06-11.md).
 pod_combat_move_is_usable_now_trigger = {
-	# $STORY$ / $ACTOR$: same contract as POD_can_execute_combat_move.
+	# $STORY$ / $ACTOR$: same contract as POD_can_execute_combat_move_trigger.
 
 	# AP gate hoisted first (cheapest): AP-exhausted tail tries fail every
 	# candidate right here instead of after the pricier gates.
@@ -365,6 +383,7 @@ pod_combat_move_is_usable_now_trigger = {
 		pod_combat_can_afford_ap_trigger = { COST = $STORY$.var:ap_cost }
 	}
 
+	# Energy resolves against the acting character's pool (see the PC wrapper).
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = energy_cost }
@@ -376,223 +395,7 @@ pod_combat_move_is_usable_now_trigger = {
 
 	NOT = { pod_combat_is_over_trigger = yes }
 
-	# PC-only CK3 resource costs.
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = gold_cost }
-			pod_combat_is_player_turn_trigger = yes
-		}
-		gold >= $STORY$.var:gold_cost
-	}
-
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = piety_cost }
-			pod_combat_is_player_turn_trigger = yes
-		}
-		piety >= $STORY$.var:piety_cost
-	}
-
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = prestige_cost }
-			pod_combat_is_player_turn_trigger = yes
-		}
-		prestige >= $STORY$.var:prestige_cost
-	}
-
-	# State-condition gate (cond_mode = gate): usable only when the condition
-	# holds. Dynamic, both PC and AI. 
-	trigger_if = {
-		limit = { $STORY$ = { has_variable = cond_mode  var:cond_mode = flag:gate } }
-		pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ PREDICATE = $STORY$.var:cond_predicate }
-	}
-
-	# once_per usage limiter (lockstep with POD_can_execute_combat_move).
-	trigger_if = {
-		limit = { $STORY$ = { has_variable = once_per } }
-		NOT = { pod_combat_actor_has_used_move_trigger = { STORY = $STORY$  ACTOR = $ACTOR$ } }
-	}
-
-	# Duplicate-stance / reaction guard.
-	NAND = {
-		$STORY$ = { has_variable = set_guard }
-		has_variable = pod_combat_actor_is_guarding
-	}
-	NAND = {
-		$STORY$ = { has_variable = dodge }
-		has_variable = pod_combat_actor_is_dodging
-	}
-	NAND = {
-		$STORY$ = { has_variable = stealth }
-		has_variable = pod_combat_actor_is_stealthed
-	}
-	NAND = {
-		$STORY$ = { has_variable = retaliate_if_hit }
-		has_variable = pod_combat_actor_retaliate_hit
-	}
-	NAND = {
-		$STORY$ = { has_variable = retaliate_if_missed }
-		has_variable = pod_combat_actor_retaliate_miss
-	}
-
-	# Tier-redundancy guard (upgrade-only contract).
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_round_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_combat_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_round_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_combat_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_round_tier }
-	pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_combat_tier }
-
-	# Heal-utility gate (self-targeted heal-only moves).
-	trigger_if = {
-		limit = {
-			$STORY$ = {
-				OR = {
-					has_variable = hp_heal
-					has_variable = morale_heal
-				}
-				NOT = { has_variable = hp_damage }
-				NOT = { has_variable = morale_damage }
-				OR = {
-					NOT = { has_variable = targeting }
-					var:targeting = flag:self
-				}
-			}
-		}
-		custom_description = {
-			text = pod_combat_cant_heal_already_full_desc
-			OR = {
-				AND = {
-					$STORY$ = {
-						has_variable = hp_heal
-						var:heal_type = flag:superficial
-					}
-					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
-				}
-				AND = {
-					$STORY$ = {
-						has_variable = hp_heal
-						var:heal_type = flag:aggravated
-					}
-					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
-				}
-				AND = {
-					$STORY$ = { has_variable = morale_heal }
-					var:pod_combat_actor_morale < pod_combat_max_morale
-				}
-			}
-		}
-	}
-
-	# Targeting validity, player turn only.
-	trigger_if = {
-		limit = {
-			pod_combat_is_player_turn_trigger = yes
-			$STORY$ = { var:targeting = flag:single_enemy }
-		}
-		save_temporary_scope_as = host
-		custom_description = {
-			text = pod_combat_targeting_need_enemy_tt
-			has_variable = pod_combat_pc_target_team
-			any_in_list = {
-				variable = pod_combat_active_slots
-				var:combat_team = scope:host.var:pod_combat_pc_target_team
-				var:team_position = scope:host.var:pod_combat_pc_target_position
-				pod_combat_slot_is_enemy_trigger = yes
-				pod_combat_slot_is_alive_trigger = yes
-			}
-		}
-	}
-
-	trigger_if = {
-		limit = {
-			pod_combat_is_player_turn_trigger = yes
-			$STORY$ = { var:targeting = flag:single_ally }
-		}
-		save_temporary_scope_as = host
-		custom_description = {
-			text = pod_combat_targeting_need_ally_tt
-			has_variable = pod_combat_pc_target_team
-			any_in_list = {
-				variable = pod_combat_active_slots
-				var:combat_team = scope:host.var:pod_combat_pc_target_team
-				var:team_position = scope:host.var:pod_combat_pc_target_position
-				pod_combat_slot_is_player_team_trigger = yes
-				var:team_position >= 1
-				pod_combat_slot_is_alive_trigger = yes
-			}
-		}
-	}
-
-	trigger_if = {
-		limit = {
-			pod_combat_is_player_turn_trigger = yes
-			$STORY$ = { var:targeting = flag:single_pc }
-		}
-		custom_description = {
-			text = pod_combat_targeting_need_pc_alive_tt
-			has_variable = pod_combat_pc_slot
-			var:pod_combat_pc_slot = { has_variable = slot_char pod_combat_slot_is_alive_trigger = yes }
-		}
-	}
-
-	trigger_if = {
-		limit = {
-			pod_combat_is_player_turn_trigger = yes
-			$STORY$ = { var:targeting = flag:team_enemy }
-		}
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_enemy_trigger = yes
-			pod_combat_slot_is_alive_trigger = yes
-		}
-	}
-
-	# AI-side single_ally availability + heal-need gates.
-	trigger_if = {
-		limit = {
-			NOT = { pod_combat_is_player_turn_trigger = yes }
-			$STORY$ = { var:targeting = flag:single_ally }
-		}
-		pod_combat_ai_has_available_ally_trigger = yes
-	}
-
-	trigger_if = {
-		limit = {
-			NOT = { pod_combat_is_player_turn_trigger = yes }
-			$STORY$ = {
-				var:targeting = flag:single_ally
-				OR = {
-					has_variable = hp_heal
-					has_variable = morale_heal
-				}
-			}
-		}
-		pod_combat_ai_has_ally_needing_heal_trigger = { STORY = $STORY$ }
-	}
-
-	# C26: summon-capacity gate (mirror of POD_can_execute_combat_move; plain trigger,
-	# no PC tooltip). Don't let the AI pick a summon when its side is full - the glue
-	# would no-op and waste the turn.
-	trigger_if = {
-		limit = {
-			$STORY$ = { has_variable = summons_combatant }
-			has_variable = pod_combat_current_actor_team
-		}
-		OR = {
-			AND = {
-				var:pod_combat_current_actor_team = flag:player
-				var:pod_combat_player_team_size < pod_combat_max_team_size
-			}
-			AND = {
-				var:pod_combat_current_actor_team = flag:enemy
-				var:pod_combat_enemy_team_size < pod_combat_max_team_size
-			}
-		}
-	}
+	pod_combat_move_dynamic_gates_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
 }
 
 
@@ -601,7 +404,8 @@ pod_combat_move_is_usable_now_trigger = {
 ######################################################
 
 # Passes unless the move's $TIER_VAR$ is at or below the live workspace tier
-# (upgrade-only contract; rationale at section 11 of pod_combat_move_effects.txt).
+# (upgrade-only contract; canonical rationale on pod_combat_upgrade_tier_var_effect
+# in pod_combat_move_effects.txt).
 # Single trigger_if (not NAND) so the var reads only happen when both the move
 # attribute and the workspace var exist, avoiding "variable not set" warnings.
 pod_combat_tier_upgrade_only_trigger = {
@@ -623,10 +427,10 @@ pod_combat_tier_upgrade_only_trigger = {
 # host scope. The rider-condition and retaliation gates compose against
 # these so the mapping lives in one place (canonical map:
 # COMBAT_REFERENCE.info §4):
-#   "hp_damage" — attack_result=hp_damage
-#   "contact"   — attack_result ∈ (hp_damage, guard_blocked, soaked)
-#   "miss"      — attack_result ∈ (missed, dodged, stealthed)
-# Each gates on outcome=attack first — attack_result is only meaningful
+#   "hp_damage" - attack_result=hp_damage
+#   "contact" - attack_result in (hp_damage, guard_blocked, soaked)
+#   "miss" - attack_result in (missed, dodged, stealthed)
+# Each gates on outcome=attack first - attack_result is only meaningful
 # then, so non-attack outcomes fail every partition by design.
 
 # The attack landed real wound boxes on the target.
@@ -660,7 +464,7 @@ pod_combat_result_code_indicates_contact_trigger = {
 	}
 }
 
-# Evaded the attack — miss, dodge consumed, stealth auto-miss. Used by
+# Evaded the attack - miss, dodge consumed, stealth auto-miss. Used by
 # retaliate_if_missed and rider_condition = on_miss.
 pod_combat_result_code_indicates_miss_trigger = {
 	has_variable = pod_combat_last_outcome
@@ -681,10 +485,10 @@ pod_combat_result_code_indicates_miss_trigger = {
 # even on full-soak rows we keep the source flavour (something WAS
 # rolled and survived as residue / aura).
 #
-# Parametric on $RESULT_VAR$ — two call sites read the enum off
+# Parametric on $RESULT_VAR$ - two call sites read the enum off
 # different vars:
-#   - host scope (move execution)  — RESULT_VAR = pod_combat_last_attack_result
-#   - log-entry scope (post-action) — RESULT_VAR = attack_result
+# - host scope (move execution) - RESULT_VAR = pod_combat_last_attack_result
+# - log-entry scope (post-action) - RESULT_VAR = attack_result
 pod_combat_result_indicates_no_damage_dealt_trigger = {
 	has_variable = $RESULT_VAR$
 	OR = {
@@ -700,9 +504,9 @@ pod_combat_result_indicates_no_damage_dealt_trigger = {
 ###### RIDER CONDITION GATE
 ######################################################
 # Generic gate for rider effects (heal / morale damage / self-damage)
-# that piggyback on a move's HP-damage step — e.g. a bite that heals on
+# that piggyback on a move's HP-damage step - e.g. a bite that heals on
 # a landed hit. Each rider's condition var on the move story holds one
-# of: always (default when unset), on_hp_damage, on_contact, on_miss —
+# of: always (default when unset), on_hp_damage, on_contact, on_miss - 
 # resolved against the partition triggers above. Caller scope = host.
 #
 # Drain moves: the generator emits heal_condition = on_hp_damage for any
@@ -732,7 +536,7 @@ pod_combat_rider_condition_passes_trigger = {
 ######################################################
 ###### STATE CONDITION (gate / bonus)
 ######################################################
-# $STORY$ = the move; $ACTOR$ = the acting
+# docs/CONDITION_SYSTEM_DESIGN.md. $STORY$ = the move; $ACTOR$ = the acting
 # character (the "user"). Evaluated in HOST scope: round / morale / stance read
 # host workspace vars; the user is $ACTOR$, the target is var:pod_combat_target_char
 # (morale via the pod_combat_*_morale mirrors). cond_target routes single-subject
@@ -876,7 +680,7 @@ pod_combat_move_condition_met_trigger = {
 		}
 
 		# Identifier predicates: route to the char (has_trait) / run in $ACTOR$
-		# (target_known_secret), then a sub-dispatch switches on cond_param
+		# (target_known_secret), then a GENERATED sub-dispatch switches on cond_param
 		# to the literal trait / secret_type (pod_combat_condition_dispatch_triggers.txt).
 		flag:has_trait = {
 			trigger_if = {
@@ -947,9 +751,9 @@ pod_combat_move_condition_met_trigger = {
 # pod_combat_move_effects.txt.
 #
 # Caller contract:
-#   - Implicit scope must be the iterated slot story (var:combat_team
+# - Implicit scope must be the iterated slot story (var:combat_team
 #     lives there).
-#   - scope:host must be saved to the combat host (where
+# - scope:host must be saved to the combat host (where
 #     pod_combat_current_actor_team is read).
 
 pod_combat_aoe_team_enemy_filter_trigger = {
@@ -957,7 +761,7 @@ pod_combat_aoe_team_enemy_filter_trigger = {
 }
 
 pod_combat_aoe_team_ally_filter_trigger = {
-	# Includes the actor's own slot — team_ally heals/buffs cover self.
+	# Includes the actor's own slot - team_ally heals/buffs cover self.
 	var:combat_team = scope:host.var:pod_combat_current_actor_team
 }
 

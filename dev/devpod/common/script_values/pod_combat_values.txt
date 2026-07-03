@@ -2,28 +2,47 @@
 ######   POD COMBAT VALUES   ######
 ######################################
 # Static constants and script values for the combat minigame.
+# Naming: bare names = tuning constants; *_value = general script values;
+# accepted legacy suffixes kept to avoid GUI-binding churn: *_mag_sv /
+# *_total_damage_sv (log segment reads), *_pct (bar fills), *_count / *_raw
+# (loadout counts; _raw = live compute, plain = editor-open cache).
 # For the variable namespace, slot-story field catalogue,
 # workspace pattern, hit-chance formula, and result-code map, see
 # COMBAT_REFERENCE.info §1 (Variable namespace) and §4 (Result codes).
 
-###### CONSTANTS ######
-# Tier magnitudes — small/medium/large = ±10/±20/±30, applied by the
-# 8 tier-mag SVs (soak/hit × buff/debuff × round/combat) per slot.
-combat_tier_small_mag  = 10
-combat_tier_medium_mag = 20
-combat_tier_large_mag  = 30
-
-###### BASE CONSTANTS ######
+###### TUNING CONSTANTS ######
+# Tier magnitudes - small/medium/large = +/-10/20/30, applied by the
+# 8 tier-mag SVs (soak/hit x buff/debuff x round/combat) per slot.
+pod_combat_tier_small_mag  = 10
+pod_combat_tier_medium_mag = 20
+pod_combat_tier_large_mag  = 30
 
 pod_combat_base_ap = 6
 
 pod_combat_hit_chance_base = 60
 
-# Morale is still shared across all slots (fixed 20 cap).
+# Live hit-chance clamp window, shared by the recalc core (pod_combat_tier_effects)
+# and the §5d bonus-hit re-cap so the ceiling cannot silently drift between them.
+pod_combat_hit_chance_min = 20
+pod_combat_hit_chance_max = 95
+
+# AI target-selection thresholds (empty wound boxes): read by the finishable
+# flag and the shared target-selector core's kill-priority factor (both in
+# pod_combat_group_effects.txt). Script values, not @-defines: @-defines are
+# file-local and these are tuned here but read there.
+pod_combat_ai_hp_finish_threshold = 1
+pod_combat_ai_kill_priority_boxes = 2
+
+# One fixed morale cap for every combatant; morale itself is tracked per
+# slot (unlike max HP, which derives from the character's wound track).
 pod_combat_max_morale = 20
 
-# Soft per-team roster cap. Teams are otherwise unbounded — the duel
+# Soft per-team roster cap. Teams are otherwise unbounded - the duel
 # builder appends combatants by team_position with no structural limit.
+# This is a runaway guardrail (a buggy caller that loops add_ally/add_enemy
+# forever would otherwise create unbounded slot stories and, via the O(N^2)
+# turn-order pass, hang the game). Raise it freely; it is not a real design
+# limit. The GUI panels scroll past it without issue.
 pod_combat_max_team_size = 50
 
 # Use to calculate the amount of morale damage taken when you suffer HP damage
@@ -46,9 +65,9 @@ pod_combat_max_equipped = 16
 # pod_combat_group_effects.txt for the consuming integer_range call.
 #
 # Tuning:
-#   higher → more chaos in turn order (prowess matters less)
-#   lower  → more prowess-deterministic (small or no upsets)
-#   == 1   → pure prowess ordering (debug only)
+#   higher -> more chaos in turn order (prowess matters less)
+#   lower  -> more prowess-deterministic (small or no upsets)
+#   == 1   -> pure prowess ordering (debug only)
 pod_combat_initiative_roll_max = 30
 
 ###### DESIGNER EXTENSION HOOKS ######
@@ -119,7 +138,7 @@ pod_combat_ap_modifier_value = {
 	# }
 }
 
-# Morale damage = HP damage * this ratio (pod_combat_route_to_pod_damage spillover,
+# Morale damage = HP damage * this ratio (pod_combat_route_to_pod_damage_effect spillover,
 # pod_combat_effects.txt). Script value not @-constant: @ refs inside a $PARAM$-using
 # effect don't resolve and crash (same footgun as base_hit's @ bounds in
 # pod_combat_group_effects.txt). SV-eval cost is one int read.
@@ -150,7 +169,7 @@ pod_combat_ally_down_morale_penalty = 2
 # hardcoded "+30" texts in POD_combat_static_l_english.yml:
 # pod_combat_status_stealth_tt, pod_combat_desc_stealth,
 # game_concept_pod_combat_stealth_desc, and the Stealth bullet in
-# pod_combat.0001.desc (help event).
+# pod_combat.0102.desc (help topic event).
 pod_combat_stealth_hit_bonus = 30
 
 # AI target-preference weight adds, applied in the two GROUP target selectors
@@ -160,7 +179,7 @@ pod_combat_stealth_hit_bonus = 30
 # near-dead kill gap (the factor-3 floor widens that past these adds), so
 # kill-priority always overrides target preference. Shared as script_values
 # (not @-defines) because the selectors and the AI precompute live in different
-# files and @-defines are file-scoped (G09).
+# files and @-defines are file-scoped.
 pod_combat_ai_target_pref_wounded_weight = 20
 pod_combat_ai_target_pref_threat_weight  = 25
 # Candidate thresholds the same selectors gate the adds on: a target counts as
@@ -170,7 +189,9 @@ pod_combat_ai_target_pref_wounded_threshold = 3
 pod_combat_ai_target_pref_threat_threshold  = 12
 
 # Cap on pod_combat_log entries. Each push rebuilds the list (newest-first ordering),
-pod_combat_log_max_entries = 30
+# so an uncapped log is O(N^2) over the combat. Dropped entries are end_story'd so the
+# POD_combat_log_entry story doesn't leak on Charon for the session.
+pod_combat_log_max_entries = 50
 
 ###### CURRENT VALUE ACCESSORS ######
 # Used by GUI and triggers to read combat state.
@@ -232,7 +253,7 @@ pod_combat_current_actor_value = {
 	# (enemy ? 1 : 0), derived from the two-field host pointer. The GUI
 	# compares it against each slot's pod_combat_slot_ordinal_value to
 	# highlight the actor. The interleaved formula (player/p = 2p, enemy/p =
-	# 2p+1) is a bijection for ANY team size, unlike the old (enemy?5:0)+pos.
+	# 2p+1) is a bijection for ANY team size.
 	# -1 when no actor is set so nothing highlights between turns.
 	value = -1
 	if = {
@@ -282,14 +303,11 @@ pod_combat_ai_heal_base_value = {
 }
 
 pod_combat_ai_heal_span_value = {
-	value = 28  # incentive added at full deficit; base+span ~= the old flat +30 (tunable)
+	value = 28  # incentive added at full deficit (tunable)
 }
 ###### SLOT-STORY-SCOPED VALUE ACCESSORS ######
-# Caller scope = the slot story (set externally via
-# datacontext = "[GetPlayer.MakeScope.Var('pod_combat_slot_$N$')]"
-# from a single-instance widget invocation, OR implicitly via a
-# datamodel iteration over pod_combat_active_slots — the iteration
-# scope IS the iterated story).
+# Caller scope = the slot story: the datamodel iteration over
+# pod_combat_active_slots (the iteration scope IS the iterated story).
 #
 # These read slot vars off the current scope (= slot story) directly
 # via var:slot_X. Used by the datamodel-driven pod_combat_datamodel_slot
@@ -298,7 +316,7 @@ pod_combat_ai_heal_span_value = {
 # slot.
 #
 # All gates short-circuit on tooltip-build (where slot stories don't
-# exist — pod_combat_set_slot_char_effect's lazy-create branch is
+# exist - pod_combat_set_slot_char_effect's create-story block is
 # wrapped in hidden_effect_new_object, and pod_combat_active_slots
 # is populated inside the same wrap, so the list is empty during
 # tooltip preview and the datamodel iteration is a no-op).
@@ -393,7 +411,7 @@ pod_combat_slot_is_stealthed_value = {
 # Returns 1 when EITHER retaliate-on-hit or retaliate-on-miss is armed
 # on the slot story. Used by the combat window's per-slot stance-icon
 # row so a single icon signals "this combatant has a retaliation
-# stance up" without distinguishing hit/miss/agg variants — those
+# stance up" without distinguishing hit/miss/agg variants - those
 # nuances live in the icon's tooltip.
 pod_combat_slot_has_retaliation_value = {
 	if = {
@@ -450,55 +468,55 @@ pod_combat_slot_is_controlled_value = {
 pod_combat_slot_initiative_value = {
 	if = { limit = { has_variable = slot_initiative } value = var:slot_initiative }
 }
-# Tier magnitude SVs — return the tier's magnitude (small/medium/large)
+# Tier magnitude SVs - return the tier's magnitude (small/medium/large)
 # when the corresponding tier var is set to 1/2/3, else 0. Eight variants,
-# one per (stat × direction × duration) tuple matching the slot story's
+# one per (stat x direction x duration) tuple matching the slot story's
 # slot_{stat}_{direction}_{duration}_tier var family.
 pod_combat_slot_soak_buff_round_mag_sv = {
-	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_buff_round_tier var:slot_soak_buff_round_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_soak_buff_combat_mag_sv = {
-	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_buff_combat_tier var:slot_soak_buff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_soak_debuff_round_mag_sv = {
-	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_debuff_round_tier var:slot_soak_debuff_round_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_soak_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_soak_debuff_combat_tier var:slot_soak_debuff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_hit_buff_round_mag_sv = {
-	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_buff_round_tier var:slot_hit_buff_round_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_hit_buff_combat_mag_sv = {
-	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_buff_combat_tier var:slot_hit_buff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_hit_debuff_round_mag_sv = {
-	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_debuff_round_tier var:slot_hit_debuff_round_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 pod_combat_slot_hit_debuff_combat_mag_sv = {
-	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
 # Signed net hit-chance modifier (buffs - debuffs) over the four hit-tier mag SVs.
 # NPC slot cards show this instead of slot_hit_chance, whose absolute value rotates
 # between leader-baseline / last-target / last-retaliation (PODCombatSlotHitDisplay,
-# 00_POD_combat_custom_loc.txt). Slot 0 keeps the absolute readout: its workspace
+# POD_combat_log_custom_loc.txt). Slot 0 keeps the absolute readout: its workspace
 # writeback refreshes slot_hit_chance vs the PC's target every turn.
 pod_combat_slot_hit_net_mod_value = {
 	value = 0
@@ -544,39 +562,39 @@ pod_combat_pc_hit_net_mod_value = {
 # the plain `if` chain (not else_if) over both duration vars is safe.
 
 pod_combat_move_soak_buff_mag_value = {
-	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 3 } value = combat_tier_large_mag  }
-	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 3 } value = pod_combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_buff_combat_tier var:soak_buff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
 pod_combat_move_soak_debuff_mag_value = {
-	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 3 } value = combat_tier_large_mag  }
-	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_debuff_round_tier  var:soak_debuff_round_tier  = 3 } value = pod_combat_tier_large_mag  }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = soak_debuff_combat_tier var:soak_debuff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
 pod_combat_move_hit_buff_mag_value = {
-	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 3 } value = combat_tier_large_mag  }
-	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_buff_round_tier  var:hit_buff_round_tier  = 3 } value = pod_combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_buff_combat_tier var:hit_buff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
 pod_combat_move_hit_debuff_mag_value = {
-	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 3 } value = combat_tier_large_mag  }
-	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 1 } value = combat_tier_small_mag  }
-	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 2 } value = combat_tier_medium_mag }
-	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 3 } value = combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_debuff_round_tier  var:hit_debuff_round_tier  = 3 } value = pod_combat_tier_large_mag  }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 1 } value = pod_combat_tier_small_mag  }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 2 } value = pod_combat_tier_medium_mag }
+	if = { limit = { has_variable = hit_debuff_combat_tier var:hit_debuff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -598,7 +616,7 @@ pod_combat_move_hit_debuff_mag_value = {
 #
 # Reads entry.var:attack_result (set by push_log from the host's
 # pod_combat_last_attack_result) since the icon suppress logic only
-# applies to the attack axis — heal / morale / utility rows don't
+# applies to the attack axis - heal / morale / utility rows don't
 # have an attack_result var at all, so the trigger returns false for
 # them and the icon stays visible.
 
@@ -619,7 +637,7 @@ pod_combat_log_show_damage_source_value = {
 
 
 # ─── Combat-log segment visibility probes (thin readers) ─────
-# Visibility and the preceding " · " separator are baked once at push time in
+# Visibility and the preceding middot separator are baked once at push time in
 # pod_combat_push_log_effect (pod_combat_effects.txt): seg_<x>_on => segment renders,
 # seg_<x>_sep => a separator precedes it. Entry vars are immutable post-push, so each
 # SV below is one has_variable read. Rows that skip the bake carry no seg vars and read
@@ -659,13 +677,9 @@ pod_combat_log_retal_rider_visible_value = {
 
 
 # ─── Segment separator reads ───────────────────────────────────────
-# before_<x> keeps its name but now returns the baked separator
-# decision seg_<x>_sep (own segment visible AND any earlier content)
-# instead of the old prior-content count. Its only consumer,
-# PODSegSepVisible, ANDs it with the segment's own visible SV, so the
-# composed separator visibility is unchanged; the old linked
-# accumulator chain (each SV = previous visible + previous
-# accumulator, re-evaluated recursively on every read) is gone.
+# before_<x> returns the baked separator decision seg_<x>_sep (own
+# segment visible AND any earlier content). Its only consumer,
+# PODSegSepVisible, ANDs it with the segment's own visible SV.
 
 pod_combat_log_before_heal_value = {
 	value = 0
@@ -697,7 +711,7 @@ pod_combat_log_before_retal_value = {
 }
 # ─── Per-segment visibility (entry scope, thin reads) ──────────────
 # Recoil and the intent segments below: same thin-read shape as the
-# riders above.
+# riders above (segment contract: docs/COMBAT_LOG_REFACTOR_DESIGN.md).
 pod_combat_log_seg_recoil_visible_value = {
 	value = 0
 	if = {
@@ -772,6 +786,20 @@ pod_combat_log_seg_init_debuff_visible_value = {
 	value = 0
 	if = {
 		limit = { has_variable = seg_init_debuff_on }
+		value = 1
+	}
+}
+pod_combat_log_seg_energy_gain_visible_value = {
+	value = 0
+	if = {
+		limit = { has_variable = seg_energy_gain_on }
+		value = 1
+	}
+}
+pod_combat_log_seg_energy_drain_visible_value = {
+	value = 0
+	if = {
+		limit = { has_variable = seg_energy_drain_on }
 		value = 1
 	}
 }
@@ -855,15 +883,29 @@ pod_combat_log_before_init_debuff_value = {
 		value = 1
 	}
 }
-# Loadout bookkeeping — counts the equipped moves per combat_category
+pod_combat_log_before_energy_gain_value = {
+	value = 0
+	if = {
+		limit = { has_variable = seg_energy_gain_sep }
+		value = 1
+	}
+}
+pod_combat_log_before_energy_drain_value = {
+	value = 0
+	if = {
+		limit = { has_variable = seg_energy_drain_sep }
+		value = 1
+	}
+}
+# Loadout bookkeeping - counts the equipped moves per combat_category
 # and in total by iterating the character's pod_combat_loadout variable
 # list.
 #
 # Called on character scope. The GUI reads them via
 # GetPlayer.MakeScope.ScriptValue('...').
 
-# Two layers (G07 perf fix):
-#   *_raw  - live every_in_list compute, always correct; used by combat logic and loc.
+# Two layers:
+#   *_raw - live every_in_list compute, always correct; used by combat logic and loc.
 #   public - while the loadout editor is open (pod_combat_config_open) read the
 #            *_count_cache host var (refreshed on editor-open + every equip/unequip)
 #            so skills-window pip strips don't re-walk the loadout ~36x/frame;
