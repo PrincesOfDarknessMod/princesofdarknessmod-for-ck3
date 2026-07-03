@@ -409,7 +409,7 @@ pod_combat_push_mind_log_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -436,7 +436,7 @@ pod_combat_push_dot_tick_log_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -464,7 +464,7 @@ pod_combat_push_dot_applied_log_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -536,7 +536,7 @@ pod_combat_push_ap_drain_log_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -1031,7 +1031,9 @@ pod_combat_save_enemy_victor_effect = {
 			pod_combat_slot_is_alive_trigger = yes
 			has_variable = slot_char
 		}
-		order_by = var:team_position
+		# ordered_in_list sorts DESCENDING; negate for lowest-position first
+		# (same idiom as the summon fallback in pod_combat_summon_effects.txt).
+		order_by = { value = 0 subtract = var:team_position }
 		position = 0
 		var:slot_char = { save_scope_as = pod_combat_enemy_victor }
 	}
@@ -1187,47 +1189,55 @@ pod_combat_auto_resolve_effect = {
 #                            pod_combat_log_*_visible_value / _before_* SVs
 #                            are thin reads of these.
 #
-# Entries are PREPENDED - push_log rebuilds the list to insert each new
-# row at the FRONT so the GUI datamodel renders newest-first without
-# any sort logic. A single datamodel template in pod_combat_window.gui
-# renders every row, reading the entry's vars directly.
+# Entries are APPENDED in chronological order (oldest first). The combat
+# window's log vbox renders the list bottomtotop (pod_combat_window.gui), so
+# an oldest-first list still displays newest-at-top - no per-push rebuild.
+# A single datamodel template renders every row, reading the entry's vars.
 
-# Shared prepend-and-cap helper for both push_log and push_system_log.
-# Inserts scope:new_log_entry at the FRONT of the host's pod_combat_log
-# variable list, then trims oldest entries past pod_combat_log_max_entries.
-# Trimmed entries are end_story'd so the underlying POD_combat_log_entry
-# story_cycle doesn't leak on Charon for the rest of the session.
+# Shared append-and-cap helper for both push_log and push_system_log.
+# Appends scope:new_log_entry to the host's pod_combat_log variable list,
+# stamps a per-fight sequence number on it, then drops the OLDEST entry when
+# the list exceeds pod_combat_log_max_entries. Trimmed entries are end_story'd
+# so the underlying POD_combat_log_entry story doesn't leak on Charon.
 #
 # Caller contract:
 # - scope:combat_host points at the combat host (the PC).
 # - scope:new_log_entry points at the freshly-created log entry story.
 # Parameterless - purely scope-driven.
-pod_combat_prepend_capped_log_entry_effect = {
+pod_combat_append_capped_log_entry_effect = {
 	scope:combat_host = {
-		every_in_list = {
-			variable = pod_combat_log
-			scope:combat_host = {
-				add_to_variable_list = { name = pod_combat_log_rebuild target = prev }
-			}
+		# Monotonic per-fight sequence, stamped on the entry so the cap trim
+		# can pick the oldest row by ordered_in_list. Append order alone gives
+		# no scope-stable "front" handle that survives repeated trims within
+		# one execution (an AoE burst at the cap trims once per target row):
+		# the first-match save_scope_as idiom would re-end an already-ended
+		# story on the 2nd trim, and a temporary scope expires with its block.
+		if = {
+			limit = { NOT = { has_variable = pod_combat_log_seq } }
+			set_variable = { name = pod_combat_log_seq value = 0 }
 		}
-		clear_variable_list = pod_combat_log
+		change_variable = { name = pod_combat_log_seq add = 1 }
+		scope:new_log_entry = {
+			set_variable = { name = log_seq value = scope:combat_host.var:pod_combat_log_seq }
+		}
 		add_to_variable_list = { name = pod_combat_log target = scope:new_log_entry }
-		set_variable = { name = pod_combat_log_append_count value = 1 }
-		every_in_list = {
-			variable = pod_combat_log_rebuild
-			scope:combat_host = {
-				if = {
-					limit = { var:pod_combat_log_append_count < pod_combat_log_max_entries }
-					add_to_variable_list = { name = pod_combat_log target = prev }
-					change_variable = { name = pod_combat_log_append_count add = 1 }
-				}
-				else = {
-					prev = { end_story = yes }
-				}
+		# Each push appends exactly one, so the list is at most cap+1 here; drop
+		# the single lowest-seq (oldest) entry. ordered_in_list overwrites the
+		# saved scope each call, so it is safe across per-frame re-trims (unlike
+		# the first-match idiom). Remove from the list BEFORE end_story so the
+		# ref is still live for the match.
+		if = {
+			limit = { variable_list_size = { name = pod_combat_log  value > pod_combat_log_max_entries } }
+			ordered_in_list = {
+				variable = pod_combat_log
+				# Descending sort; negate so lowest seq (oldest) lands at position 0.
+				order_by = { value = 0 subtract = var:log_seq }
+				position = 0
+				save_scope_as = pod_combat_oldest_log_row
 			}
+			remove_list_variable = { name = pod_combat_log  target = scope:pod_combat_oldest_log_row }
+			scope:pod_combat_oldest_log_row = { end_story = yes }
 		}
-		clear_variable_list = pod_combat_log_rebuild
-		remove_variable = pod_combat_log_append_count
 	}
 }
 
@@ -1682,7 +1692,7 @@ pod_combat_push_log_effect = {
 		}
 		remove_variable = seg_bake_prior
 	}
-	pod_combat_prepend_capped_log_entry_effect = yes
+	pod_combat_append_capped_log_entry_effect = yes
 
 	scope:combat_host = {
 		# Clear the per-action transients now they're captured (also done
@@ -1731,7 +1741,7 @@ pod_combat_push_system_log_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -1760,7 +1770,7 @@ pod_combat_push_system_log_named_effect = {
 				set_variable = { name = round value = scope:combat_host.var:pod_combat_round }
 			}
 		}
-		pod_combat_prepend_capped_log_entry_effect = yes
+		pod_combat_append_capped_log_entry_effect = yes
 	}
 }
 
@@ -2163,14 +2173,13 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_target_hit_chance
 	remove_variable = pod_combat_current_hit_chance
 	remove_variable = pod_combat_ai_picked
-	# Log entries: end_story each, clear the list, and clear the rebuild
-	# scratch list (defensive against a push that errored mid-rebuild).
+	# Log entries: end_story each, clear the list, drop the per-fight seq counter.
 	every_in_list = {
 		variable = pod_combat_log
 		end_story = yes
 	}
 	clear_variable_list = pod_combat_log
-	clear_variable_list = pod_combat_log_rebuild
+	remove_variable = pod_combat_log_seq
 	# Clean up group combat slot variables
 	pod_combat_group_cleanup_effect = yes
 	# Per-fight stepping flag (seeded at finalize
