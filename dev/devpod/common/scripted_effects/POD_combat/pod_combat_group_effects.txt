@@ -796,7 +796,9 @@ pod_combat_init_slot_from_character_effect = {
 
 	pod_combat_set_slot_var_effect = { NAME = soak      VALUE = scope:slot_soak }
 	pod_combat_set_slot_var_effect = { NAME = base_soak VALUE = scope:slot_soak }
-	pod_combat_set_slot_var_effect = { NAME = morale    VALUE = pod_combat_max_morale }
+	# Shared starting-morale SV (cap or tuned override, + the designer hook,
+	# floor 1) - same source as the slot constructor, so the hook survives init.
+	pod_combat_set_slot_var_effect = { NAME = morale    VALUE = pod_combat_starting_morale_value }
 	pod_combat_set_slot_var_effect = { NAME = prowess   VALUE = scope:slot_prowess }
 	pod_combat_set_slot_alive_effect = { VALUE = 1 }
 	# AI energy-use counter: the AI move picker layers stacking weight penalties
@@ -1453,16 +1455,29 @@ pod_combat_calculate_initiative_effect = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = { pod_combat_slot_is_alive_trigger = yes }
-		set_variable = {
-			name = slot_initiative
-			value = {
-				value = var:slot_prowess
-				add = {
-					integer_range = { min = 1 max = pod_combat_initiative_roll_max }
+		# No-reroll tuning: when the toggle is set, keep round 1's roll for the
+		# whole fight; a slot with no roll yet (fresh mid-fight seat) still gets
+		# its first one. Everything below the roll (init_bonus fold, has_acted
+		# reset, once_per clear, turn-order restamp) always runs. Note: under
+		# no-reroll a folded init_bonus becomes a rest-of-fight shift.
+		if = {
+			limit = {
+				OR = {
+					NOT = { exists = global_var:pod_combat_tune_init_no_reroll }
+					NOT = { has_variable = slot_initiative }
 				}
-				# Designer hook (pod_combat_values.txt): per-character initiative
-				# modifier, 0 unless filled in. Evaluated on this slot (var:slot_char).
-				add = pod_combat_initiative_modifier_value
+			}
+			set_variable = {
+				name = slot_initiative
+				value = {
+					value = var:slot_prowess
+					add = {
+						integer_range = { min = 1 max = pod_combat_initiative_roll_max }
+					}
+					# Designer hook (pod_combat_values.txt): per-character initiative
+					# modifier, 0 unless filled in. Evaluated on this slot (var:slot_char).
+					add = pod_combat_initiative_modifier_value
+				}
 			}
 		}
 		if = {
@@ -1996,6 +2011,52 @@ pod_combat_restore_pc_target_effect = {
 # writeback (without it the PC slot-card hit chance refreshed only on a target
 # click). Stance flags are NOT reset here: load_workspace already set/removes
 # them per slot; stance persists until consumed.
+# Seed the acting combatant's per-turn AP budget on the host.
+# Default: full refill to the effective cap (pod_combat_effective_ap_cap_value,
+# which also carries the escalating-cap tuning) + the per-character designer
+# hook, floored at 0. When the partial-regen knob is tuned
+# (global_var:pod_combat_tune_ap_regen), unspent AP snapshotted on the slot at
+# turn end carries over: AP = min(cap, leftover + regen) + hook. A slot with
+# no snapshot yet (first turn, fresh summon, knob toggled mid-fight) seeds the
+# full bar. Caller scope = the combat host; runs after load_workspace so
+# var:pod_combat_actor_char is current.
+pod_combat_seed_turn_ap_effect = {
+	save_scope_as = host
+	if = {
+		limit = { exists = global_var:pod_combat_tune_ap_regen }
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { pod_combat_slot_is_current_actor_trigger = yes }
+			save_scope_as = pod_combat_ap_seed_slot
+		}
+	}
+	# ?= keeps the deref exists-safe if the actor slot somehow failed to match.
+	if = {
+		limit = { scope:pod_combat_ap_seed_slot ?= { has_variable = slot_ap_leftover } }
+		set_variable = {
+			name = pod_combat_current_ap
+			value = {
+				value = scope:pod_combat_ap_seed_slot.var:slot_ap_leftover
+				add = global_var:pod_combat_tune_ap_regen
+				max = pod_combat_effective_ap_cap_value
+				var:pod_combat_actor_char = { add = pod_combat_ap_modifier_value }
+				min = 0
+			}
+		}
+	}
+	else = {
+		set_variable = {
+			name = pod_combat_current_ap
+			value = {
+				value = pod_combat_effective_ap_cap_value
+				var:pod_combat_actor_char = { add = pod_combat_ap_modifier_value }
+				min = 0
+			}
+		}
+	}
+	pod_combat_apply_ap_drain_effect = yes
+}
+
 pod_combat_setup_pc_turn_effect = {
 	pod_combat_restore_pc_target_effect = yes
 	# Round-duration buffs expire at the START of the holder's turn (a self soak buff
@@ -2003,17 +2064,7 @@ pod_combat_setup_pc_turn_effect = {
 	pod_combat_clear_actor_round_buffs_effect = yes
 	pod_combat_load_workspace_effect = yes
 	pod_combat_recalc_pc_hit_chance_effect = yes
-	# Designer hook (pod_combat_values.txt): per-character AP modifier, 0 unless
-	# filled in. Evaluated on the acting character (var:pod_combat_actor_char).
-	set_variable = {
-		name = pod_combat_current_ap
-		value = {
-			value = pod_combat_base_ap
-			var:pod_combat_actor_char = { add = pod_combat_ap_modifier_value }
-			min = 0
-		}
-	}
-	pod_combat_apply_ap_drain_effect = yes
+	pod_combat_seed_turn_ap_effect = yes
 }
 
 # Atomic AI step (find_next-first): select the next actor, then run exactly
@@ -2097,8 +2148,12 @@ pod_combat_run_pre_pc_ai_turns_effect = {
 
 pod_combat_process_group_turns_effect = {
 
-	# Mark current actor (PC) as acted
-	var:pod_combat_pc_slot = { pod_combat_set_slot_var_effect = { NAME = has_acted VALUE = 1 } }
+	# Mark current actor (PC) as acted; snapshot unspent AP for the
+	# regen-knob carry-over (prev = the host, whose turn just ended).
+	var:pod_combat_pc_slot = {
+		pod_combat_set_slot_var_effect = { NAME = has_acted VALUE = 1 }
+		pod_combat_set_slot_var_effect = { NAME = ap_leftover VALUE = prev.var:pod_combat_current_ap }
+	}
 
 	# Save PC's workspace back to the PC slot
 	pod_combat_save_workspace_effect = yes
@@ -2279,18 +2334,8 @@ pod_combat_execute_ai_turn_effect = {
 	# turn. Consumed within the same turn, so the host var can't leak across actors.
 	pod_combat_ai_flag_finishable_enemy_effect = yes
 
-	# Set AP for this actor's turn
-	# Designer hook (pod_combat_values.txt): per-character AP modifier, 0 unless
-	# filled in. Evaluated on the acting character (var:pod_combat_actor_char).
-	set_variable = {
-		name = pod_combat_current_ap
-		value = {
-			value = pod_combat_base_ap
-			var:pod_combat_actor_char = { add = pod_combat_ap_modifier_value }
-			min = 0
-		}
-	}
-	pod_combat_apply_ap_drain_effect = yes
+	# Set AP for this actor's turn (shared seed: effective cap / regen carry-over).
+	pod_combat_seed_turn_ap_effect = yes
 
 	# Run AI moves (uses existing pod_combat_ai_take_turn_effect which reads
 	# from workspace). A fizzled stolen turn skips the moves entirely.
@@ -2325,6 +2370,8 @@ pod_combat_execute_ai_turn_effect = {
 				var:team_position = scope:host.var:pod_combat_current_actor_position
 			}
 			set_variable = { name = slot_has_acted value = 1 }
+			# Snapshot unspent AP for the regen-knob carry-over.
+			set_variable = { name = slot_ap_leftover value = scope:host.var:pod_combat_current_ap }
 			# One stolen turn exactly: the control marker dies with the turn
 			# it consumed, fizzled or not.
 			if = {
