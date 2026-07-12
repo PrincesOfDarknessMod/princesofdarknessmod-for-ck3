@@ -586,11 +586,16 @@ POD_execute_combat_move = {
 		limit = {
 			$STORY$ = { has_variable = dot_rounds }
 			has_variable = pod_combat_target_char
+			# Don't seed a burn the delivery never landed (dodged/stealthed/
+			# missed). NOT(miss) - not the positive contact predicate - so a landed
+			# hp0 MORALE DoT (outcome=morale_damage, no attack_result) still applies.
+			NOT = { pod_combat_result_code_indicates_miss_trigger = yes }
 		}
 		every_in_list = {
 			variable = pod_combat_active_slots
-			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_target_char } }
-			pod_combat_seed_dot_on_slot_effect = { STORY = $STORY$ AMOUNT = $STORY$.var:dot_amount ROUNDS = $STORY$.var:dot_rounds }
+			# Skip a target the same move just killed/downed (no affliction row on a corpse).
+			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_target_char }  NOT = { pod_combat_slot_should_be_marked_ko_trigger = yes } }
+			pod_combat_seed_dot_on_slot_effect = { STORY = $STORY$ AMOUNT = $STORY$.var:dot_amount ROUNDS = $STORY$.var:dot_rounds CASTER = scope:combat_host.var:pod_combat_actor_char }
 			# Application log: stress icon for morale burns, aggravated box
 			# for classes that always land aggravated (aggravated / fire /
 			# lightning / balefire), superficial box otherwise. Conditional
@@ -621,11 +626,13 @@ POD_execute_combat_move = {
 			has_variable = pod_combat_bonus_active
 			$STORY$ = { var:bonus_effect = flag:dot }
 			has_variable = pod_combat_target_char
+			# Same delivery gate as §13b (see there).
+			NOT = { pod_combat_result_code_indicates_miss_trigger = yes }
 		}
 		every_in_list = {
 			variable = pod_combat_active_slots
-			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_target_char } }
-			pod_combat_seed_dot_on_slot_effect = { STORY = $STORY$ AMOUNT = $STORY$.var:bonus_value ROUNDS = pod_combat_bonus_dot_rounds }
+			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_target_char }  NOT = { pod_combat_slot_should_be_marked_ko_trigger = yes } }
+			pod_combat_seed_dot_on_slot_effect = { STORY = $STORY$ AMOUNT = $STORY$.var:bonus_value ROUNDS = pod_combat_bonus_dot_rounds CASTER = scope:combat_host.var:pod_combat_actor_char }
 			pod_combat_push_dot_applied_log_effect = { MESSAGE_KEY = dot_applied }
 		}
 	}
@@ -911,8 +918,14 @@ pod_combat_dispatch_damage_pipeline_effect = {
 		}
 	}
 	# Consumed regardless of contact outcome - committing the action breaks
-	# stealth even on a miss.
-	pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
+	# stealth even on a miss. The roll-based team_enemy HP AoE sets a host
+	# tripwire so the per-target consume is deferred to ONE post-loop consume,
+	# letting every swept target keep the stealth accuracy; single-target moves
+	# (flag unset) consume here exactly as before.
+	if = {
+		limit = { scope:combat_host = { NOT = { has_variable = pod_combat_aoe_suppress_stealth_consume } } }
+		pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
+	}
 }
 
 
@@ -971,6 +984,10 @@ pod_combat_apply_team_enemy_hp_damage_effect = {
 	#   4. push_log - the per-target row.
 	#   5. clear per-target last_* (keeps the pushed-rows flag).
 	save_scope_as = host
+	# Burst-level stealth. Suppress the per-target consume during the loop so
+	# EVERY target's hit recalc keeps the stealth bonus (not just the first swept),
+	# then consume ONCE after. Read by pod_combat_dispatch_damage_pipeline_effect.
+	scope:combat_host = { set_variable = pod_combat_aoe_suppress_stealth_consume }
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
@@ -994,7 +1011,13 @@ pod_combat_apply_team_enemy_hp_damage_effect = {
 		pod_combat_aoe_check_target_alive_effect = yes
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
-	scope:host = { pod_combat_load_workspace_effect = yes }
+	# End the suppress window, then consume the actor's stealth ONCE for the
+	# whole burst (idempotent breaker; no-op if unstealthed). Persisted because the
+	# target-only reload below leaves the live actor workspace intact. Consume
+	# BEFORE the reload so its recalc reflects the stealth-off actor hit chance.
+	scope:combat_host = { remove_variable = pod_combat_aoe_suppress_stealth_consume }
+	pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
 # Arm one retaliation stance on the actor's workspace. $STORY$ = move story;
@@ -1055,7 +1078,7 @@ pod_combat_apply_team_enemy_morale_damage_effect = {
 		pod_combat_aoe_check_target_alive_effect = yes
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
-	scope:host = { pod_combat_load_workspace_effect = yes }
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
 
@@ -1064,7 +1087,8 @@ pod_combat_apply_team_enemy_morale_damage_effect = {
 ######################################################
 # HP / morale heal across the actor's team. Loads each ally into the TARGET
 # workspace slot (not actor) so SIDE=target heals don't clobber the actor's own
-# buffs/morale/hit. load_workspace at the end restores the pre-AoE pair.
+# buffs/morale/hit. The tail reloads ONLY the selected target
+# (pod_combat_reload_selected_target_effect), leaving the live actor workspace intact.
 
 pod_combat_apply_team_ally_hp_heal_effect = {
 	# $STORY$ = move story. See pod_combat_apply_team_enemy_hp_damage_effect for the row pattern.
@@ -1094,7 +1118,7 @@ pod_combat_apply_team_ally_hp_heal_effect = {
 		pod_combat_save_target_to_story_effect = yes
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
-	scope:host = { pod_combat_load_workspace_effect = yes }
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
 pod_combat_apply_team_ally_morale_heal_effect = {
@@ -1115,7 +1139,7 @@ pod_combat_apply_team_ally_morale_heal_effect = {
 		pod_combat_save_target_to_story_effect = yes
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
-	scope:host = { pod_combat_load_workspace_effect = yes }
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
 
@@ -1142,6 +1166,10 @@ pod_combat_apply_team_ally_morale_heal_effect = {
 pod_combat_seed_dot_on_slot_effect = {
 	set_variable = { name = slot_dot_amount value = $AMOUNT$ }
 	set_variable = { name = slot_dot_rounds value = $ROUNDS$ }
+	# Store the applying character so the round-end tick credits the burn
+	# to its caster (killer attribution / attacker-keyed aggravated), not the PC
+	# host. Overwrites on re-apply like the other slot_dot_* vars (no stacking).
+	set_variable = { name = slot_dot_source value = $CASTER$ }
 	# Literal-flags-only seeding: the kind IS the damage class (aggravated
 	# ticks as duel_aggravated; superficial/absent falls to flag:duel).
 	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = slot_dot_kind }

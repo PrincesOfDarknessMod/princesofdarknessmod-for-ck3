@@ -282,6 +282,24 @@ pod_combat_apply_ally_down_shock_to_slot_effect = {
 		limit = { var:slot_morale > 1 }
 		set_variable = { name = slot_morale value = { value = var:slot_morale subtract = pod_combat_ally_down_morale_penalty min = 1 } }
 		scope:ally_down_slot = { change_variable = { name = pod_combat_ally_shock_hits add = 1 } }
+		# Mirror the direct slot write into the live workspace when this shocked
+		# teammate is the current actor / selected target, or the end-of-turn
+		# re-save (pod_combat_execute_ai_turn_effect) flushes a stale pre-shock
+		# morale back over the slot - a dominated actor KO-ing a teammate on its
+		# final AP would otherwise lose its own shock. scope:host is the
+		# workspace owner (guaranteed by the mark-KO caller contract); the
+		# matcher triggers self-guard on it, so they fail closed off-combat.
+		# The post-shock morale rides a scope value (a number, so no flag
+		# degradation) to cross the scope:host switch cleanly.
+		save_scope_value_as = { name = ally_shock_new_morale value = var:slot_morale }
+		if = {
+			limit = { pod_combat_slot_is_current_actor_trigger = yes }
+			scope:host = { set_variable = { name = pod_combat_actor_morale value = scope:ally_shock_new_morale } }
+		}
+		if = {
+			limit = { pod_combat_slot_is_selected_target_trigger = yes }
+			scope:host = { set_variable = { name = pod_combat_target_morale value = scope:ally_shock_new_morale } }
+		}
 	}
 }
 
@@ -523,6 +541,37 @@ pod_combat_load_workspace_effect = {
 	}
 }
 
+# Target-only workspace reload for the AoE tail. Restores the selected-target
+# workspace - undoing the per-target loop's last-swept-slot corruption - while
+# leaving the LIVE actor workspace intact (energy spent, consumed stealth, tiers).
+# The full pod_combat_load_workspace_effect would reload the actor from its
+# unchanged slot and roll those mutations back. load_target -> recalc_pair_hit_chance
+# repairs the actor hit chance the loop transiently corrupted, without an actor reload.
+pod_combat_reload_selected_target_effect = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_selected_target_trigger = yes
+		}
+		pod_combat_load_target_from_story_effect = yes
+	}
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_selected_target_trigger = yes
+		}
+		if = {
+			limit = { scope:host = { has_variable = pod_combat_target_base_hit_chance } }
+			set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_target_base_hit_chance }
+		}
+		if = {
+			limit = { scope:host = { has_variable = pod_combat_target_hit_chance } }
+			set_variable = { name = slot_hit_chance value = scope:host.var:pod_combat_target_hit_chance }
+		}
+	}
+}
+
 ##############################################################################################
 # SECTION 3b: PER-FIGHT CHARACTER FLAGS + DISPLAY CACHES
 # Not workspace dispatch: the nonfatal death-gate pair, the PC unlock bake,
@@ -554,12 +603,14 @@ pod_combat_clear_nonfatal_flag_effect = {
 }
 
 # -- PC unlock bake  --
-# Bakes the PC's per-move unlock result onto each move story as the `pc_can_use`
-# flag, so per-frame surfaces (POD_can_execute_combat_move_trigger, pod_combat_loadout_option)
-# read a cheap has_variable instead of re-running the unlock dispatcher every frame.
-# Safe because unlocks are static trait/perk facts: a once-per-fight / once-per-open
-# bake is authoritative, and every reader re-bakes its move set first so the lingering
-# cache is never read stale. FULL dispatcher per move preserves the multi-splat union.
+# Adds each unlocked move to the ACTOR's per-character pod_combat_unlocked_moves
+# list, so per-frame surfaces (POD_can_execute_combat_move_trigger,
+# pod_combat_loadout_option) test cheap list membership instead of re-running the
+# unlock dispatcher every frame. The list lives on the viewing/fighting PC,
+# NOT as a flag on the globally-shared move stories - so one player opening the
+# editor can no longer rewrite another player's unlock state. The builders clear
+# the list before refilling, so this only ever adds. FULL dispatcher per move
+# preserves the multi-splat union.
 pod_combat_bake_one_unlock_effect = {
 	# $MOVE$ = saved-scope move story ; $ACTOR$ = saved-scope PC. BOTH are saved
 	# scopes (NOT `this`/`root`): STORY so the dispatcher's $STORY$.var reads stay
@@ -574,11 +625,7 @@ pod_combat_bake_one_unlock_effect = {
 			exists = $ACTOR$
 			pod_combat_actor_unlocks_move_trigger = { STORY = $MOVE$ ACTOR = $ACTOR$ }
 		}
-		$MOVE$ = { set_variable = pc_can_use }
-	}
-	else_if = {
-		limit = { exists = $ACTOR$ }
-		$MOVE$ = { remove_variable = pc_can_use }
+		$ACTOR$ = { add_to_variable_list = { name = pod_combat_unlocked_moves target = $MOVE$ } }
 	}
 }
 
@@ -593,6 +640,7 @@ pod_combat_bake_pc_loadout_unlocks_effect = {
 	# off `this` is what proves `this` is the valid host (it is the surface the
 	# original root-based bug still iterated).
 	save_scope_as = pod_combat_bake_actor
+	clear_variable_list = pod_combat_unlocked_moves
 	every_in_list = {
 		variable = pod_combat_loadout
 		save_temporary_scope_as = bake_move
@@ -607,6 +655,7 @@ pod_combat_bake_pc_catalogue_unlocks_effect = {
 	# `this` = the PC (decision taker). Capture it as the actor scope (see the
 	# loadout twin); pass it through instead of `root` for uniformity + safety.
 	save_scope_as = pod_combat_bake_actor
+	clear_variable_list = pod_combat_unlocked_moves
 	every_in_global_list = {
 		variable = POD_combat_moves
 		save_temporary_scope_as = bake_move
@@ -718,7 +767,7 @@ pod_combat_save_workspace_effect = {
 # All per-fight AI scratch on an AI character, cleared as one unit: the
 # loadout list, the anti-repetition history ring, the cross-turn focus-fire
 # mark, the personality-bias precompute + its done-guard, and the derived
-# target-pref flag (POD-Integration additions cleared on the same cadence).
+# target-pref flag.
 # Char scope. Two callers own the guards: slot init (is_ai; a fresh fight
 # starts clean) and group cleanup (is_ai + is_alive; nothing leaks into save
 # data or the NPC's next fight). Adding a new per-fight AI char var = one
@@ -877,6 +926,9 @@ POD_combat_create_duel_effect = {
 					NOT = { exists = global_var:POD_combat_version }
 					global_var:POD_combat_version != POD_current_combat_version
 				}
+				# Don't end/recreate the global stories while ANY player has a
+				# live fight referencing them (they reload on the next no-combat open).
+				NOT = { pod_combat_any_fight_active_trigger = yes }
 			}
 			POD_reload_combat_moves = yes
 		}
@@ -1073,17 +1125,18 @@ POD_combat_finalize_duel_effect = {
 
 	set_variable = { name = pod_combat_active value = yes }
 
-	# seed the per-fight step_mode host var from the
-	# persistent auto-advance preference, alongside pod_combat_active so the
-	# window's first draw can read it. Deterministic on both branches: the
-	# explicit remove on the auto path means a stale step_mode from a prior
-	# fight can never leak in.
+	# seed the per-fight step_mode host var from the toggling player's persistent
+	# preference (pod_combat_manual_step_pref, present = manual; absent = auto,
+	# the default), alongside pod_combat_active so the window's first draw can
+	# read it. This scope is the combat host = the PC, where the pref lives.
+	# Deterministic on both branches: the explicit remove on the auto path means
+	# a stale step_mode from a prior fight can never leak in.
 	if = {
-		limit = { has_global_variable = pod_combat_auto_advance }
-		remove_variable = pod_combat_step_mode
+		limit = { has_variable = pod_combat_manual_step_pref }
+		set_variable = { name = pod_combat_step_mode value = yes }
 	}
 	else = {
-		set_variable = { name = pod_combat_step_mode value = yes }
+		remove_variable = pod_combat_step_mode
 	}
 
 	# -- Pre-pass: shapeshift every AI fera combatant BEFORE slot init --
@@ -1196,7 +1249,7 @@ POD_combat_finalize_duel_effect = {
 	}
 
 	# Bake the PC's loadout-move unlocks for the cheap per-frame combat-bar check
-	# (POD_can_execute_combat_move_trigger reads pc_can_use instead of re-running the unlock
+	# (POD_can_execute_combat_move_trigger tests pod_combat_unlocked_moves membership instead of re-running the unlock
 	# dispatcher every GUI frame). After the loadout seed + warform pre-pass so it
 	# reads the fighting form.
 	pod_combat_bake_pc_loadout_unlocks_effect = yes
@@ -1340,40 +1393,54 @@ pod_combat_recalc_pc_hit_chance_effect = {
 # Called in addition to the existing workspace cleanup.
 ##############################################################################################
 
-pod_combat_group_cleanup_effect = {
-	# ── Unregister reinforcements that never entered ─────────────
-	# Scheduled-but-not-yet-seated combatants (combat ended before their join round).
-	# Summoned combatants are despawned separately below; here just strip the scheduling vars + registry.
-	if = {
-		limit = { has_variable_list = pod_combat_pending_reinforcements }
-		every_in_list = {
-			variable = pod_combat_pending_reinforcements
-			# is_alive: var mutation on a dead reference errors; a pending
-			# reinforcement that died before joining keeps its inert vars.
-			limit = { is_alive = yes }
-			remove_variable = pod_combat_join_round
-			remove_variable = pod_combat_join_team
-		}
-		clear_variable_list = pod_combat_pending_reinforcements
-	}
-
-	# ── AI per-fight transient state cleanup ─────────────────────
-	# Clear per-fight AI scratch on every non-PC AI slot (full var list on
-	# pod_combat_clear_ai_scratch_effect) so save data doesn't carry it and the
-	# NPC's next fight starts unbiased.
-	# Runs FIRST so the slot stories (and slot_char) still resolve; the teardown
-	# below removes them. KO'd AIs are cleared too. Pairs with the slot-init clear.
+# Clears per-fight AI scratch on every living non-PC AI combatant so the NPC's
+# next fight starts unbiased. Dead-safe: iterates the slot list and mutates only
+# living AI slot_chars (a dead/removed participant would error). MUST run while
+# the slot stories still resolve, and BEFORE any summon despawn (death_disappearance
+# removes the char, so a later slot_char read hits a weak ref). Shared by the
+# normal group cleanup and the dead-host release (pod_combat_host_died_release_effect).
+pod_combat_clear_all_ai_scratch_effect = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		limit = {
 			NOT = { pod_combat_slot_is_pc_trigger = yes }
-			# is_alive skips a combatant that died this duel: var mutation on a
-			# dead/removed participant errors (see the despawn-ordering note below).
-			# A KO'd-but-living AI is still alive here, so it is still cleared.
 			var:slot_char = { is_ai = yes  is_alive = yes }
 		}
 		var:slot_char = { pod_combat_clear_ai_scratch_effect = yes }
 	}
+}
+
+# Strips the scheduling vars off pending (never-seated) reinforcements. Dead-safe:
+# per-char mutation on living reinforcements only; the host-scope list clear stays
+# in the caller (normal cleanup) so the dead-host path can reuse just the strips.
+pod_combat_strip_pending_reinforcement_vars_effect = {
+	if = {
+		limit = { has_variable_list = pod_combat_pending_reinforcements }
+		every_in_list = {
+			variable = pod_combat_pending_reinforcements
+			limit = { is_alive = yes }
+			remove_variable = pod_combat_join_round
+			remove_variable = pod_combat_join_team
+		}
+	}
+}
+
+pod_combat_group_cleanup_effect = {
+	# ── Unregister reinforcements that never entered ─────────────
+	# Scheduled-but-not-yet-seated combatants (combat ended before their join round).
+	# Summoned combatants are despawned separately below; here just strip the scheduling vars + registry.
+	# Dead-safe per-char strips (shared with the dead-host release path), then
+	# the host-scope list clear (host mutation, normal-cleanup only).
+	pod_combat_strip_pending_reinforcement_vars_effect = yes
+	if = {
+		limit = { has_variable_list = pod_combat_pending_reinforcements }
+		clear_variable_list = pod_combat_pending_reinforcements
+	}
+
+	# ── AI per-fight transient state cleanup ─────────────────────
+	# Shared dead-safe sub-effect (also called by the dead-host release path).
+	# Runs before the slot teardown below so slot_char still resolves.
+	pod_combat_clear_all_ai_scratch_effect = yes
 
 	# ── Despawn summoned temporary combatants ────────────────────
 	# Mid-combat summons (e.g. the necromancer's raised wraith) are temporary.
@@ -2490,28 +2557,23 @@ pod_combat_tick_dots_effect = {
 		# degrades it to 'value' type and every later flag comparison TYPE-ERRORS (the other
 		# root cause). The host dispatch reads the kind through the saved slot object instead.
 		save_scope_as = dot_slot
-		save_scope_value_as = { name = dot_log_amount  value = var:slot_dot_amount }
 		save_scope_value_as = { name = dot_tick_amount value = var:slot_dot_amount }
 		var:slot_char = { save_scope_as = dot_log_victim }
-		# Message dispatch: morale tick, aggravated box for kinds that always
-		# land aggravated (aggravated / fire / lightning / balefire),
-		# superficial box otherwise. Conditional elements (sun / silver / gold
-		# / holy / cold) approximate as superficial - the row pushes before
-		# the wound lands, so no per-victim result exists yet.
-		switch = {
-			trigger = var:slot_dot_kind
-			flag:morale     = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_morale } }
-			flag:aggravated = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:fire       = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:lightning  = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:balefire   = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			fallback        = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick } }
+		# Resolve the burn's attacker - the caster (slot_dot_source) if still
+		# alive, else self-attribute to the victim (always valid, never mis-credits
+		# a live third party). Slot-local, before any inline scope switch.
+		if = {
+			limit = { has_variable = slot_dot_source  var:slot_dot_source = { is_alive = yes } }
+			var:slot_dot_source = { save_scope_as = dot_attacker }
+		}
+		else = {
+			var:slot_char = { save_scope_as = dot_attacker }
 		}
 		change_variable = { name = slot_dot_rounds subtract = 1 }
 		# Phase B: deal the tick. HP ticks use the proven AoE per-target shape: load the slot
 		# into the TARGET workspace, wound from HOST scope, save back, KO-check. The fork
-		# compares the slot VAR (a literal flag since the §13b reseed), same shape as the
-		# message dispatch above.
+		# compares the slot VAR (a literal flag since the §13b reseed). The tick's log row
+		# is pushed AFTER this, resolved, by pod_combat_push_dot_tick_resolved_log_effect.
 		if = {
 			limit = { var:slot_dot_kind = flag:morale }
 			pod_combat_deal_slot_dot_morale_tick_effect = yes
@@ -2522,6 +2584,9 @@ pod_combat_tick_dots_effect = {
 			pod_combat_save_target_to_story_effect = yes
 			pod_combat_aoe_check_target_alive_effect = yes
 		}
+		# Log the tick AFTER it resolves, with the actual applied amount (a
+		# CALL: reads only saved scopes, safe after Phase B's inline switches).
+		pod_combat_push_dot_tick_resolved_log_effect = yes
 		# Phase C: expiry, AFTER the wound (the host dispatch reads slot_dot_kind off the slot,
 		# so it must survive the final tick). A scripted-effect CALL: calls stay reliable after
 		# phase B's inline switches, inline statements do not.

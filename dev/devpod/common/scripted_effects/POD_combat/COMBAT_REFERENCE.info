@@ -167,6 +167,7 @@ literal slot pointers. Any non-leader slot is reached by iterating
 | `slot_has_acted` | 1 once the slot has acted this round; reset each round start |
 | `slot_dot_amount` / `slot_dot_rounds` | active burn: damage per round-end tick / rounds remaining |
 | `slot_dot_kind` | literal flag typing the burn: `flag:morale`, `flag:aggravated`, an elemental class, or `flag:duel` (superficial) |
+| `slot_dot_source` | character ref of the burn's caster; the round-end tick credits it as the wound attacker if still alive, else self-attributes the tick to the victim |
 | `slot_controlled` | mind-control marker: the slot's next AI turn serves the other side |
 
 #### Per-slot stance flags (on the slot story)
@@ -324,7 +325,7 @@ see **Phase ordering rules** below before moving anything.
 | §12 | Non-tier stance flags on the actor: `set_guard`, `dodge`, `stealth` (idempotent). (`remove_guard` is a *target* strip and now runs in §5.) |
 | §12b | `team_ally` only: broadcast §5c/§12's actor buffs (tiers + stance flags + soak bridge var) to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). |
 | §13 | Arm retaliation stances on the actor for **next** turn's §15: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte). Amount falls back `retaliate_damage → hp_damage → 1`. Seeds the counter kind with precedence morale > `retaliate_agg` > the move's elemental class > unset (plain). |
-| §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind` on the target's slot (single-target). Kind is seeded as literal flags (default `duel`, the move's damage class, morale wins); re-apply refreshes. Pushes the "is afflicted" log row (stress icon for morale, aggravated box for always-aggravated classes, superficial box otherwise). Ticks fire at round end — see **Combat log** / **Turn loop**. |
+| §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind/source` on the target's slot (single-target). `slot_dot_source` records the caster (`pod_combat_actor_char`) so the round-end tick credits the right killer. Delivery is gated on `NOT(pod_combat_result_code_indicates_miss_trigger)` plus a per-slot `NOT(pod_combat_slot_should_be_marked_ko_trigger)`, so a dodged / stealthed / missed strike — or one that already downed the target — seeds no burn (NOT-miss, not a positive contact predicate, so a landed hp0 *morale* DoT with no `attack_result` still applies). Kind is seeded as literal flags (default `duel`, the move's damage class, morale wins); re-apply refreshes. Pushes the "is afflicted" log row (stress icon for morale, aggravated box for always-aggravated classes, superficial box otherwise). Ticks fire at round end — see **Combat log** / **Turn loop**. |
 | §13c | Mind control (`mind_control` flag): mark the target slot `slot_controlled` (steals one turn). Players are immune; `POD_has_strong_mental_defenses_trigger` blocks unless the caster passes `can_bypass_mental_defenses_trigger`. Blocked casts post a resist row. Single-target only. |
 | §14 | Parametric flags: `ap_gain` (adds to `pod_combat_current_ap`), `ap_drain` (take-max into the target mirror, consumed at the target's next turn start), `initiative_debuff` (negated into `pod_combat_target_init_bonus`, consumed at round end). |
 | §14b | `summons_combatant`: seat a new combatant on the caster's team mid-fight (`pod_combat_summon_combatant_glue_effect`). After the damage phases (a same-cast AoE can't hit the new unit), before §15 (it can't counter on its summon turn); it acts next round. |
@@ -645,7 +646,7 @@ effect returns, so the GUI never sees a half-init roster. In order it:
    `pod_combat_enemy_leader_slot`) and saves the enemy leader's occupant
    as `scope:pod_combat_target`.
 2. Sets `pod_combat_active = yes` and seeds `pod_combat_step_mode` from
-   the persistent auto-advance preference (see **Turn loop**).
+   the host PC's per-player step-mode preference (see **Turn loop**).
 3. Pre-pass: shapeshifts every AI fera combatant to warform, so each
    potential discipline-buff caster carries its crinos modifier before
    init reads it.
@@ -663,9 +664,37 @@ effect returns, so the GUI never sees a half-init roster. In order it:
    `pod_combat_mark_slot_ko_effect` — a pre-fight correction fires no
    ally-down shock and no log row), then a victory check resolves a
    one-sided start immediately.
-9. If combat is not already over, seeds AI loadouts, bakes the PC's
-   loadout unlocks, pushes the "combat begins" log row, rolls round-1
+9. If combat is not already over, seeds AI loadouts, builds the PC's
+   per-character `pod_combat_unlocked_moves` membership list (see **Move
+   unlocks**), pushes the "combat begins" log row, rolls round-1
    initiative, and starts the turn loop.
+
+### Move unlocks
+
+Which moves a character may equip and use is a **per-character
+membership** fact, held in the `variable_list` `pod_combat_unlocked_moves`
+(of `POD_combat_move` story refs) on the viewing / fighting PC. It is
+built once per fight (finalize step 9) and once per editor-open by
+`pod_combat_bake_one_unlock_effect`, which runs the full unlock
+dispatcher per move and appends the passing moves; both builders
+`clear_variable_list` first. Every read is a cheap membership test
+(`is_target_in_variable_list`) off the per-frame path: the live move
+button (`POD_can_execute_combat_move_trigger`), the editor pool
+(`pod_combat_loadout_option`), and the loadout sheet
+(`pod_combat_sheet_row_match_trigger`) all test the same list. The AI
+never reads it — it picks from and validates against its own
+`pod_combat_loadout`.
+
+The list is per-character **by construction**, so in multiplayer one
+player opening the editor never rewrites another player's unlock state
+(the editor and a live fight are never simultaneous for one character,
+so a single list serves both). `POD_reload_combat_moves` clears it
+alongside the loadout and sheet scratch lists; both reload call sites
+are additionally gated by `pod_combat_any_fight_active_trigger`, so a
+version reload can never `end_story` the shared move catalogue under a
+live fight. (This replaced an earlier `pc_can_use` flag baked directly
+on the globally-shared move stories, which corrupted a co-op partner's
+action bar.)
 
 ### Per-slot init
 
@@ -848,11 +877,16 @@ trips the remaining tries' is-over gate).
 #### STEP vs AUTO
 
 Each fight runs in one of two modes, held in the host var
-`pod_combat_step_mode` (present = STEP), seeded at finalize from the
-persistent preference `global_var:pod_combat_auto_advance` (present =
-AUTO). The auto-advance checkbox toggles the global and re-seeds the
-live fight's `pod_combat_step_mode` so the current combat responds
-immediately.
+`pod_combat_step_mode` (present = STEP), seeded at finalize from the host
+PC's **per-player** preference `pod_combat_manual_step_pref` (a character
+var: present = manual/STEP, absent = auto-advance, the default). The
+auto-advance checkbox is per player, not per campaign: its `checked`
+binding reads the live per-fight state
+(`Not(...pod_combat_step_mode.IsSet)`), and the toggle SGUI flips the
+toggling player's own `pod_combat_manual_step_pref` and re-seeds *that*
+player's live `pod_combat_step_mode`. So one player toggling never
+changes another player's live fight or default. (The former
+campaign-global `pod_combat_auto_advance` is retired.)
 
 - **AUTO** drains every pending AI turn in one click, then ends the
   round.
@@ -1399,6 +1433,32 @@ load/save effects are the only authorized translators between the slot
 story and the workspace mirror. See **Where state lives** for the full
 owner model.
 
+**A direct slot-field write that reaches a live actor/target must mirror
+back.** Writing a `slot_*` field straight on a slot story (e.g. the
+ally-down morale shock's `slot_morale` write) does not touch the
+workspace. If that slot happens to be the currently-loaded actor or
+target, the next `pod_combat_save_workspace_effect` flushes the stale
+pre-write workspace value back over the slot, silently erasing the direct
+write (a dominated actor KO-ing a teammate on its final AP would
+otherwise lose its own shock). So such a write mirrors the new value into
+`pod_combat_actor_*` / `pod_combat_target_*` on the host when the slot is
+the current actor / selected target —
+`pod_combat_apply_ally_down_shock_to_slot_effect` does this, gated by
+`pod_combat_slot_is_current_actor_trigger` /
+`pod_combat_slot_is_selected_target_trigger`.
+
+**AoE dispatchers reload only the target, not the whole workspace.** The
+four AoE tails call `pod_combat_reload_selected_target_effect` (a
+target-only reload) rather than the full
+`pod_combat_load_workspace_effect`, so the live actor workspace (spent
+energy, consumed stealth, applied tiers) survives the sweep; only the
+target half is re-pointed, and `load_target → recalc_pair_hit_chance`
+repairs the actor hit chance the per-target loop transiently corrupted —
+without an actor reload. The roll-based enemy-HP AoE additionally defers
+its actor stealth-consume to one post-loop consume via the host tripwire
+`pod_combat_aoe_suppress_stealth_consume`, so every swept target keeps
+the +30 stealth accuracy before stealth breaks once.
+
 **Enforcement is convention-only.** There is no live checker in the
 active tree. A debug assert that validated workspace/slot sync exists
 only in `devpod-old/` as a porting reference; the
@@ -1485,27 +1545,37 @@ fanout this mirror exists to remove.
 
 ### DoT ticks at round end and must respect the slot-loop rules
 
-A burn (`slot_dot_amount` / `slot_dot_rounds` / `slot_dot_kind`) ticks
-once per round in
+A burn (`slot_dot_amount` / `slot_dot_rounds` / `slot_dot_kind` /
+`slot_dot_source`) ticks once per round in
 `pod_combat_tick_dots_effect`, called from
 `pod_combat_group_end_round_effect` after the round increment and before
 reinforcement seating / initiative recalc. The tick loop body is ordered
-into three phases precisely to obey the scope-trap rules above:
+into phases precisely to obey the scope-trap rules above:
 
-1. **Slot-local first:** lift the tick amount into scope values, save
-   the victim scope for the log push, dispatch the tick row (stress icon
-   for morale; the aggravated box for always-aggravated kinds; the
-   superficial box otherwise — an approximation, since the row pushes
-   before the wound lands), decrement `slot_dot_rounds`. All before any
-   inline scope switch.
-2. **The damage, last:** a morale burn erodes `slot_morale`
-   slot-locally; an HP burn runs the same workspace round-trip as damage
-   AoEs (load target → `scope:host = {
-   pod_combat_deal_dot_tick_from_host_effect }` → save back → KO-check).
-   The host dispatch maps kind → REASON.
-3. **Expiry, contained:** `pod_combat_expire_dot_if_done_effect` removes
-   the three slot vars at rounds ≤ 0. It is separate from the decrement
-   so the kind flag survives until the wound dispatch has read it.
+1. **Slot-local first:** lift the tick amount into scope values, save the
+   victim scope for the log push, resolve the burn's attacker into
+   `scope:dot_attacker` — the caster (`slot_dot_source`) if it is still
+   alive, else the victim itself (an always-valid scope that never
+   mis-credits a live third party) — then decrement `slot_dot_rounds`.
+   All before any inline scope switch.
+2. **The damage, next:** a morale burn erodes `slot_morale` slot-locally;
+   an HP burn runs the same workspace round-trip as damage AoEs (load
+   target → `scope:host = { pod_combat_deal_dot_tick_from_host_effect }` →
+   save back → KO-check). The host dispatch maps kind → REASON and passes
+   `ATTACKER = scope:dot_attacker`. Both paths export the **actual**
+   applied amount as `scope:dot_boxes_applied` (0 on a fully-immune /
+   clay-man HP tick; the capped loss on a morale tick).
+3. **Resolve-then-log:** `pod_combat_push_dot_tick_resolved_log_effect`
+   pushes the tick row **after** the wound resolves, so it reports
+   `dot_boxes_applied` — the true landed amount, not the raw seeded number
+   — and shows a reused `dot_tick_soaked` "soaks 0" row on a fully-immune
+   HP tick. The box icon stays the always-aggravated approximation. It is
+   a scripted-effect call reading only saved scopes, so it stays reliable
+   after phase 2's inline switches.
+4. **Expiry, contained:** `pod_combat_expire_dot_if_done_effect` removes
+   the four slot vars (including `slot_dot_source`) at rounds ≤ 0. It is
+   separate from the decrement so the kind flag survives until the wound
+   dispatch has read it.
 
 DoT ticks are **unsoakable by design**
 (`pod_combat_apply_dot_wound_effect` mirrors PoD's wound effect minus
@@ -1544,13 +1614,24 @@ There is a fourth, abnormal termination: the **host dying live
 mid-fight** (a fatal-duel wound, or any external death). The click
 path is unreachable from then on (the window binds to the dead
 character's vars and events do not fire on the dead), so PoD's
-`POD_on_death` (a delta in `common/on_action/POD_vanilla_death.txt`)
-calls `pod_combat_host_died_release_effect`: a dead-safe release that
-strips engaged flags / duel modifiers from living combatants, despawns
-summons, and ends the Charon-owned stories. The dead host's own combat
-vars are left inert in save data (mutating them would error; the heir
-is a different character). The same release backs `.9999`'s phase 6
-when phase 4's death outcome kills the losing host.
+`POD_on_death` (a delta in `common/on_action/POD_vanilla_death.txt`,
+guarded by `has_variable = pod_combat_active`) calls
+`pod_combat_host_died_release_effect`: a **dead-safe** release that
+touches only living characters and stories — it strips engaged flags /
+duel modifiers, clears the combat soak-tier bridge vars (else they keep
+modifying `POD_soak_chance` outside the fight), clears AI scratch and
+pending-reinforcement scheduling, despawns summons, and ends the
+Charon-owned stories. The tier / AI-scratch / reinforcement clears are
+the shared dead-safe sub-effects (`pod_combat_clear_combat_tiers_effect`,
+`pod_combat_clear_all_ai_scratch_effect`,
+`pod_combat_strip_pending_reinforcement_vars_effect`) that
+`pod_combat_group_cleanup_effect` also calls, so the two paths cannot
+drift. The dead host's own combat vars are left inert in save data
+(mutating them would error; the heir is a different character). The
+same release backs `.9999`'s phase 6 via an `is_alive` branch: when
+phase 4's death outcome kills the losing host, phase 6 routes to the
+dead-safe release instead of the full host-var `pod_combat_cleanup_effect`
+(which would error on the corpse).
 
 ### Victory check
 
@@ -1714,7 +1795,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_values.txt` | Constants (`pod_combat_base_ap`, `pod_combat_max_morale`, etc.), slot-state script values (`pod_combat_slot_max_hp_value`, `pod_combat_slot_total_damage_sv`, `pod_combat_slot_morale_pct`, etc.), and category-cap helpers (`pod_combat_atk_count` etc.) for the loadout editor. All consumed by the GUI and combat effects. |
 | `pod_combat_values.txt` (version + caps) | Also holds `POD_current_combat_version` (hand-bumped when the move set changes; the configure-skills decision reloads the catalogue on version mismatch) and the loadout caps. Many constants in this file carry a `global_var:pod_combat_tune_*` override branch for the debug tuning window (`pod_combat_tuning_window.gui` + `pod_combat_tuning_guis.txt` + `pod_combat_tuning_effects.txt`): unset global = the shipped default; the window's Reset All clears every override. |
-| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs and the combat-tier-buff soak bridge. Five `# POD-Integration addition:` markers. |
+| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs and the combat-tier-buff soak bridge. |
 
 ### Decisions
 
@@ -1798,7 +1879,14 @@ story var on the `POD_combat_sc_context` story at launch, and
 parent's follow-up.
 
 The whitelist below was audited across every PoD caller of
-`configure_start_single_combat_effect` as of v1.18.3.1 integration.
+`configure_start_single_combat_effect` as of v1.18.3.1 integration,
+re-audited 2026-07-05 for reads DOWNSTREAM of the OUTPUT_EVENT (the
+original pass only checked the follow-up event's own reads, which
+missed the task-contract chains - completion runs one or two events
+later), then swept in full the same day: every intercepted entry
+point's downstream chain was walked and adversarially verified,
+adding 23 character aliases, 4 object aliases, and a scope-VALUE
+stash (numbers/booleans; flag-typed values still can't ride it).
 Each row stashed as `alias_<name>` on the sc_context story.
 
 ### Character aliases
