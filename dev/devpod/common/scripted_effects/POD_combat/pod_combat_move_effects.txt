@@ -225,7 +225,12 @@ POD_execute_combat_move = {
 	# each enemy slot's guard in §5b; this workspace write is redundant for
 	# team_enemy (like the §5c target-writes).
 	if = {
-		limit = { $STORY$ = { has_variable = remove_guard } }
+		limit = {
+			$STORY$ = {
+				has_variable = remove_guard
+				NOT = { has_variable = requires_control_contact }
+			}
+		}
 		remove_variable = pod_combat_target_is_guarding
 	}
 
@@ -239,84 +244,65 @@ POD_execute_combat_move = {
 		pod_combat_apply_team_enemy_debuffs_effect = { STORY = $STORY$ }
 	}
 
+	# ── 5b2. Pure-control contact delivery ────────────────────────
+	# Explicitly typed single-target controls have no HP/morale phase to invoke
+	# the contact resolver for them. The generator marks those rows with
+	# requires_control_contact; resolve their advertised spirit/stance/hit/guard
+	# rules here, before any target-side debuff/control payload is applied.
+	if = {
+		limit = { $STORY$ = { has_variable = requires_control_contact } }
+		$STORY$ = { save_scope_as = current_move }
+		pod_combat_resolve_contact_effect = {
+			TARGET_SIDE = target
+			ACTOR_SIDE  = actor
+		}
+		if = {
+			limit = { NOT = { scope:contact_result = 0 } }
+			set_variable = pod_combat_control_delivery_failed
+		}
+		# A hostile control attempt breaks the caster's stealth just like an HP
+		# attack, whether the delivery lands or is evaded.
+		pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
+	}
+	# A control-delivered guard strip is part of that delivery, unlike an
+	# ordinary strip+attack move whose pre-damage strip remains in §5.
+	if = {
+		limit = {
+			$STORY$ = {
+				has_variable = remove_guard
+				has_variable = requires_control_contact
+			}
+			NOT = { has_variable = pod_combat_control_delivery_failed }
+		}
+		remove_variable = pod_combat_target_is_guarding
+	}
+
 	# ── 5c. Tier buffs/debuffs (applied BEFORE the §6 damage) ──────────
 	# Runs ahead of damage so a buff/debuff + attack in the SAME move lands on
 	# THIS attack: a self hit buff raises pod_combat_current_hit_chance for the
 	# §6 hit roll, and a target soak debuff sets the POD_soak_chance bridge var
 	# before the §6 wound roll. AoE target debuffs are still broadcast to slots in
 	# §5b; the workspace target-writes below stay redundant for team_enemy.
-	# Buffs -> actor (pod_combat_actor_*), debuffs -> target (pod_combat_target_*).
-	# Soak tiers ALSO bridge to the character as pod_combat_tier_soak_* vars, read
-	# by POD_soak_chance (POD_health_track_values.txt) so wound rolls pick them up;
-	# workspace copies feed the hit-chance side.
-	#
-	# Upgrade-only gating lives in pod_combat_upgrade_tier_var_effect (canonical
-	# comment there). Recalc fires on story-has-var, not write-happened - a
-	# skipped (downgrade) write leaves the higher tier and recalc rebuilds
-	# against it.
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_round_tier DST = pod_combat_actor_soak_buff_round_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_combat_tier DST = pod_combat_actor_soak_buff_combat_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_target_soak_debuff_round_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_target_soak_debuff_combat_tier }
-	# Char-bridge soak mirrors (read by POD_soak_chance): buffs -> the actor's
-	# char, debuffs -> the target's. Same upgrade guard, on the char's own
-	# mirror var (workspace/slot/char copies are kept in lockstep by the
-	# save/load round-trip, so the guard bases are interchangeable).
+	# Buffs normally apply to the actor. A single_ally move names a
+	# beneficiary in the target workspace, so route every tier and its soak
+	# bridge to that target instead. team_ally still seeds the actor here and
+	# broadcasts to every allied slot in §12b.
 	if = {
-		limit = { has_variable = pod_combat_actor_char }
-		var:pod_combat_actor_char = {
-			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_round_tier DST = pod_combat_tier_soak_buff_round }
-			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_combat_tier DST = pod_combat_tier_soak_buff_combat }
+		limit = { NOT = { has_variable = pod_combat_control_delivery_failed } }
+		if = {
+			limit = { $STORY$ = { var:targeting = flag:single_ally } }
+			pod_combat_apply_workspace_buff_tiers_effect = { STORY = $STORY$ SIDE = target }
+		}
+		else = {
+			pod_combat_apply_workspace_buff_tiers_effect = { STORY = $STORY$ SIDE = actor }
 		}
 	}
+
+	# A failed pure-control contact has no target-side payload. Unmarked moves
+	# never set this tripwire, preserving the existing pre-damage debuff timing.
 	if = {
-		limit = { has_variable = pod_combat_target_char }
-		var:pod_combat_target_char = {
-			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_tier_soak_debuff_round }
-			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_tier_soak_debuff_combat }
-		}
-	}
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_buff_round_tier DST = pod_combat_actor_hit_buff_round_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_buff_combat_tier DST = pod_combat_actor_hit_buff_combat_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_round_tier DST = pod_combat_target_hit_debuff_round_tier }
-	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_combat_tier DST = pod_combat_target_hit_debuff_combat_tier }
-	# Recalc live stats when the move carries a matching tier var (story-has-var,
-	# see the header note above).
-	if = {
-		limit = {
-			OR = {
-				$STORY$ = { has_variable = soak_buff_round_tier }
-				$STORY$ = { has_variable = soak_buff_combat_tier }
-			}
-		}
-		pod_combat_recalc_soak_actor_effect = yes
-	}
-	if = {
-		limit = {
-			OR = {
-				$STORY$ = { has_variable = soak_debuff_round_tier }
-				$STORY$ = { has_variable = soak_debuff_combat_tier }
-			}
-		}
-		pod_combat_recalc_soak_target_effect = yes
-	}
-	if = {
-		limit = {
-			OR = {
-				$STORY$ = { has_variable = hit_buff_round_tier }
-				$STORY$ = { has_variable = hit_buff_combat_tier }
-			}
-		}
-		pod_combat_recalc_hit_actor_effect = yes
-	}
-	if = {
-		limit = {
-			OR = {
-				$STORY$ = { has_variable = hit_debuff_round_tier }
-				$STORY$ = { has_variable = hit_debuff_combat_tier }
-			}
-		}
-		pod_combat_recalc_hit_target_effect = yes
+		limit = { NOT = { has_variable = pod_combat_control_delivery_failed } }
+		pod_combat_apply_workspace_debuff_tiers_effect = { STORY = $STORY$ SIDE = target }
 	}
 
 	# ── 5d. Conditional bonus hit chance ────────────────────────
@@ -523,18 +509,14 @@ POD_execute_combat_move = {
 	}
 
 	# ── 12. Non-tier presence flags ──────────────────────────────
+	# Like tier buffs, defensive stances belong to the selected beneficiary on
+	# single_ally moves and to the actor otherwise.
 	if = {
-		limit = { $STORY$ = { has_variable = set_guard } }
-		set_variable = { name = pod_combat_actor_is_guarding value = yes }
+		limit = { $STORY$ = { var:targeting = flag:single_ally } }
+		pod_combat_apply_workspace_stances_effect = { STORY = $STORY$ SIDE = target }
 	}
-	if = {
-		limit = { $STORY$ = { has_variable = dodge } }
-		set_variable = { name = pod_combat_actor_is_dodging value = yes }
-	}
-	if = {
-		limit = { $STORY$ = { has_variable = stealth } }
-		# Idempotent - guards the flag so a re-cast doesn't double-bake the +30.
-		pod_combat_apply_stealth_workspace_effect = { SIDE = actor }
+	else = {
+		pod_combat_apply_workspace_stances_effect = { STORY = $STORY$ SIDE = actor }
 	}
 
 	# Bonus stance for the actor when the move's condition held (set §2b). The
@@ -650,6 +632,13 @@ POD_execute_combat_move = {
 		limit = {
 			$STORY$ = { has_variable = mind_control }
 			has_variable = pod_combat_target_char
+			NOT = { has_variable = pod_combat_control_delivery_failed }
+			# Morale-delivered mind control only lands when that morale attack was
+			# not evaded. Pure mind-control rows use the control-contact tripwire.
+			OR = {
+				$STORY$ = { NOT = { has_variable = morale_damage } }
+				has_variable = pod_combat_last_morale_damage_amount
+			}
 		}
 		if = {
 			limit = {
@@ -696,6 +685,7 @@ POD_execute_combat_move = {
 	# the take-max could bleed onto another attacker's larger pending value.
 	if = {
 		limit = {
+			NOT = { has_variable = pod_combat_control_delivery_failed }
 			OR = {
 				$STORY$ = { has_variable = ap_drain }
 				AND = {
@@ -728,7 +718,10 @@ POD_execute_combat_move = {
 		}
 	}
 	if = {
-		limit = { $STORY$ = { has_variable = initiative_debuff } }
+		limit = {
+			$STORY$ = { has_variable = initiative_debuff }
+			NOT = { has_variable = pod_combat_control_delivery_failed }
+		}
 		save_scope_value_as = {
 			name = init_debuff_neg
 			value = {
@@ -1204,6 +1197,99 @@ pod_combat_upgrade_tier_var_effect = {
 			}
 		}
 		set_variable = { name = $DST$ value = $STORY$.var:$SRC$ }
+	}
+}
+
+# Apply every move-authored BUFF tier to one loaded workspace side. This keeps
+# actor/self and selected-ally routing on the same upgrade, bridge, and recalc
+# contract. $SIDE$ = actor or target.
+pod_combat_apply_workspace_buff_tiers_effect = {
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_round_tier DST = pod_combat_$SIDE$_soak_buff_round_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_combat_tier DST = pod_combat_$SIDE$_soak_buff_combat_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_buff_round_tier DST = pod_combat_$SIDE$_hit_buff_round_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_buff_combat_tier DST = pod_combat_$SIDE$_hit_buff_combat_tier }
+	if = {
+		limit = { has_variable = pod_combat_$SIDE$_char }
+		var:pod_combat_$SIDE$_char = {
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_round_tier DST = pod_combat_tier_soak_buff_round }
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_buff_combat_tier DST = pod_combat_tier_soak_buff_combat }
+		}
+	}
+	if = {
+		limit = {
+			$STORY$ = {
+				OR = {
+					has_variable = soak_buff_round_tier
+					has_variable = soak_buff_combat_tier
+				}
+			}
+		}
+		pod_combat_recalc_soak_$SIDE$_effect = yes
+	}
+	if = {
+		limit = {
+			$STORY$ = {
+				OR = {
+					has_variable = hit_buff_round_tier
+					has_variable = hit_buff_combat_tier
+				}
+			}
+		}
+		pod_combat_recalc_hit_$SIDE$_effect = yes
+	}
+}
+
+# Target-side sibling of the buff helper. The caller owns the delivery gate;
+# once admitted, this applies all debuff tiers before any damage/control payload.
+pod_combat_apply_workspace_debuff_tiers_effect = {
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_$SIDE$_soak_debuff_round_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_$SIDE$_soak_debuff_combat_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_round_tier DST = pod_combat_$SIDE$_hit_debuff_round_tier }
+	pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_combat_tier DST = pod_combat_$SIDE$_hit_debuff_combat_tier }
+	if = {
+		limit = { has_variable = pod_combat_$SIDE$_char }
+		var:pod_combat_$SIDE$_char = {
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_tier_soak_debuff_round }
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_tier_soak_debuff_combat }
+		}
+	}
+	if = {
+		limit = {
+			$STORY$ = {
+				OR = {
+					has_variable = soak_debuff_round_tier
+					has_variable = soak_debuff_combat_tier
+				}
+			}
+		}
+		pod_combat_recalc_soak_$SIDE$_effect = yes
+	}
+	if = {
+		limit = {
+			$STORY$ = {
+				OR = {
+					has_variable = hit_debuff_round_tier
+					has_variable = hit_debuff_combat_tier
+				}
+			}
+		}
+		pod_combat_recalc_hit_$SIDE$_effect = yes
+	}
+}
+
+# Apply move-authored defensive stances to one loaded workspace side.
+pod_combat_apply_workspace_stances_effect = {
+	if = {
+		limit = { $STORY$ = { has_variable = set_guard } }
+		set_variable = { name = pod_combat_$SIDE$_is_guarding value = yes }
+	}
+	if = {
+		limit = { $STORY$ = { has_variable = dodge } }
+		set_variable = { name = pod_combat_$SIDE$_is_dodging value = yes }
+	}
+	if = {
+		limit = { $STORY$ = { has_variable = stealth } }
+		pod_combat_apply_stealth_workspace_effect = { SIDE = $SIDE$ }
 	}
 }
 
