@@ -1642,14 +1642,49 @@ per-segment renderers (`PODCombatLogSeg<X>`) and the result-text
 dispatcher all carry this guard. When you add a
 renderer or a new branch, lead with the same guard.
 
+### An open event keeps its scope table; trigger_event copies it inline
+
+Two behaviours Paradox documents nowhere, both measured in-game on
+2026-07-25 against a live save. The shell hand-off (§10) is built on
+them, so they are recorded here rather than left to be re-derived. To
+re-test either, arm a scope of each type in one event, fire a second
+event from it, and read them back from the second event's option.
+
+**A held-open event's saved-scope table survives a save and reload.**
+Arm a table, leave the event on screen, save, load that save, then click
+the option: characters, artifacts, titles, numeric scope values and
+**flag-typed** scope values all come back, the flag still comparing
+equal against its literal. That last point is the one that makes the
+shell strictly more capable than the variable stash it replaced — a flag
+degrades to a plain value the moment it passes through `set_variable`,
+which is why `scope:method` could never be carried.
+
+**`trigger_event` takes its copy of the table at the call site, not when
+the enclosing effect finishes.** A scope value saved on the line *after*
+the `trigger_event` call is not visible to the fired event. This is what
+makes ordering a usable tool: firing an event early in an effect
+genuinely shields it from names that effect saves later, which is why
+the shell is opened before the duel builder runs rather than after.
+
+Neither result should be assumed to extend to `save_temporary_scope_as`
+(documented as same-effect only) or to scopes saved inside a
+scripted-GUI execution, which have no chain to persist into.
+
 ---
 
 ## §8 Combat end
 
-Combat ends when one team is wiped, the PC concedes, or the player
-auto-resolves. All three paths converge: set `pod_combat_winner` +
-`pod_combat_loser`, set `pod_combat_is_over`, then the GUI swaps in the
-**End Combat** button which calls `pod_combat_end_combat_effect`.
+Combat ends when one team is wiped or the player auto-resolves. Both
+paths converge: set `pod_combat_winner` + `pod_combat_loser`, set
+`pod_combat_is_over`, then the conclude affordance appears — the shell
+card for a duel, the **End Combat** button for a debug builder fight —
+and calls `pod_combat_end_combat_effect`.
+
+There is deliberately no abandon-mid-fight control. The combat window's
+close button is hidden (`blockoverride "button_close" { visible = no }`),
+because a duel that stops half-way leaves the launching event waiting on
+a hand-off that will never come. Auto-resolve is the way out of a fight
+you do not want to play through.
 
 There is a fourth, abnormal termination: the **host dying live
 mid-fight** (a fatal-duel wound, or any external death). The click
@@ -1693,17 +1728,14 @@ A match sets `pod_combat_winner`, `pod_combat_loser`,
 `scope:pod_combat_target`, and pushes the victory/defeat log row. The
 combat window stays open; the player clicks End Combat to dismiss.
 
-### Concede and auto-resolve
+### Auto-resolve
 
-Two extra outcome paths exist beside the win/loss check.
-
-**Concede** is the combat-window X button (`pod_combat_close_window`)
-while combat is in progress: it sets the PC as loser via
-`pod_combat_set_outcome_pair_effect = { PC_WON = no }`, zeroes the
-conceding leader's `slot_morale` (so the portrait reads defeated and the
-leader takes full Mental Strain), sets `pod_combat_is_over`, and pushes
-the defeat row. After combat is resolved the same X button instead
-closes the window.
+One extra outcome path exists beside the win/loss check. (A concede
+path used to sit here too, on the combat window's X button; the button
+was removed with the shell hand-off — see §8. Its effects,
+`pod_combat_set_outcome_pair_effect` and
+`pod_combat_zero_loser_leader_morale_effect`, are still live: auto-resolve
+shares them.)
 
 **Auto-resolve** (`pod_combat_auto_resolve_effect`) skips the rest of
 the fight with a prowess-sum roll. It sums alive-slot `slot_prowess` per
@@ -1757,18 +1789,65 @@ recorded as the victor.
    victory/defeat toast and runs `pod_combat_cleanup_effect`
    immediately.
 
+Who *calls* it decides how much context survives — see the next section.
+
 ### Post-combat handoff
 
-For duel-driven combat, `pod_combat.9999` restores the original duel
-context and resolves the outcome in six phases:
+A duel-launched fight has to hand back to the event chain that started
+it, and that chain's saved scopes are the problem: the combat window's
+buttons are scripted-GUI executions, which carry no scope table, so
+anything reached from a button click arrives with nothing.
 
-1. Reconstruct `sc_initiator` / `sc_attacker` / `sc_defender`, the alias
-   scopes, and `sc_victor` / `sc_loser` from the PC's
-   `pod_combat_sc_context` pointer.
-2. Rebuild the parent-event aliases (the whitelist stashed by the
-   launcher).
-3. Round-trip the rule flags (fatality / fixed / locale) into
-   saved-scope flag values.
+The shell event solves it by never leaving the chain (§7 records the two
+engine behaviours this rests on, both measured rather than assumed). At
+launch, `pod_combat_sc_launch_minigame_effect` fires `pod_combat.9995`
+with no delay, so it inherits the launching event's entire table — the `sc_*`
+principals, the fatality / fixed / locale rule flags, and every alias
+the parent named for its own follow-up, flag-typed scope values
+included. That event stays open for the whole fight, which is what keeps
+the table alive. Its **Conclude** option then runs the writeback, so
+`pod_combat.9999` fires from inside the original chain and the follow-up
+reads the parent's scopes exactly as an uninterrupted vanilla duel would
+have delivered them.
+
+The *window* (`gui/event_windows/pod_combat_shell.gui`) is a separate
+matter from the event. It is withheld while the fight runs and appears
+centred once the fight is decided, so nothing overlaps the combat window
+during play. Note the asymmetry: the event has to open at launch, since
+being fired from inside the launching effect is what captures the scope
+table, and an event opened at the end would be fired from a scope-less
+GUI click. Only the presentation is deferred.
+
+**Ordering matters at launch.** The shell is fired *before* the duel
+builder runs. The builder's helpers save generic names into the same
+chain (`pod_combat_calc_turn_orders_effect` writes `scope:host` and
+`scope:me`), which would otherwise shadow same-named scopes belonging to
+the parent — an activity duel's `scope:host` is the activity host, and
+silently substituting the combat host is worse than a missing scope. The
+`pod_combat_sc_shell` marker is set last instead, after the fight stands
+up, because `POD_combat_create_duel_effect`'s stale-fight teardown would
+clear it.
+
+`pod_combat.9999` then runs:
+
+1. Bind `scope:sc_ctx` from the host's `pod_combat_sc_context` pointer.
+   Both routes need it; the story carries the follow-up id.
+2. **Fallback, only when `scope:sc_attacker` is absent.** That means the
+   dispatcher was reached from a GUI execution rather than the shell, so
+   the principals and rule flags are rebuilt from the context story
+   (`POD_combat_restore_sc_context_effect` +
+   `POD_combat_restore_sc_rule_flags_effect`). Parent aliases are
+   unrecoverable on this route and the follow-up runs degraded. In
+   practice only the debug builder launchers arrive here — they open no
+   card and have no parent chain to lose, so it is simply their normal
+   route, and it keeps the fallback exercised. A shell fight reaching it
+   would be a defect, so that case `error_log`s (gated on
+   `pod_combat_sc_shell`).
+3. **Derive the outcome** (`POD_combat_derive_sc_outcome_effect`), the
+   same on both routes since it reads combat-owned host vars: `sc_victor`
+   / `sc_loser` plus the victor snap, and the `sc_finished` /
+   `victory_type` constants. It runs after the fallback, whose principals
+   the snap compares against.
 4. **Apply death by fatality mode.** Wounds were written live and PoD
    death-checked inline as they landed, so a lethal hit already killed
    the loser; this phase only forces `pod_death` for guaranteed-kill
@@ -1784,8 +1863,21 @@ context and resolves the outcome in six phases:
    `pod_combat_group_cleanup_effect` (drops pending reinforcements,
    clears AI scratch, despawns summons, tears down slot stories, clears
    group state) and removes `pod_combat_step_mode`. The context story's
-   atomic `end_story` drops all `sc_*` refs, rule flags, alias
-   snapshots, and the follow-up id at once.
+   atomic `end_story` drops all `sc_*` refs, rule flags and the
+   follow-up id at once.
+
+**The card is the only way to conclude a shell fight.** The combat
+window's **End Combat** button hides itself there
+(`Not(Var('pod_combat_sc_shell').IsSet)`; debug builder fights, which
+set no marker, keep it), and the window has no close button at all. Two
+reasons, and the second is the subtle one: concluding from a GUI click
+would drop the scopes, *and* it would leave the card open with nobody to
+dismiss it — a card is only dismissed by selecting its option. An
+orphaned card re-enables during the next fight, which is why the option
+is guarded by
+`pod_combat_shell_owns_live_fight_trigger` rather than by
+`has_variable = pod_combat_active` alone, and why the card stays
+clickable (as a no-op that closes it) whenever no fight is live.
 
 ---
 
@@ -1806,7 +1898,8 @@ Code-side entry points and where they live.
 | `pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
 | `pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
 | `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file — see `scripts/python/POD-Combat/AI_LOGIC_GUIDE.md` for the per-modifier rationale. |
-| `PoD_override_single_combat_effects.txt` | Same-key redeclaration that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. Renamed from `z_Combat-PoD_override_single_combat_effects.txt` (z_ prefix dropped). |
+| `PoD_override_single_combat_effects.txt` | Same-key redeclaration that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. Renamed from `z_Combat-PoD_override_single_combat_effects.txt` (z_ prefix dropped). Also holds the retired alias stash. |
+| `pod_combat_sc_context_effects.txt` | Hand-off helpers for `pod_combat.9999`: outcome derivation (both routes), the fallback principal/rule-flag restore, duel-end finalization, follow-up fire. §10. |
 | `POD_health_track_effects.txt` (PoD file, delta) | The fix for the aggravated-overflow push-out math bug (aggravated damage that exceeded empty boxes used to discard 2-N sup wounds instead of converting them) is a direct delta in PoD's `POD_apply_wound_boxes`, marker `# FIX:`. Replaces the old `z_POD_apply_wound_boxes_override.txt`. |
 
 There is no `pod_combat_debug_effects.txt` in `devpod/` - the
@@ -1872,6 +1965,7 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `POD_windows/pod_combat_window.gui` | The mid-combat window — move buttons, log, slot panels. |
+| `event_windows/pod_combat_shell.gui` | The duel card for `pod_combat.9995`. Minimal (no dimmer, no portraits, no theme art); the window is hidden while the fight runs and appears centred once it resolves, and its option button carries the live readiness gate plus deliberately no shift+N accelerator. §10. |
 | `POD_windows/pod_combat_skills_window.gui` | The loadout editor (Configure Skills decision). Three pool views - detailed / compact / sheet. The sheet is a sortable, filterable table over the per-character `pod_combat_sheet_rows` scratch list: GUI datamodels cannot sort or filter, so `pod_combat_sheet_rebuild_effect` (move_init_effects) copies the catalogue with `limit` filters and `ordered_in_global_list` ordering, and the list's insertion order IS the display order. Column headers are the sort controls (`pod_combat_sheet_sort_*` SGUIs; re-click flips direction); a filter popup shares the editor's category flags and adds sheet-only presence filters (`pod_combat_sheet_f_*`). The scratch list is cleared at editor close and by `POD_reload_combat_moves`. |
 | (no scripted-widgets file) | Reusable widget templates (move buttons, log rows, stat tiles) live in the `PODCombatTypes` types blocks inside the two window files above, not in a separate `gui/scripted_widgets/` file. |
 | `pod_texticons_combat.gui` | Inline `@<name>!` icons for stances and the elemental damage classes. |
@@ -1924,110 +2018,77 @@ the exception, covered by the Manual Move Authoring Guide.
 
 ---
 
-## §10 Parent-event alias stash
+## §10 Parent-scope hand-off
 
+The events that call `configure_start_single_combat_effect` routinely
+save custom scopes — `scope:spirit`, `scope:my_rival`, `scope:scheme`,
+an artifact `scope:target`, `scope:task_contract` — that their follow-up
+reads once the duel resolves, often one or two events further
+downstream. Under vanilla's duel chain those scopes simply propagate
+through the event graph.
 
-PoD's duel-launcher parents (the events that call
-`configure_start_single_combat_effect`) routinely save custom scope
-aliases like `scope:spirit`, `scope:my_rival`, `scope:scheme` that
-their follow-up events read after combat resolves. Under vanilla's
-duel chain those scopes propagate through the event graph. The
-minigame's scripted-GUI execute boundary breaks that chain, so
-`pod_combat_sc_stash_parent_aliases_effect` captures each alias as a
-story var on the `POD_combat_sc_context` story at launch, and
-`pod_combat.9999` rebuilds them as saved scopes before firing the
-parent's follow-up.
+The minigame breaks that graph: its buttons are scripted-GUI executions
+with no scope table, so anything reached from a click starts empty.
 
-The whitelist below was audited across every PoD caller of
-`configure_start_single_combat_effect` as of v1.18.3.1 integration,
-re-audited 2026-07-05 for reads DOWNSTREAM of the OUTPUT_EVENT (the
-original pass only checked the follow-up event's own reads, which
-missed the task-contract chains - completion runs one or two events
-later), then swept in full the same day: every intercepted entry
-point's downstream chain was walked and adversarially verified,
-adding 23 character aliases, 4 object aliases, and a scope-VALUE
-stash (numbers/booleans; flag-typed values still can't ride it).
-Each row stashed as `alias_<name>` on the sc_context story.
+### How it works now
 
-### Character aliases
+`pod_combat.9995`, the shell event, is fired with no delay from
+`pod_combat_sc_launch_minigame_effect` and stays open for the whole
+fight. Firing it from inside the launching event's effect means it
+inherits that event's entire scope table, and holding it open is what
+keeps the table alive while the fight runs in a window whose clicks
+cannot carry one. Concluding from its option puts `pod_combat.9999` back
+inside the original chain, so the follow-up — and everything downstream
+of it — sees the parent's scopes natively.
 
-| Alias | Source |
+Its window is hidden until the fight resolves (§8), which is a
+presentation choice only. The event's open-from-launch lifetime is not
+negotiable: an event opened at the end of the fight would be fired from
+a scripted-GUI click and would inherit nothing.
+
+Consequences worth knowing:
+
+- **Nothing is enumerated.** New PoD duel content that saves new scopes
+  works with no combat-side change. There is no whitelist to audit on a
+  PoD update.
+- **Flag-typed scope values ride along.** They could never survive the
+  old variable copy (flags degrade to a plain value through
+  `set_variable`), which is why `scope:method` was permanently
+  unsupported.
+- **No fabricated aliases on the live path.** The old restore invented
+  `scope:target` / `scope:victim` / `scope:recipient` from the
+  principals, which silently clobbered a parent's real ones — that is
+  how an artifact duel's prize went missing, the `target` scope being an
+  artifact rather than a character. The parent's own values now arrive
+  intact, so the whole bug class is structurally gone.
+- **Rule flags need no round trip.** `fatality` / `fixed` / `locale` are
+  the parent's scope values, so the enum ladders that rebuilt them from
+  story variables only run on the fallback route.
+
+The launch order is load-bearing: the shell fires **before** the duel
+builder, because the builder's helpers save generic names
+(`scope:host`, `scope:me`) into the same chain and would shadow
+same-named parent scopes. §8 has that plus the card-ownership rules —
+a card outlives its fight if the host dies mid-fight, so the option is
+gated on `pod_combat_shell_owns_live_fight_trigger` rather than on
+"a fight is running".
+
+### The fallback route
+
+`pod_combat.9999` detects a missing `scope:sc_attacker` and rebuilds the
+principals and rule flags from the `POD_combat_sc_context` story. Parent
+aliases cannot be recovered — nothing copies them any more — so the
+follow-up runs on principals alone. Two things arrive this way:
+
+| Route | Treatment |
 |---|---|
-| `spirit` | PoD spirit-combat events (umbra, fera, demon hunts) |
-| `alastor` | PoD wraith Shadow / Spectre events |
-| `wyrm_champion` | PoD Wyrm-corruption duels |
-| `vampire_attacker` | PoD vampire predation events |
-| `actor` | Vanilla murder / scheme actor |
-| `parent` | Vanilla event-parent reference |
-| `aggressor_vassal` | Vanilla rebellion / liege-vassal duels |
-| `defender_vassal` | Vanilla `hold_court.8210` / `.8211` vassal legal-duel chain (PC can be the defending litigant); `hold_court.8211` reads `scope:defender_vassal` in its win-effect limit |
-| `distant_knight` | Vanilla tournament chains |
-| `snitch` | Vanilla espionage event chain |
-| `strong_leader` | Vanilla strongman / coup events |
-| `warrior_monk` | Vanilla monastic combat events |
-| `attacked_rival` | Vanilla rivalry duel chain |
-| `my_rival` | Vanilla rival-related event branches |
-| `rival_burner` | Vanilla rivalry retaliation |
-| `rival_on_sight` | Vanilla rival-meeting confrontations |
-| `rivals_child` | Vanilla rival's-child duel chains |
-| `og_root` | Vanilla "original root" preservation pattern |
-| `root_for_loc` | Vanilla loc-substitution character ref |
-| `recidivist` | Vanilla crime / recidivism chain (also the Hunt Criminals duel target) |
-| `prisonguard` | Vanilla Aid Wanderer contract (`ep3_contract_event.0570` guard duel); read by `.0575` two events downstream as the artifact-history actor |
-| `owner` | Scheme owner / action initiator. Widely used by vanilla `murder_success_kill_effect` and its callees, which pass `MURDERER = scope:owner` down into `unknown_murder_effect` / `pod_death`. Missing this cascades into `scope:pod_killer` errors because `pod_death` does `$killer$ = { save_temporary_scope_as = pod_killer }` and `$killer$` resolves from it. |
-| `flirty_knight`, `flirty_spouse` | Vanilla `court.9003` -> `.9004`/`.9005` (flirty-knight duel) |
-| `6100_lord`, `6100_vassal_1`, `6100_vassal_2` | Vanilla `hold_court.6101` (feuding vassals) |
-| `rival_friend`, `friend_backup` | Vanilla `bp1_yearly.5710` -> `.5711`/`.5712` |
-| `5717_nemesis` | Vanilla `bp1_yearly.5718` (portraits) |
-| `rivals_beneficiary`, `attacked_rivals_liege` | Vanilla `bp1_yearly.6001` -> `.6006` |
-| `insensitive_asshole` | Vanilla `learn_language_ongoing.1122` chain |
-| `rowdy_boy` | Vanilla `mpo_nomad_events.1021` chain |
-| `fp2_2010_root_in_duel`, `fp2_2021_root_in_duel` | Vanilla `fp2_struggle.2011` / `.2022` chains |
-| `fp3_child_to_leave` | Vanilla `fp3_yearly.8005` -> `.8007`/`.8008` |
-| `follower_1/2/3`, `slaver` | Vanilla `ep3_laamp_flavour_ewan.4072`/`.4073` |
-| `local_soldier` | Vanilla `ep3_laamp_flavour_ewan.3072`/`.3073` |
-| `employer` | Hunt Criminals `laamp_base_contract_schemes.1302` (employer portrait/opinion) |
-| `spawned_spirit` | PoD `POD_mokole.689` |
-| `hunter4` | PoD `POD_provoke_vatican.104` -> `.32`/`.33` |
-| `recipient` (actual) | Stashed from the parent and restored OVER the phase-1 `recipient = defender` fabrication when the parent saved a real one (`bp1_yearly.9011` doppelganger chain reads the original, not the duel defender) |
+| Debug builder launchers (`POD_combat_create_duel_effect` called directly) | Normal. They open no card and have no parent chain to lose, and they keep this route exercised. |
+| A shell fight | Should be unreachable — the card is the only conclude path. `error_log`s if it ever happens. |
 
-### Artifact aliases
-
-| Alias | Source |
-|---|---|
-| `shadowflame` | PoD shadowflame artifact events |
-| `burned_artifact` | PoD artifact-destruction chain |
-
-### Scheme aliases
-
-| Alias | Source |
-|---|---|
-| `scheme` | `POD_diablerize.600` runs `end_scheme = scope:scheme` after the duel resolves; without this stash, its option tooltips throw "Undefined event target 'scheme'" and the final `end_scheme` call fails. |
-
-### Title aliases
-
-| Alias | Source |
-|---|---|
-| `vassal_claim` | Vanilla `hold_court.8210` (vassal-rebellion legal-duel chain) saves the contested title as `scope:vassal_claim` before the duel; `hold_court.8211` reads it twice in the follow-up to transfer the title from loser to `scope:sc_victor`. PC can be either party (`aggressor_vassal` / `defender_vassal`), so the minigame intercepts. |
-| `laamp_title` | Vanilla Ewan baggage-train ambush: `ep3_laamp_flavour_ewan.4002` (OUTPUT_EVENT of `.4001.b`) reads `scope:laamp_title.holder.domicile` on its no-victor path — reachable in the minigame via a draw/mutual KO. |
-| `current_county` | Vanilla `ep3_laamp_flavour_ewan.3072`/`.3073` (portraits/loc) |
-
-### Artifact / province objects (same variable-storage pattern)
-
-| Alias | Source |
-|---|---|
-| `duel_target` (restored as `scope:target`) | The artifact-challenge duel (`challenge_for_artifact_interaction` -> `artifact.2001` -> `.2002`): `scope:target` is the challenged ARTIFACT, and phase-1's fabricated `target = defender` (a character) silently voided the ownership transfer. The stash captures the parent's actual `scope:target`; phase 2 restores it over the fabrication. |
-| `far_frontier` (province) | Vanilla `fp3_yearly.8005` -> `.8008` (`fp3_child_leaves_effect`) |
-
-### Scope-VALUE stash (numbers / booleans)
-
-Numeric and boolean scope values ride story vars with explicit
-exists-guards (`?=` can't navigate them): `provisions_loss` and
-`cannibal_prowess` round-trip their numbers; `scheme_discovered`
-stores a literal marker and the restore re-emits `yes`. FLAG-typed
-scope values (e.g. `scope:method`) still cannot ride this — flags
-degrade to plain `value` through variable copies — and stay in the
-not-stashed register.
+The story therefore still carries the principals, the rule flags and the
+follow-up id. It is also what the planned multiplayer dead-host bridge
+reads, since `trigger_event` no-ops on a dead root and a corpse can
+never click a card.
 
 ### Victor snapping
 
@@ -2035,59 +2096,19 @@ not-stashed register.
 winner (PC lost; the first alive enemy was a summoned combatant).
 Vanilla duels only ever name the two duelists, and follow-up identity
 compares (`sc_victor = scope:recidivist`, `= scope:spirit`, ...)
-assume that — so the phase-1 restore snaps a non-principal victor to
-the winning side's principal (the loser is always a principal, so the
-victor is whichever principal the loser isn't). The snapped principal
-can be dead; follow-ups already tolerate dead victors. This fixed the
-diablerize / vamphunt / umbra-crisis chains in one place.
+assume that — so `POD_combat_derive_sc_outcome_effect` snaps a
+non-principal victor to the winning side's principal (the loser is
+always a principal, so the victor is whichever principal the loser
+isn't). The snapped principal can be dead; follow-ups already tolerate
+dead victors. This fixed the diablerize / vamphunt / umbra-crisis
+chains in one place. It runs after the fallback restore, so the
+principals it compares against exist on both routes.
 
-### Task-contract aliases
-
-| Alias | Source |
-|---|---|
-| `task_contract` | The adventurer contract duels complete their contract DOWNSTREAM of the OUTPUT_EVENT: Hunt Criminals (`laamp_base_contract_schemes.1305` routes to `.1302`/`.1303`, which run `complete_task_contract` and read the reward gold off the contract's vars) and Aid Wanderer (`ep3_contract_event.0575` re-derives employer/taker FROM the contract via `set_contract_scopes_effect`, then completes it). Without the stash the player wins the duel and gets no reward, and the contract zombies. Typed scope; vanilla stores contracts in variables itself. |
-
-### Adding a new alias
-
-When a new parent event surfaces an undefined-event-target error in
-its follow-up — **or in any event the follow-up chains into via
-`trigger_event`; audit the whole downstream chain, not just the
-OUTPUT_EVENT** — add a stash line to
-`pod_combat_sc_stash_parent_aliases_effect`:
-
-```
-scope:<name> ?= { scope:sc_ctx = { set_variable = { name = alias_<name> value = scope:<name> } } }
-```
-
-…and the matching restore line in `pod_combat.9999`'s alias-rebuild
-block:
-
-```
-scope:sc_ctx.var:alias_<name> ?= { save_scope_as = <name> }
-```
-
-`?=` is CK3's safe-scope-navigation operator: the body runs in the
-LHS scope iff the LHS resolves, otherwise it's a silent no-op. That's
-how the whitelist stays open by design — extra branches that find
-no scope at launch are silent skips. (Pre-`?=` versions used
-`if = { limit = { exists = scope:X } scope:X = { ... } }`; same
-semantics, more syntax.)
-
-### Surfaces NOT yet stashed
-
-- **Typed scope objects**: `scope:vassal_war` (its caller has no
-  OUTPUT_EVENT, so it is not on the intercept path today).
-- **Raw scope values**: `scope:duel_legal`, `scope:fp2_*_gate`
-  (exists-checks only / never set), and `scope:method` (Hunt
-  Criminals `.1302` desc paragraph — blanks cosmetically). `method`
-  is FLAG-typed and flags degrade through variable copies; numeric
-  and boolean values are now covered by the value stash above.
-- **Repurposed vanilla outputs**: the two PoD launchers that pointed
-  at `tribal.1021` (the vanilla liege-challenge output, which reads
-  liege-chain scopes they never set and docks the surviving victor a
-  prestige level on an attacker death) now point at the dedicated
-  `pod_combat.9990` aftermath event instead.
-
+Repurposed vanilla outputs are unaffected: the two PoD launchers that
+pointed at `tribal.1021` (the vanilla liege-challenge output, which
+reads liege-chain scopes they never set and docks the surviving victor a
+prestige level on an attacker death) still point at the dedicated
+`pod_combat.9990` aftermath event instead.
 ---
 
 ## §11 Extending the system

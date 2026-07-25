@@ -82,6 +82,23 @@ configure_start_single_combat_effect = {
 		save_scope_value_as = { name = fixed    value = flag:$FIXED$ }
 		save_scope_value_as = { name = locale   value = flag:$LOCALE$ }
 
+		# Mirror of the terrain background save in Part 4. Taken here, at
+		# setup, because a follow-up rendering that background reads it after
+		# the fight, by which point a lethal hit may have unlinked the
+		# defender's location. Exist-guarded on both sides for landless
+		# combatants; PoD's own copy in Part 4 derefs bare.
+		if = {
+			limit = { scope:locale = flag:terrain_scope }
+			if = {
+				limit = { exists = scope:sc_defender.location }
+				scope:sc_defender.location = { save_scope_as = background_terrain_scope }
+			}
+			else_if = {
+				limit = { exists = scope:sc_attacker.location }
+				scope:sc_attacker.location = { save_scope_as = background_terrain_scope }
+			}
+		}
+
 		# AI fera shapeshifting runs as a warform pre-pass in
 		# POD_combat_finalize_duel_effect; discipline combat buffs are applied
 		# per combatant in pod_combat_init_slot_from_character_effect. The PC
@@ -255,219 +272,10 @@ configure_start_single_combat_effect = {
 ##################################################
 #
 # Runs in the PC's scope; builds the POD_combat_sc_context story (sc_*
-# refs, rule flags, follow-up id, parent aliases) and hands off to the
-# duel builder. pod_combat.9999 reads it back at combat end.
+# refs, rule flags, follow-up id), hands off to the duel builder, then opens
+# the shell event that carries the parent's scopes across the fight.
 # Param contract is documented on pod_combat_sc_launch_minigame_effect below.
 ##################################################
-
-##################################################
-# Parent-event alias stash / restore
-##################################################
-#
-# The duel system's parent events routinely save custom scope aliases
-# (scope:spirit, scope:actor, scope:my_rival, scope:og_root, ...) that
-# their follow-up events then read. Under the original vanilla duel
-# chain those scopes propagate naturally through the event graph. The
-# minigame's scripted-GUI execute boundary breaks that chain, so unless
-# we capture the parent's named scopes at launch and restore them in
-# pod_combat.9999, the follow-up event fires with an empty scope table
-# and throws "Undefined event target" errors (see POD_umbra_expedition
-# and friends).
-#
-# This effect is called once at launch (inside the parent event's scope
-# chain - root scope is the parent event's actor / PC), and writes each
-# alias as a story variable on scope:sc_ctx (the POD_combat_sc_context
-# story created by the launcher). Any alias that is not present in the
-# parent scope is silently skipped. The matching restore block in
-# pod_combat.9999 rebuilds the scopes from those story vars.
-#
-# All writes go to scope:sc_ctx (the context story). The launcher must
-# save_scope_as the new context story BEFORE calling this effect so
-# scope:sc_ctx is bound. Each branch flips into the story scope to
-# write - set_variable inside scope:sc_ctx attaches the variable to the
-# story, not to the current actor character.
-#
-# Whitelist coverage
-# Re-audit on PoD update: grep PoD for new
-# configure_start_single_combat_effect callers and add their saved
-# scopes here if they reference fresh aliases in the follow-up event
-# OR ANY EVENT DOWNSTREAM of it - trigger_event chains keep the
-# restored scopes flowing, so a read two events past the OUTPUT_EVENT
-# still depends on this stash. (The hunt-for-criminals reward loss
-# hid exactly there: the OUTPUT_EVENT read nothing, its successor ran
-# complete_task_contract on the un-stashed scope:task_contract.)
-#   Characters (PoD): spirit, alastor, wyrm_champion, vampire_attacker
-#   Characters (van): actor, parent, aggressor_vassal, defender_vassal, distant_knight,
-#                     snitch, strong_leader, warrior_monk, attacked_rival,
-#                     my_rival, rival_burner, rival_on_sight, rivals_child,
-#                     og_root, root_for_loc, recidivist
-#   Characters (van): + prisonguard (Aid Wanderer guard duel)
-#   Artifacts:        shadowflame, burned_artifact
-#   Task contracts:   task_contract (Hunt Criminals / Aid Wanderer)
-#   Titles:           vassal_claim, laamp_title
-#   Schemes:          scheme  (POD_diablerize.600 reads scope:scheme to
-#                              end_scheme after the duel resolves)
-#   Scheme actors:    owner   (scheme owner / action initiator; widely
-#                              used by vanilla `murder_success_kill_effect`
-#                              and its callees, which pass MURDERER =
-#                              scope:owner down into unknown_murder_effect /
-#                              pod_death. Missing scope:owner cascades into
-#                              scope:pod_killer errors because pod_death does
-#                              `$killer$ = { save_temporary_scope_as =
-#                              pod_killer }` and $killer$ resolves from it.)
-#
-# Still NOT stashed (add as they surface):
-# - scope:vassal_war - used by epidemic_events_2.txt, but that
-#     file's duel call doesn't pass OUTPUT_EVENT, so it isn't on
-#     the minigame intercept path. Add if PoD updates wire it as
-#     a duel follow-up scope.
-# - scope:method (Hunt Criminals .1302 desc paragraph) - a FLAG-typed
-#     scope value; flags degrade to plain 'value' through variable
-#     copies, so the number/boolean value stash (bottom of the stash
-#     effect) cannot carry it. Cosmetic only: one desc paragraph.
-#     (Numeric/boolean scope values ARE stashable now - see
-#     provisions_loss / cannibal_prowess / scheme_discovered.)
-# - scope:fp2_*_gate - only `exists` checks in
-#     fp2_struggle_events.txt; not currently in any duel follow-up.
-#     Raw / non-typed scope values would also need a different
-#     detection mechanism than `exists = scope:X`.
-# - scope:duel_legal - read by ep3_laamp_flavour_ewan.2092
-#     (a real duel follow-up), BUT grep across CK3/PoD references
-#     finds no `save_scope_as = duel_legal` anywhere - the scope
-#     is never actually set, so the check
-#     `NOT = { exists = scope:duel_legal }` is dead defense and
-#     stashing it would capture nothing. Add if a future caller
-#     starts setting it.
-##################################################
-
-pod_combat_sc_stash_parent_aliases_effect = {
-	# Character aliases - each test is independent; missing scopes are skipped.
-	# Each write switches into scope:sc_ctx (the context story) so the
-	# variable lands on the story, not on the parent-scope character.
-	#
-	# `scope:X ?= { ... }` is CK3's safe-scope-navigation operator: it
-	# switches into scope:X and runs the body if scope:X exists, and
-	# is a silent no-op otherwise. Inside the body, saved scopes
-	# (including scope:X itself) are still globally resolvable, so the
-	# `value = scope:X` read on the right-hand side still works after
-	# the scope switch. 
-	scope:spirit           ?= { scope:sc_ctx = { set_variable = { name = alias_spirit           value = scope:spirit } } }
-	scope:alastor          ?= { scope:sc_ctx = { set_variable = { name = alias_alastor          value = scope:alastor } } }
-	scope:wyrm_champion    ?= { scope:sc_ctx = { set_variable = { name = alias_wyrm_champion    value = scope:wyrm_champion } } }
-	scope:vampire_attacker ?= { scope:sc_ctx = { set_variable = { name = alias_vampire_attacker value = scope:vampire_attacker } } }
-	scope:actor            ?= { scope:sc_ctx = { set_variable = { name = alias_actor            value = scope:actor } } }
-	scope:parent           ?= { scope:sc_ctx = { set_variable = { name = alias_parent           value = scope:parent } } }
-	scope:aggressor_vassal ?= { scope:sc_ctx = { set_variable = { name = alias_aggressor_vassal value = scope:aggressor_vassal } } }
-	scope:defender_vassal  ?= { scope:sc_ctx = { set_variable = { name = alias_defender_vassal  value = scope:defender_vassal } } }
-	scope:distant_knight   ?= { scope:sc_ctx = { set_variable = { name = alias_distant_knight   value = scope:distant_knight } } }
-	scope:snitch           ?= { scope:sc_ctx = { set_variable = { name = alias_snitch           value = scope:snitch } } }
-	scope:strong_leader    ?= { scope:sc_ctx = { set_variable = { name = alias_strong_leader    value = scope:strong_leader } } }
-	scope:warrior_monk     ?= { scope:sc_ctx = { set_variable = { name = alias_warrior_monk     value = scope:warrior_monk } } }
-	scope:attacked_rival   ?= { scope:sc_ctx = { set_variable = { name = alias_attacked_rival   value = scope:attacked_rival } } }
-	scope:my_rival         ?= { scope:sc_ctx = { set_variable = { name = alias_my_rival         value = scope:my_rival } } }
-	scope:rival_burner     ?= { scope:sc_ctx = { set_variable = { name = alias_rival_burner     value = scope:rival_burner } } }
-	scope:rival_on_sight   ?= { scope:sc_ctx = { set_variable = { name = alias_rival_on_sight   value = scope:rival_on_sight } } }
-	scope:rivals_child     ?= { scope:sc_ctx = { set_variable = { name = alias_rivals_child     value = scope:rivals_child } } }
-	scope:og_root          ?= { scope:sc_ctx = { set_variable = { name = alias_og_root          value = scope:og_root } } }
-	scope:root_for_loc     ?= { scope:sc_ctx = { set_variable = { name = alias_root_for_loc     value = scope:root_for_loc } } }
-	scope:recidivist       ?= { scope:sc_ctx = { set_variable = { name = alias_recidivist       value = scope:recidivist } } }
-	scope:owner            ?= { scope:sc_ctx = { set_variable = { name = alias_owner            value = scope:owner } } }
-	# Artifact aliases - stored the same way as character refs.
-	scope:shadowflame      ?= { scope:sc_ctx = { set_variable = { name = alias_shadowflame      value = scope:shadowflame } } }
-	scope:burned_artifact  ?= { scope:sc_ctx = { set_variable = { name = alias_burned_artifact  value = scope:burned_artifact } } }
-	# Scheme scope - typed scope objects store fine in story variables.
-	# POD_diablerize.600 runs end_scheme on scope:scheme after the duel
-	# resolves; without this stash, its option tooltips throw "Undefined
-	# event target 'scheme'" and the final end_scheme call fails.
-	scope:scheme           ?= { scope:sc_ctx = { set_variable = { name = alias_scheme           value = scope:scheme } } }
-	# Title alias - vanilla hold_court.8210 (the vassal-rebellion
-	# legal-duel chain) saves scope:vassal_claim before launching the
-	# duel; hold_court.8211 (OUTPUT_EVENT) reads it twice to transfer
-	# the title from the loser to scope:sc_victor. The PC can be
-	# either party in this chain (aggressor_vassal or defender_vassal),
-	# so the minigame intercepts the duel and the follow-up fires via
-	# pod_combat.9999. Without this stash, hold_court.8211 throws
-	# "Undefined event target 'vassal_claim'" and the title transfer
-	# silently fails. Typed scope (a title), stores fine in a story
-	# variable.
-	scope:vassal_claim     ?= { scope:sc_ctx = { set_variable = { name = alias_vassal_claim     value = scope:vassal_claim } } }
-	# Task-contract alias - the adventurer contract duels complete their
-	# contract one or two events DOWNSTREAM of the OUTPUT_EVENT:
-	# Hunt Criminals (laamp_base_contract_schemes.1301 -> .1305 ->
-	# .1302/.1303, complete_task_contract at .1302) and Aid Wanderer
-	# (ep3_contract_event.0570 -> .0571 -> .0575, which also re-derives
-	# employer/taker FROM the contract via set_contract_scopes_effect).
-	# Without this stash the completion and reward payout silently
-	# no-op (reported in play: hunt-for-criminals paid nothing after a
-	# duel win). Typed scope; vanilla itself stores contracts in
-	# variables (laamp_base_contract_schemes.1781).
-	scope:task_contract    ?= { scope:sc_ctx = { set_variable = { name = alias_task_contract    value = scope:task_contract } } }
-	# Aid Wanderer's prison guard: ep3_contract_event.0575 (two events
-	# after the duel) uses them as the artifact-history actor.
-	scope:prisonguard      ?= { scope:sc_ctx = { set_variable = { name = alias_prisonguard      value = scope:prisonguard } } }
-	# Ewan baggage-train ambush: ep3_laamp_flavour_ewan.4002 (a real
-	# OUTPUT_EVENT of .4001.b) reads scope:laamp_title.holder.domicile
-	# on its no-victor path - reachable in the minigame via a draw.
-	scope:laamp_title      ?= { scope:sc_ctx = { set_variable = { name = alias_laamp_title      value = scope:laamp_title } } }
-	# ── 2026-07-05 full downstream-chain sweep additions ──
-	# Every alias below was confirmed read somewhere in a follow-up's
-	# downstream trigger_event chain (see COMBAT_REFERENCE.md sec-10 for
-	# the per-chain map). Same one-liner pattern throughout.
-	scope:flirty_knight ?= { scope:sc_ctx = { set_variable = { name = alias_flirty_knight value = scope:flirty_knight } } }
-	scope:flirty_spouse ?= { scope:sc_ctx = { set_variable = { name = alias_flirty_spouse value = scope:flirty_spouse } } }
-	scope:6100_lord ?= { scope:sc_ctx = { set_variable = { name = alias_6100_lord value = scope:6100_lord } } }
-	scope:6100_vassal_1 ?= { scope:sc_ctx = { set_variable = { name = alias_6100_vassal_1 value = scope:6100_vassal_1 } } }
-	scope:6100_vassal_2 ?= { scope:sc_ctx = { set_variable = { name = alias_6100_vassal_2 value = scope:6100_vassal_2 } } }
-	scope:rival_friend ?= { scope:sc_ctx = { set_variable = { name = alias_rival_friend value = scope:rival_friend } } }
-	scope:friend_backup ?= { scope:sc_ctx = { set_variable = { name = alias_friend_backup value = scope:friend_backup } } }
-	scope:5717_nemesis ?= { scope:sc_ctx = { set_variable = { name = alias_5717_nemesis value = scope:5717_nemesis } } }
-	scope:rivals_beneficiary ?= { scope:sc_ctx = { set_variable = { name = alias_rivals_beneficiary value = scope:rivals_beneficiary } } }
-	scope:attacked_rivals_liege ?= { scope:sc_ctx = { set_variable = { name = alias_attacked_rivals_liege value = scope:attacked_rivals_liege } } }
-	scope:insensitive_asshole ?= { scope:sc_ctx = { set_variable = { name = alias_insensitive_asshole value = scope:insensitive_asshole } } }
-	scope:rowdy_boy ?= { scope:sc_ctx = { set_variable = { name = alias_rowdy_boy value = scope:rowdy_boy } } }
-	scope:fp2_2010_root_in_duel ?= { scope:sc_ctx = { set_variable = { name = alias_fp2_2010_root_in_duel value = scope:fp2_2010_root_in_duel } } }
-	scope:fp2_2021_root_in_duel ?= { scope:sc_ctx = { set_variable = { name = alias_fp2_2021_root_in_duel value = scope:fp2_2021_root_in_duel } } }
-	scope:fp3_child_to_leave ?= { scope:sc_ctx = { set_variable = { name = alias_fp3_child_to_leave value = scope:fp3_child_to_leave } } }
-	scope:follower_1 ?= { scope:sc_ctx = { set_variable = { name = alias_follower_1 value = scope:follower_1 } } }
-	scope:follower_2 ?= { scope:sc_ctx = { set_variable = { name = alias_follower_2 value = scope:follower_2 } } }
-	scope:follower_3 ?= { scope:sc_ctx = { set_variable = { name = alias_follower_3 value = scope:follower_3 } } }
-	scope:slaver ?= { scope:sc_ctx = { set_variable = { name = alias_slaver value = scope:slaver } } }
-	scope:local_soldier ?= { scope:sc_ctx = { set_variable = { name = alias_local_soldier value = scope:local_soldier } } }
-	scope:employer ?= { scope:sc_ctx = { set_variable = { name = alias_employer value = scope:employer } } }
-	scope:spawned_spirit ?= { scope:sc_ctx = { set_variable = { name = alias_spawned_spirit value = scope:spawned_spirit } } }
-	scope:hunter4 ?= { scope:sc_ctx = { set_variable = { name = alias_hunter4 value = scope:hunter4 } } }
-	# Parent's ACTUAL scope:target / scope:recipient. Phase-1 restore
-	# fabricates target/recipient = the defender; when the parent saved a
-	# real one it must win instead - the artifact-challenge duel's target
-	# is an ARTIFACT (artifact.2002 transfers ownership through it), and
-	# the fabricated character clobber silently voided the prize. Restored
-	# in phase 2, which runs after the fabrication.
-	scope:target           ?= { scope:sc_ctx = { set_variable = { name = alias_duel_target    value = scope:target } } }
-	scope:recipient        ?= { scope:sc_ctx = { set_variable = { name = alias_recipient      value = scope:recipient } } }
-	# Non-character objects (provinces/titles store fine, like vassal_claim).
-	scope:far_frontier     ?= { scope:sc_ctx = { set_variable = { name = alias_far_frontier   value = scope:far_frontier } } }
-	scope:current_county   ?= { scope:sc_ctx = { set_variable = { name = alias_current_county value = scope:current_county } } }
-
-	# ── Scope VALUES (numbers / booleans) ──
-	# ?= cannot navigate these (they are not object scopes), so each gets
-	# an explicit exists-guard. Numbers round-trip through a story var;
-	# booleans store a literal marker and the restore re-emits the literal.
-	# FLAG-typed scope values (e.g. scope:method) still cannot ride this -
-	# flags degrade to plain 'value' through var copies - which is why
-	# they stay in the not-stashed register below.
-	if = {
-		limit = { exists = scope:provisions_loss }
-		scope:sc_ctx = { set_variable = { name = val_provisions_loss value = scope:provisions_loss } }
-	}
-	if = {
-		limit = { exists = scope:cannibal_prowess }
-		scope:sc_ctx = { set_variable = { name = val_cannibal_prowess value = scope:cannibal_prowess } }
-	}
-	if = {
-		limit = { exists = scope:scheme_discovered }
-		scope:sc_ctx = { set_variable = { name = val_scheme_discovered value = yes } }
-	}
-}
 
 pod_combat_sc_launch_minigame_effect = {
 	# Builds a 1v1 (PC vs OPPONENT) through the duel builder, then
@@ -475,11 +283,10 @@ pod_combat_sc_launch_minigame_effect = {
 	#
 	# POD_combat_create_duel_effect owns the duel story: it creates the
 	# POD_combat_sc_context story on Charon, snapshots the sc_* parties +
-	# rule flags + follow-up event id onto it, stashes the parent-event
-	# aliases (pod_combat_sc_stash_parent_aliases_effect), and pins the
-	# pointer var on the PC. pod_combat.9999 reads through that pointer at
-	# combat end to restore scopes and fire the follow-up. See
-	# COMBAT_REFERENCE.info §3 for the new-object-wrap rationale.
+	# rule flags + follow-up event id onto it, and pins the pointer var on
+	# the PC. pod_combat.9999 reads the follow-up id back through that
+	# pointer at combat end. See COMBAT_REFERENCE.info §3 for the
+	# new-object-wrap rationale.
 	#
 	# Parameters:
 	#   $OPPONENT$ - the non-PC combatant (seated as the enemy/0 leader)
@@ -487,6 +294,20 @@ pod_combat_sc_launch_minigame_effect = {
 	#   $FATALITY$ / $FIXED$ / $LOCALE$ - duel rule flags
 	# (INVALIDATION_EVENT is handled in the override's Part 2 before the
 	#  launcher runs, so it isn't a launcher parameter.)
+	# Open the shell FIRST, before the builder runs. The shell takes the scope
+	# table as it stands at this moment, and that inheritance is the whole
+	# hand-off mechanism (pod_combat.9995) - so it has to be the parent's
+	# table and nothing else. The builder's own helpers save generic names
+	# into this same chain (pod_combat_calc_turn_orders_effect writes
+	# scope:host and scope:me), which would otherwise ride along and shadow
+	# same-named scopes the parent event set: an activity duel's scope:host
+	# is the activity host, and silently handing the follow-up the combat
+	# host instead is worse than the missing-scope error it replaces.
+	#
+	# hidden_effect keeps "Triggers event" out of the duel option tooltips of
+	# ~90 callers; it does not affect scope propagation.
+	hidden_effect = { trigger_event = { id = pod_combat.9995 } }
+
 	POD_combat_create_duel_effect = {
 		INITIATOR    = scope:sc_initiator
 		ATTACKER     = scope:sc_attacker
@@ -498,4 +319,12 @@ pod_combat_sc_launch_minigame_effect = {
 	}
 	POD_combat_duel_add_enemy_effect = { CHARACTER = $OPPONENT$ }
 	POD_combat_finalize_duel_effect = yes
+
+	# Marker last, once the fight actually stands up. It has to be set after
+	# POD_combat_create_duel_effect, whose stale-fight teardown runs
+	# pod_combat_cleanup_effect and would clear it. It distinguishes a shell
+	# fight from the debug builder launchers, which call
+	# POD_combat_create_duel_effect directly and so pin pod_combat_sc_context
+	# without ever opening a card.
+	set_variable = { name = pod_combat_sc_shell value = yes }
 }

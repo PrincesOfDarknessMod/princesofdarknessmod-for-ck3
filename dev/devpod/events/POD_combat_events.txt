@@ -146,12 +146,72 @@ pod_combat_debug.0002 = {
 	}
 }
 
-# Post-combat dispatch. Fires at the end of an sc-driven combat. CK3 does
-# NOT propagate GUI-context saved scopes through event chains, so every
-# scope is reconstructed from the POD_combat_sc_context story the launcher
-# built (reached via the PC's pod_combat_sc_context pointer var). The six
-# phases below carry the per-step contract; full rationale in
-# pod_combat_sc_context_effects.txt's header.
+######################################
+######   DUEL SHELL + DISPATCH   ######
+######################################
+
+# pod_combat.9995 - the duel shell. Fired without delay from the minigame
+# launcher, so it inherits the launching event's entire saved-scope table:
+# the sc_* principals, the fatality / fixed / locale rule flags, and whatever
+# the parent named for its own follow-up (scope:spirit, scope:task_contract,
+# an artifact scope:target, and the flag-typed values a variable stash cannot
+# carry at all). Holding this event open for the duration of the fight is
+# what keeps that table alive, since the combat window's clicks are GUI
+# executions with no scope table of their own. Concluding from the option
+# therefore hands off inside the original chain, and the follow-up plus
+# everything downstream of it reads the parent's scopes exactly as an
+# uninterrupted vanilla duel would have delivered them.
+#
+# The card is gui/event_windows/pod_combat_shell.gui. Its window stays hidden
+# for the length of the fight and appears centred once the fight resolves; the
+# EVENT is open throughout regardless, which is the part that matters.
+pod_combat.9995 = {
+	type = character_event
+	content_source = dlc_POD	# PoD corner icon (workspace convention)
+	window = pod_combat_shell
+	title = pod_combat.9995.t
+	desc = pod_combat.9995.desc
+	theme = war
+
+	# Deliberately no option trigger: option triggers are evaluated when the
+	# event fires, and the fight is unresolved by definition at that moment,
+	# so any trigger would leave the option invalid for the whole fight.
+	# Readiness is gated in the window GUI, which re-evaluates live, and
+	# re-checked below for the paths the GUI cannot gate.
+	option = {
+		name = pod_combat.9995.a
+		custom_tooltip = pod_combat_shell_conclude_tt
+
+		hidden_effect = {
+			if = {
+				# Selected before the fight resolved. Multiplayer picks an
+				# option automatically after MULTIPLAYER_EVENT_TIME_OUT days,
+				# and a stray click can still slip past the GUI gate, so
+				# reopen rather than concluding early: the re-fire carries
+				# the same scope table onward and nothing is lost.
+				limit = {
+					is_alive = yes
+					pod_combat_shell_owns_live_fight_trigger = yes
+					NOT = { has_variable = pod_combat_is_over }
+				}
+				trigger_event = { id = pod_combat.9995 }
+			}
+			else_if = {
+				# The normal route. Writeback runs here and its sc branch
+				# fires .9999 from inside this event chain, which is what
+				# carries the inherited scopes into the follow-up.
+				limit = {
+					is_alive = yes
+					pod_combat_shell_owns_live_fight_trigger = yes
+				}
+				pod_combat_end_combat_effect = yes
+			}
+			# Neither branch: this card has outlived its fight (the host died
+			# mid-fight and the release tore it down, or a later fight is
+			# running that this card does not own). Clicking just closes it.
+		}
+	}
+}
 
 # To-the-death aftermath for the PoD interaction launchers that used to
 # reuse vanilla tribal.1021 (the liege-challenge output). That event reads
@@ -182,47 +242,56 @@ pod_combat.9990 = {
 	}
 }
 
+# Post-combat dispatch: the single funnel where a duel-launched fight hands
+# back to the parent chain. Two routes arrive here and differ only in whether
+# the parent's scope table came with them (file header of
+# pod_combat_sc_context_effects.txt has the full model):
+#   - the shell event's Conclude option, carrying the parent scopes intact;
+#   - a raw GUI execution, carrying nothing.
 pod_combat.9999 = {
 	hidden = yes
 
 	immediate = {
-		# Six finalization phases, one helper each; per-phase contract in
-		# pod_combat_sc_context_effects.txt's header.
+		# The context story carries the follow-up id, and for the fallback
+		# route the principals too, so bind it ahead of either branch.
+		var:pod_combat_sc_context = { save_scope_as = sc_ctx }
 
-		# Phase 1: Reconstruct sc_initiator / sc_attacker / sc_defender
-		# + alias scopes (victim, recipient, target, attacker, challenger,
-		# adversary) + sc_victor / sc_loser from the PC's
-		# pod_combat_sc_context pointer.
-		POD_combat_restore_sc_context_effect = yes
+		# An absent sc_attacker means the shell's table did not come along.
+		# Rebuild what the story can supply; parent aliases are gone for
+		# good on this route, so the follow-up runs on principals alone.
+		if = {
+			limit = { NOT = { exists = scope:sc_attacker } }
+			POD_combat_restore_sc_context_effect = yes
+			POD_combat_restore_sc_rule_flags_effect = yes
+			# Only a shell fight losing its table is a defect worth logging.
+			# The debug builder launchers never open a shell and have no
+			# parent chain to lose, so this is simply their normal route -
+			# which keeps the fallback continuously exercised.
+			if = {
+				limit = { has_variable = pod_combat_sc_shell }
+				error_log = "pod_combat: .9999 reached without the shell scope table - concluding degraded, parent-event aliases unavailable to the follow-up"
+			}
+		}
 
-		# Phase 2: Rebuild parent-event aliases (scope:spirit, scope:actor,
-		# scope:my_rival, etc. — 24 entries). Whitelist must stay
-		# synchronised with pod_combat_sc_stash_parent_aliases_effect in
-		# the launcher.
-		pod_combat_sc_restore_parent_aliases_effect = yes
+		# The outcome is combat-owned, so it is derived the same way on both
+		# routes - and after the restore, whose principals the victor snap
+		# compares against.
+		POD_combat_derive_sc_outcome_effect = yes
 
-		# Phase 3: Round-trip the rule flags (fatality / fixed / locale)
-		# from sc_ctx variables into saved-scope flag values. Also
-		# captures sc_finished and victory_type for the follow-up.
-		POD_combat_restore_sc_rule_flags_effect = yes
-
-		# Phase 4: Side-effect finalization — release engaged flags,
-		# bump victor's primary armament artifact_duel_var, apply
-		# fatality-mode-aware death outcomes.
+		# Release engaged flags, bump the victor's primary armament
+		# artifact_duel_var, apply fatality-mode-aware death outcomes.
 		POD_combat_apply_duel_finalization_effect = yes
 
-		# Phase 5: Fire the follow-up event. Three-step fallback chain
-		# (initiator → defender → attacker, gated on is_alive) matches
-		# vanilla's pattern so `root` of the follow-up is the same
-		# character vanilla would have used.
+		# Fire the follow-up. The three-step chain (initiator -> defender ->
+		# attacker, gated on is_alive) matches vanilla's pattern so `root` of
+		# the follow-up is the character vanilla would have used.
 		POD_combat_fire_sc_followup_effect = yes
 
-		# Phase 6: Full cleanup. pod_combat_cleanup_effect ends the
-		# context story and removes the pointer var. Atomic teardown
-		# — every var that lived on the story (sc_* refs, rule flags,
-		# alias snapshots, follow-up id) vanishes when end_story fires.
+		# Full cleanup. pod_combat_cleanup_effect ends the context story and
+		# removes the pointer var: atomic teardown, since every var that
+		# lived on the story vanishes when end_story fires.
 		#
-		# Phase 4 can pod_death the host itself (sc_loser under fatality=always
+		# Finalization can pod_death the host itself (sc_loser under fatality=always
 		# / tribal-default); the full cleanup then mutates ~50 host vars on a
 		# corpse, which errors. Route a dead host to the dead-safe release (ends
 		# stories + clears living combatants' bridge vars; the host's own combat
