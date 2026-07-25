@@ -69,6 +69,7 @@ pod_combat_clear_per_target_state_effect = {
 	remove_variable = pod_combat_last_retal_agg
 	remove_variable = pod_combat_last_retal_morale
 	remove_variable = pod_combat_last_result_agg
+	remove_variable = pod_combat_last_soaked_count
 	remove_variable = pod_combat_last_heal_amount
 	remove_variable = pod_combat_last_morale_damage_amount
 	remove_variable = pod_combat_last_morale_heal_amount
@@ -316,10 +317,10 @@ pod_combat_deal_typed_retal_damage_effect = {
 }
 
 # Unsoakable DoT wound, applied in the victim character's scope. Mirrors
-# POD_increase_wounds_effect's non-soaked branch (final_damage = COUNT * splat-weakness,
-# capped; box apply + vanilla treatment + balefire stacks). Only the soak random_list is
-# dropped - the round-end burn is defined as unsoakable; hard immunity and clay-man
-# protection still block.
+# POD_increase_wounds_effect's damage branch (final_damage = COUNT * splat-weakness,
+# capped; box apply + vanilla treatment + balefire stacks) with every point landing.
+# Only the per-point soak roll is dropped - the round-end burn is defined as
+# unsoakable; hard immunity and clay-man protection still block.
 # Caller contract: victim scope, reached from HOST scope via var:pod_combat_target_char (the
 # proven route_to_pod_damage shape).
 pod_combat_apply_dot_wound_effect = {
@@ -345,7 +346,6 @@ pod_combat_apply_dot_wound_effect = {
 		save_scope_value_as = { name = dot_boxes_applied value = scope:final_damage }
 		POD_vanilla_wound_treatment = { REASON = $REASON$ }
 		if = {
-			# POD-Integration practice-spar addition: no lasting balefire stacks in practice.
 			limit = { scope:death_reason = flag:death_balefire  NOT = { has_character_flag = pod_combat_practice_active } }
 			while = { count = scope:final_damage  POD_add_modifier_and_track_stacks = { TYPE = character MODIFIER = balefire_health_modifier } }
 		}
@@ -596,9 +596,10 @@ pod_combat_push_ap_drain_log_effect = {
 # roll, stance consumption, spirit gate, morale spillover.
 #
 # Tradeoff: PoD fires a "took damage" toast on every wound write - one
-# per landed hit. We accept the toast spam as the cost of routing
-# through PoD's standard pipeline (suppressing would need a custom
-# POD_increase_wounds_* path that skips the interface call).
+# per landed hit, plus a "soaked" toast whenever the per-point roll
+# absorbs at least one point. We accept the toast spam as the cost of
+# routing through PoD's standard pipeline (suppressing would need a
+# custom POD_increase_wounds_* path that skips the interface call).
 
 pod_combat_route_to_pod_damage_effect = {
 	# $TARGET_SIDE$ = "actor" or "target"
@@ -613,6 +614,10 @@ pod_combat_route_to_pod_damage_effect = {
 	#                              exactly one of the two)
 	#   scope:result_agg         = yes/no - PoD's aggravated classification for
 	#                              THIS victim + REASON (the actual-result box)
+	#   scope:soaked_count       = points absorbed by PoD's per-point soak roll
+	#                              (0 = none / immune / unsoakable). Always set,
+	#                              and captured before the boxes are written, so
+	#                              it survives a kill.
 	# Each caller decides whether to lift these into pod_combat_last_*;
 	# see the lift sites in pod_combat_apply_damage_payload_effect (main
 	# attack), §8 self-damage (discards), and the retaliation helper.
@@ -1003,6 +1008,15 @@ pod_combat_apply_damage_payload_effect = {
 	}
 	else = {
 		remove_variable = pod_combat_last_result_agg
+	}
+	# Partial-soak count for the damage line's "N soaked" note. Same if/else
+	# discipline as result_agg above, for the same reason.
+	if = {
+		limit = { scope:soaked_count > 0 }
+		set_variable = { name = pod_combat_last_soaked_count value = scope:soaked_count }
+	}
+	else = {
+		remove_variable = pod_combat_last_soaked_count
 	}
 }
 
@@ -1487,6 +1501,16 @@ pod_combat_push_log_effect = {
 				scope:combat_host = { has_variable = pod_combat_last_result_agg }
 			}
 			set_variable = { name = result_agg value = 1 }
+		}
+		# Partial-soak count for the main damage line. PODCombatLogResultText
+		# appends an "N soaked" note so a smaller-than-listed number reads as
+		# soak rather than a bug. Only meaningful on hp_damage rows: a fully
+		# soaked hit renders the bold Soaked outcome instead.
+		if = {
+			limit = {
+				scope:combat_host = { has_variable = pod_combat_last_soaked_count }
+			}
+			set_variable = { name = soaked_count value = scope:combat_host.var:pod_combat_last_soaked_count }
 		}
 		# ── Segment-visibility bake ──────────────────────────────────
 		# Entry / move vars are immutable once this row is pushed, so each

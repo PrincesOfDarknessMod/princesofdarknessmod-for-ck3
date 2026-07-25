@@ -247,6 +247,7 @@ and `pod_combat_actor_max_hp_value` (track length). They gate on
 | `pod_combat_last_retal_damage` | last retaliation damage |
 | `pod_combat_last_retal_agg` / `_last_retal_morale` | actual-result markers for the counter: it landed aggravated (PoD's per-victim classification) / it eroded morale instead of HP |
 | `pod_combat_last_result_agg` | actual-result marker for the main damage line: PoD classified the landed wound as aggravated for this victim (lifted from the route helper's `scope:result_agg`) — see **Result model** |
+| `pod_combat_last_soaked_count` | points absorbed by PoD's per-point soak roll on the last damage write (lifted from the route helper's `scope:soaked_count`); absent = none. Drives the damage line's partial-soak note — see **Result model** |
 | `pod_combat_last_outcome` | top-level outcome flag (`flag:attack` / `heal` / `morale_damage` / `morale_healed` / `utility`) — see **Result model** |
 | `pod_combat_last_attack_result` | inner attack resolution (`flag:hp_damage` / `soaked` / `missed` / `dodged` / `stealthed` / `guard_blocked`); only meaningful when outcome = attack |
 | `pod_combat_last_retal_fired` | overlay flag: a retaliation fired on this row |
@@ -529,15 +530,25 @@ wound call), with a belt-and-braces removal in §17.
 The connecting blow goes through `pod_combat_route_to_pod_damage_effect`, which
 shims into PoD's wound pipeline (`POD_increase_wounds_hostile_effect`).
 **Soak lives entirely in PoD** — combat passes raw `COUNT`; PoD applies
-the soak roll, the splat-weakness multiplier, the damage cap, immunity,
+the soak rolls, the splat-weakness multiplier, the damage cap, immunity,
 and the inline death check.
 
+PoD rolls soak **per point**, not once for the whole packet (the soak
+revamp; `POD_increase_wounds_effect`). A 4-damage hit against 50% soak
+rolls four times, so packets land partially and the common case is chip
+reduction rather than a whole-hit coin flip. Expected damage is
+unchanged; variance is much lower. Two consequences for combat: a full
+soak (every point absorbed) is now rare, and a partial soak looks like a
+smaller-than-advertised number unless the log says otherwise.
+
 The route helper returns scope values only (no host-var side effects):
-`scope:damage_dealt` (post-soak amount; 0 if fully soaked),
-`scope:attack_result_flag` (`flag:hp_damage` / `soaked`), and
+`scope:damage_dealt` (post-soak amount; 0 only if EVERY point was
+soaked), `scope:attack_result_flag` (`flag:hp_damage` / `soaked`),
 `scope:result_agg` (PoD's aggravated classification for this victim +
 REASON, captured **before** the wound call — a kill wipes the victim
-state the classifier reads). Because the
+state the classifier reads), and `scope:soaked_count` (points absorbed;
+always set, and captured before the boxes are written, so it survives a
+kill). Because the
 wound SVs read 0 on a dead character, it
 snapshots superficial and aggravated box counts **separately** before
 the write and takes `max(0, sup_delta) + agg_delta` — a single total-box
@@ -545,6 +556,15 @@ delta would read 0 when PoD's aggravated push-out converts existing
 superficial boxes to aggravated, falsely classifying a real hit as
 soaked. Morale spillover scales off the actual post-soak damage
 (`pod_combat_morale_from_hp_ratio`).
+
+`pod_combat_apply_damage_payload_effect` lifts `scope:soaked_count` into
+`pod_combat_last_soaked_count`, which `push_log` stamps onto the entry as
+`soaked_count`. `PODCombatLogResultText` then renders a partial-soak
+variant of the damage line (the usual `-N` + wound-box icon, followed by
+a weak-italic "M soaked" note) so a reduced number reads as soak rather
+than a bug. Full soaks still render the bold `Soaked`
+outcome, and the two sets are disjoint (the partial branches require
+`attack_result = hp_damage` and `damage > 0`).
 
 #### The spirit gate
 
@@ -994,6 +1014,13 @@ per-victim classification rather than the move's damage class (see
 `entry.var:retal_agg` / `retal_morale` split the retal rider's. Absent =
 superficial.
 
+`pod_combat_last_soaked_count` → `entry.var:soaked_count` is the same
+shape: on an `hp_damage` row it selects a partial-soak variant of the
+damage line that appends the absorbed count. It is a dispatcher split,
+not a segment, so it needs no `seg_*` bake and no `.gui` change. The
+retal rider deliberately carries no equivalent — its grammar drops
+magnitudes, and its number is already post-soak.
+
 ### How helpers write the axes
 
 - **Attack outcomes** use `pod_combat_set_attack_result_effect = { CODE
@@ -1307,10 +1334,41 @@ reach PoD's real wound rolls. When a soak tier is applied, the
 actor/target character also gets a
 `pod_combat_tier_soak_<direction>_<duration>` variable. PoD's
 `POD_soak_chance` (in `POD_health_track_values.txt`) reads those four
-variables and adds/subtracts the same magnitudes, so a soak buff
-genuinely improves the wound roll the moment damage is dealt — not just
-the displayed number. See **Damage pipeline** for how soak factors into
-the wound roll.
+variables, so a soak buff genuinely improves the wound roll the moment
+damage is dealt — not just the displayed number. See **Damage pipeline**
+for how soak factors into the wound roll.
+
+**Buffs and debuffs use different math, deliberately.**
+
+- **Buffs are multiplicative**, like every other soak source. A tier is a
+  constant proportional cut to incoming damage (a large buff always
+  multiplies damage taken by 0.7) rather than a flat point gain that
+  grows in value the soakier the target already is. On a 0%-soak
+  character multiplicative and additive agree (both give 30 for a large
+  buff); they diverge on stacked-soak targets, where the old additive
+  form was worth far more — 64% soak went to 94% additively, and goes to
+  74.8% now.
+- **Debuffs stay flat percentage points.** A multiplicative debuff could
+  never meaningfully strip a stacked tank (90% soak times a 0.3 factor is
+  still 87%), so keeping them subtractive is what makes soak-shredding
+  moves the answer to a soak build.
+
+**Ordering constraint — the bridge mirrors a snapshot, so it must start
+where the snapshot was taken.** `POD_soak_chance` clamps to 0-100 right
+after the flat Fae terms (`POD_quest_of_deed_modifier`,
+`cantrip_deja_vu_modifier`) and *before* the bridge. That clamped value is
+exactly what combat snapshots per combatant as `slot_base_soak`. The buff
+block therefore works in percentage space — flip to `100 - soak`, apply
+the tier factors, flip back — rather than folding into the product
+further up: the flat terms have already landed by then, so a
+product-phase factor would give a different answer than the mirror can
+reproduce (a Fae under the Banality Quest reads 25.2% one way and 34.2%
+the other). `pod_combat_recalc_soak_core_effect` and the slot copy in
+`pod_combat_recalc_slot_stats_via_story_effect` run the same two flips on
+`slot_base_soak`; if any of the three drift, the slot card and every AI
+soak threshold start lying about the real wound roll. Hit tiers are
+unaffected — plain percentage points both ways, in
+`pod_combat_recalc_hit_core_effect`.
 
 ### Cleanup
 
@@ -1929,7 +1987,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_values.txt` | Constants (`pod_combat_base_ap`, `pod_combat_max_morale`, etc.), slot-state script values (`pod_combat_slot_max_hp_value`, `pod_combat_slot_total_damage_sv`, `pod_combat_slot_morale_pct`, etc.), and category-cap helpers (`pod_combat_atk_count` etc.) for the loadout editor. All consumed by the GUI and combat effects. |
 | `pod_combat_values.txt` (version + caps) | Also holds `POD_current_combat_version` (hand-bumped when the move set changes; the configure-skills decision reloads the catalogue on version mismatch) and the loadout caps. Many constants in this file carry a `global_var:pod_combat_tune_*` override branch for the debug tuning window (`pod_combat_tuning_window.gui` + `pod_combat_tuning_guis.txt` + `pod_combat_tuning_effects.txt`): unset global = the shipped default; the window's Reset All clears every override. |
-| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs and the combat-tier-buff soak bridge. Five `# POD-Integration addition:` markers. |
+| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs, the multiplicative `POD_soak_chance` rewrite, and the combat-tier-buff soak bridge. |
 
 ### Decisions
 
