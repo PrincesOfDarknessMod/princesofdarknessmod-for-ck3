@@ -85,16 +85,18 @@ when is it meaningful?".
 | Owner | Scope it lives on | Lifetime | Representative variables |
 |---|---|---|---|
 | **Host** | combat host (the PC character) | combat init → combat cleanup | `pod_combat_active`, `pod_combat_round`, `pod_combat_current_ap`, `pod_combat_current_actor_team`/`_position`, `pod_combat_player_team_size`, `pod_combat_enemy_team_size`, `pod_combat_pc_slot`, `pod_combat_enemy_leader_slot`, `pod_combat_active_slots` |
-| **Slot** | a `POD_combat_slot` story (one per combatant, on Charon) | slot creation → combat cleanup | `combat_team`, `team_position`, `slot_char`, `slot_alive`, `slot_morale`, `slot_prowess`, `slot_soak`, `slot_hit_chance`, stance + tier vars |
+| **Slot** | a `POD_combat_slot` story (one per combatant, on Charon) | slot creation → combat cleanup | `combat_team`, `team_position`, `slot_char`, `slot_alive`, `slot_morale`, `slot_hit_chance`, stance + hit tier vars |
 | **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` |
 | **Character (AI)** | the acting AI character | persists per-character across combats until cleared at combat end | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` |
 | **Log entry** | a `POD_combat_log_entry` story (one per row, on Charon) | combat init → combat cleanup | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:damage`, `entry.var:round`, and the move-context fields the log dispatcher reads |
 
 Two rules are load-bearing across the whole system:
 
-**HP is derived live, never cached on the slot.** The slot story holds
-only the `slot_char` pointer. Current HP, max HP, and damage come from
-script values that read the character's PoD wound track every time. The
+**Character stats are derived live, never cached on the slot.** The slot
+story holds only the `slot_char` pointer. HP, soak and prowess all come
+from script values that read the character every time — HP and max HP off
+the PoD wound track, soak off `POD_soak_chance`, prowess off the attribute
+(via `pod_combat_char_prowess_value`). The
 only slot HP/damage SVs that exist are:
 
 | SV | Returns |
@@ -154,9 +156,6 @@ literal slot pointers. Any non-leader slot is reached by iterating
 | `slot_char` | character ref occupying the slot |
 | `slot_alive` | 1 while in play, 0 when KO'd |
 | `slot_morale` | current Morale |
-| `slot_prowess` | current prowess |
-| `slot_soak` | live soak chance (0–100), base + tier mags |
-| `slot_base_soak` | soak before any tier effects |
 | `slot_hit_chance` | live hit chance (20–95) |
 | `slot_base_hit_chance` | hit chance before any tier effects |
 | `slot_initiative` | initiative roll this round |
@@ -193,22 +192,28 @@ All persist across rounds; cleared only when consumed or at combat end.
 Both are write-once facts set at slot init from static
 trait/perk/artifact triggers; they never change mid-fight.
 
-#### Tier variables (on the slot story)
+#### Tier variables
 
-Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). Live stats are
-rebuilt from base plus the sum of active tier magnitudes. See **Tier
-system**.
+Tier = 1 (small, ±10), 2 (medium, ±20), 3 (large, ±30). See **Tier system**.
+
+Hit tiers live on the slot story; live hit chance is rebuilt from base plus the
+sum of active tier magnitudes:
 
 ```
-slot_{stat}_{direction}_{duration}_tier
-  stat:      soak | hit
+slot_hit_{direction}_{duration}_tier
   direction: buff | debuff
   duration:  round (cleared at the holder's turn boundary) | combat (lasts the fight)
 ```
 
+Soak tiers live on the COMBATANT, not the slot, as
+`pod_combat_tier_soak_{direction}_{duration}`. They are read directly by
+`POD_soak_chance`, so the tier a card shows is the tier the wound roll rolls.
+
 The eight magnitude script values
 (`pod_combat_slot_{stat}_{direction}_{duration}_mag_sv`) return the
-matching tier's magnitude (small/medium/large) or 0.
+matching tier's magnitude (small/medium/large) or 0 - the four hit
+variants read the slot vars, the four soak variants read the occupant's
+bridge vars.
 `pod_combat_slot_hit_net_mod_value` sums the four hit mags signed (buffs
 − debuffs) for the NPC slot-card display.
 
@@ -219,10 +224,19 @@ The workspace mirrors the slot fields for whoever is acting
 
 | Variable | Mirrors |
 |---|---|
-| `pod_combat_actor_*` / `pod_combat_target_*` | the matching `slot_*` field on the acting / targeted slot (soak, base_soak, prowess, morale, hit_chance, char, energy_used, stance flags, init_bonus, ap_drain, all retaliation vars, all 8 tier vars, both spirit flags) |
+| `pod_combat_actor_*` / `pod_combat_target_*` | the matching `slot_*` field on the acting / targeted slot (morale, hit_chance, char, energy_used, stance flags, init_bonus, ap_drain, all retaliation vars, the 4 hit tier vars, both spirit flags) |
+| `pod_combat_actor_soak` / `_prowess` (and target twins) | NOT mirrors: live values stashed off the combatant (see below) |
 | `pod_combat_current_hit_chance` | the active attacker's hit chance for this attack |
 
 Both sides load and save through one symmetric pair, `pod_combat_load_side_from_story_helper` / `pod_combat_save_side_to_story_helper` (`SIDE = actor | target`). The four public wrappers (`load_actor` / `load_target` / `save_actor` / `save_target`) just delegate with the side filled in. **To add a mirrored field:** one line in each helper (load + save), a `remove_variable` in the workspace-cleanup list (`pod_combat_cleanup_effect`), and for load-only presence flags a removal in `pod_combat_group_cleanup_effect` (see the spirit mirrors).
+
+**Soak and prowess are not mirrored fields.** `pod_combat_stash_side_live_stats_effect`
+(called at the tail of the load helper, and again after a move writes a soak
+tier) reads `POD_soak_chance` and `prowess` off the side's character and stores
+them as `pod_combat_$SIDE$_soak` / `_prowess`. They are per-action scratch, never
+written back to the slot. The stash exists purely to hoist the read: the AI
+weighting reads both inside `random_list` modifiers, i.e. once per candidate
+move, and `POD_soak_chance` is far too heavy to re-walk that often.
 
 **Two fields are load-only:** `slot_can_damage_spirit` and
 `slot_incorporeal_spirit` are copied into the workspace on load but
@@ -631,14 +645,15 @@ At creation the slot gets:
 | `slot_alive` | `1` | |
 | `slot_char` | `$CHARACTER$` | the occupant; set before `slot_morale` so the starting-morale hook can read it |
 | `slot_morale` | `pod_combat_max_morale + pod_combat_starting_morale_modifier_value`, floored at 1 | the modifier is a designer hook (0 by default; §11). Defaults to the cap so a fresh slot reads alive before real init; the init-time KO check treats `slot_morale <= 0` as a KO predicate |
-| `slot_prowess` | `0` | |
-| `slot_soak` | `0` | |
 | `slot_energy_used` | `0` | |
 | `slot_has_acted` | `0` | |
 
+Soak and prowess are absent entirely: like HP, they are read live off
+`slot_char` wherever they are needed and never stored on the slot.
+
 The pure-value stats are zero-defaulted so a script_value gate needs
 only a slot-presence check, not a per-field `has_variable`. Gate-style
-fields (`slot_base_soak`, `slot_hit_chance`, `slot_initiative`, the
+fields (`slot_hit_chance`, `slot_initiative`, the
 stance flags, the tier vars) are deliberately left absent until written.
 That absence is itself the signal: presence means "this
 stance/tier/effect is active." Remove a field with
@@ -744,13 +759,13 @@ action bar.)
 
 `pod_combat_init_slot_from_character_effect = { CHARACTER ENEMY_LEADER
 }` runs in the slot-story scope. It applies the ally/enemy discipline
-battle buffs (with the opposing leader as caster), snapshots
-`POD_soak_chance` into `slot_soak`/`slot_base_soak` and `prowess` into
-`slot_prowess`, sets `slot_morale` to the cap, and captures the
-spirit-capability flags (`incorporeal_spirit`, `can_damage_spirit`). HP
-is **not** snapshotted — the slot HP/damage script_values read live from
-PoD wound vars at render time, never cached on the slot (see **Damage
-pipeline**). It also clears per-fight AI scratch (loadout,
+battle buffs (with the opposing leader as caster), sets `slot_morale` to
+the cap, and captures the
+spirit-capability flags (`incorporeal_spirit`, `can_damage_spirit`). HP,
+soak and prowess are **not** snapshotted — those script_values read live
+off `slot_char` at use time, never cached on the slot (see **Damage
+pipeline** and §7). The discipline buffs are character modifiers held to
+duel end, so a live read still includes them. It also clears per-fight AI scratch (loadout,
 anti-repetition history, focus-fire mark, personality precompute) on AI
 occupants, and stamps the `pod_combat_duel_active` character modifier
 (30-day safety expiry) so other systems can defer mid-duel.
@@ -829,7 +844,7 @@ enemy/0), so there is one code path for every roster.
 every alive slot:
 
 ```
-slot_initiative = pod_combat_initiative_base_value   (slot_prowess by default; a flat, tunable baseline when the decouple-prowess toggle is on)
+slot_initiative = pod_combat_initiative_base_value   (the combatant's live prowess, floored at 0, by default; a flat, tunable baseline when the decouple-prowess toggle is on)
                 + integer_range[1, pod_combat_initiative_roll_max]   (1..30)
                 + slot_init_bonus   (carried from last round's buff/debuff moves, then cleared)
                 + pod_combat_initiative_modifier_value   (designer hook, 0 by default - see §11)
@@ -1238,7 +1253,7 @@ they always push exactly one row.
 
 Buffs and debuffs to a combatant's **soak** and **hit chance** come in
 three sizes. The whole system is built from one idea: a combatant's live
-stat is always its **base value plus the sum of its currently-active
+stat is always its **stored base re-combined with its currently-active
 tiers** — recomputed from scratch, never patched incrementally.
 
 ### The three tiers
@@ -1263,41 +1278,44 @@ every combination of three axes:
 - **duration**: `round` (cleared at the holder's own turn boundary, see
   Cleanup) or `combat` (lasts the whole fight)
 
-On a slot story the variables are named
-`slot_<stat>_<direction>_<duration>_tier` (e.g.
-`slot_soak_buff_round_tier`, `slot_hit_debuff_combat_tier`). Each holds
-`1`, `2`, or `3`, or is absent when that tier is inactive. The same
-eight names exist as workspace mirrors with the `pod_combat_actor_` /
-`pod_combat_target_` prefix (e.g.
-`pod_combat_actor_soak_buff_round_tier`).
+Each holds `1`, `2`, or `3`, or is absent when that tier is inactive, but
+the two stats store them in different places:
 
-### Live stat = base + sum of active tiers (recalc-from-base)
+- **hit** tiers live on the slot story as
+  `slot_hit_<direction>_<duration>_tier`, mirrored into the workspace as
+  `pod_combat_<side>_hit_<direction>_<duration>_tier`.
+- **soak** tiers live on the COMBATANT as
+  `pod_combat_tier_soak_<direction>_<duration>`, with no slot or workspace
+  copy. That is the same store `POD_soak_chance` reads, so there is exactly
+  one soak tier number per combatant and it is the one the wound roll uses.
 
-Live soak and hit are rebuilt by the recalc effects in
+### Live hit = base + sum of active tiers (recalc-from-base)
+
+Live hit chance is rebuilt by the recalc effects in
 `pod_combat_tier_effects.txt`. They always start from the stored
-**base** (`slot_base_soak` / `slot_base_hit_chance`, or the workspace
-`pod_combat_<side>_base_<stat>`), then walk all eight tier variables,
-**adding** the matching magnitude for each buff tier and **subtracting**
-it for each debuff tier, and clamp the result:
+**base** (`slot_base_hit_chance`, or the workspace
+`pod_combat_<side>_base_hit_chance`), then walk the four hit tier
+variables and clamp the result. Every tier is a flat percentage point,
+**added** for a buff and **subtracted** for a debuff; clamps to `[20, 95]`.
 
-- soak clamps to `[0, 100]`
-- hit clamps to `[20, 95]`
-
-The output is written back to `slot_soak` / `slot_hit_chance` (and the
-workspace `pod_combat_<side>_soak` / `_hit_chance`). Stealth's `+30` hit
+The output is written back to `slot_hit_chance` (and the workspace
+`pod_combat_<side>_hit_chance`). Stealth's `+30` hit
 bonus (`pod_combat_stealth_hit_bonus`) folds into the same recalc, keyed
 off the `*_is_stealthed` flag, so it survives every rebuild.
 
-Recalc-from-base is the load-bearing rule: live stats are **never**
+Recalc-from-base is the load-bearing rule: live hit chance is **never**
 adjusted by deltas. Removing a tier means dropping its variable and
-recalculating, so clamping losses cannot accumulate across rounds. The
-recalc helpers:
+recalculating, so clamping losses cannot accumulate across rounds.
+
+**Soak has no recalc.** Its tiers are folded into `POD_soak_chance`
+itself (buffs multiplicative, debuffs flat points - see **Soak bridge to
+PoD's wound rolls**), so there is nothing to rebuild and nothing that can
+drift from the wound roll. The recalc helpers:
 
 | Effect | Scope | Rebuilds |
 |--------|-------|----------|
-| `pod_combat_recalc_soak_actor_effect` / `_soak_target_effect` | workspace | actor / target soak |
 | `pod_combat_recalc_hit_actor_effect` / `_hit_target_effect` | workspace | actor / target hit (actor also syncs `pod_combat_current_hit_chance`) |
-| `pod_combat_recalc_slot_stats_via_story_effect` | slot story | both stats on the current slot |
+| `pod_combat_recalc_slot_hit_via_story_effect` | slot story | hit chance on the current slot |
 
 ### Upgrade-only application
 
@@ -1315,15 +1333,23 @@ OR = {
 
 So a tier-1 move can never silently downgrade a stacked tier-3 effect.
 Move selection already rejects downgrades; the guard exists to also
-cover bypass paths (console, test actions). Recalc fires whenever the
-move *declared* a tier (not whether the write happened), so a blocked
-write simply leaves the higher tier in place and recalc rebuilds against
-it.
+cover bypass paths (console, test actions). Recalc (hit) and the stash
+refresh (soak) fire whenever the move *declared* a tier, not whether the
+write happened, so a blocked write simply leaves the higher tier in place.
+
+The selection-time redundancy gates come in matched pairs, one reading
+each store: `pod_combat_tier_upgrade_only_trigger` /
+`pod_combat_slot_tier_rider_upgrades_trigger` for hit tiers (workspace and
+slot vars), and `pod_combat_soak_tier_upgrade_only_trigger` /
+`pod_combat_slot_soak_tier_rider_upgrades_trigger` for soak, which compare
+against the occupant's `pod_combat_tier_soak_*` bridge var. Point a soak
+gate at a var that does not exist and it fails **open** with no error, so
+the AI quietly re-casts buffs it already has: keep the pairing intact.
 
 By convention buffs target the actor (`pod_combat_actor_*`) and debuffs
 target the victim (`pod_combat_target_*`). A `single_ally` buff or stance
 instead targets the selected beneficiary (`pod_combat_target_*`); its
-soak bridge and stat recalc follow that ally. PC redundancy gates inspect
+soak tier write and hit recalc follow that ally. PC redundancy gates inspect
 the selected ally. AI chooses its ally after move selection, so the
 upgrade-only write is the final redundancy guard on AI casts.
 
@@ -1353,22 +1379,21 @@ for how soak factors into the wound roll.
   still 87%), so keeping them subtractive is what makes soak-shredding
   moves the answer to a soak build.
 
-**Ordering constraint — the bridge mirrors a snapshot, so it must start
-where the snapshot was taken.** `POD_soak_chance` clamps to 0-100 right
-after the flat Fae terms (`POD_quest_of_deed_modifier`,
-`cantrip_deja_vu_modifier`) and *before* the bridge. That clamped value is
-exactly what combat snapshots per combatant as `slot_base_soak`. The buff
-block therefore works in percentage space — flip to `100 - soak`, apply
-the tier factors, flip back — rather than folding into the product
-further up: the flat terms have already landed by then, so a
-product-phase factor would give a different answer than the mirror can
-reproduce (a Fae under the Banality Quest reads 25.2% one way and 34.2%
-the other). `pod_combat_recalc_soak_core_effect` and the slot copy in
-`pod_combat_recalc_slot_stats_via_story_effect` run the same two flips on
-`slot_base_soak`; if any of the three drift, the slot card and every AI
-soak threshold start lying about the real wound roll. Hit tiers are
-unaffected — plain percentage points both ways, in
-`pod_combat_recalc_hit_core_effect`.
+**One formula, no mirrors.** Combat never re-implements this math: it
+writes the tier level onto the combatant and reads `POD_soak_chance`
+live, so the slot card, every AI soak threshold, and the wound roll are
+by construction the same number. (This replaced a design where the combat
+side kept its own copies of the formula and had to be held in lockstep
+with it.)
+
+The buff block still works in percentage space — flip to `100 - soak`,
+apply the tier factors, flip back — rather than folding into the product
+further up, because the flat Fae terms (`POD_quest_of_deed_modifier`,
+`cantrip_deja_vu_modifier`) have already landed by that point, so a
+product-phase factor would not give the same answer. The 0-100 clamp
+before the bridge is load-bearing for the same reason: the flip assumes a
+0-100 input. Hit tiers are unaffected — plain percentage points both
+ways, in `pod_combat_recalc_hit_core_effect`.
 
 ### Cleanup
 
@@ -1380,15 +1405,29 @@ Combat-duration tiers persist to combat-end cleanup.
 
 | Effect | When | Clears |
 |--------|------|--------|
-| `pod_combat_clear_actor_round_buffs_effect` | acting combatant's **turn start** | that slot's `soak_buff_round_tier` / `hit_buff_round_tier` + the `tier_soak_buff_round` char-bridge var, then recalcs the slot |
-| `pod_combat_clear_actor_round_debuffs_effect` | acting combatant's **turn end** | that slot's `soak_debuff_round_tier` / `hit_debuff_round_tier` + the `tier_soak_debuff_round` char-bridge var, then recalcs the slot |
-| `pod_combat_clear_combat_tiers_effect` | combat end | all eight slot tier vars + all four char-bridge soak vars |
+| `pod_combat_clear_actor_round_buffs_effect` | acting combatant's **turn start** | that slot's `hit_buff_round_tier` + the occupant's `pod_combat_tier_soak_buff_round`, then recalcs the slot's hit |
+| `pod_combat_clear_actor_round_debuffs_effect` | acting combatant's **turn end** | that slot's `hit_debuff_round_tier` + the occupant's `pod_combat_tier_soak_debuff_round`, then recalcs the slot's hit |
+| `pod_combat_clear_combat_tiers_effect` | combat end | all four slot hit tier vars + all four soak tier vars on each occupant |
+| `pod_combat_init_slot_from_character_effect` | slot init | the incoming combatant's four soak tier vars (see below) |
 
 The two round clears find the acting slot by the `current_actor` team/position
 match (called from the turn-setup / turn-end sites in
 `pod_combat_group_effects.txt`); the combat-end clear sweeps every filled slot.
 All run in slot-story scope, with `var:slot_char` switching into the participant
-character for the bridge vars.
+character for the soak tiers.
+
+**Every soak-tier clear is `is_alive`-gated**, because var mutation on a dead
+character errors. A combatant killed mid-duel therefore keeps its soak tier vars,
+and two things cover that: `POD_soak_chance` gates all twelve bridge branches on
+`is_alive`, so a corpse's leftovers never affect anything read off it; and slot
+init clears the four vars on the way *in*, so a character who is later brought
+back cannot carry a stale tier into a new fight. Do **not** try to strip them in
+`POD_on_death` — root is already dead there, so the removes error and do nothing.
+
+**Known gap, accepted:** a KO'd combatant never becomes current actor, so its
+round-duration tiers are not cleared at a turn boundary and lapse only at combat
+end. Nothing observable depends on it (KO'd slots are untargetable and take no
+wound rolls).
 
 ---
 
@@ -1619,7 +1658,7 @@ are deliberately absence-as-signal (`slot_init_bonus`, `slot_ap_drain`,
 `slot_dot_*`, the tier vars, stance flags) — see **Slot lifecycle** for
 the full list.
 
-### HP is derived live, never cached
+### Character stats are derived live, never cached
 
 Current HP, max HP, and aggravated/total wound counts are read live from
 each slot character's PoD wound vars (`POD_empty_damage_boxes` /
@@ -1630,6 +1669,15 @@ A cache on the slot would desync against PoD's wound writes between
 turns, so HP stays derived on every read. See **Variable reference** for
 the slot HP SVs and **Damage pipeline** for the single write path
 (`POD_increase_wounds_*`).
+
+**Soak and prowess follow the same rule.** Soak is read off
+`POD_soak_chance` — the value PoD's wound roll actually rolls, so the card
+cannot disagree with the fight — and prowess off the character, so the
+wound track's prowess penalties reach initiative, hit chance, auto-resolve
+and the AI's threat read as the fight wears on. The per-action workspace
+stash (`pod_combat_stash_side_live_stats_effect`) is a read hoist for the
+AI's per-candidate weighting, not a cache: it is rewritten from the
+character every load and every soak-tier write.
 
 The one sanctioned exception is the **wound-bar display mirror**
 (`slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp`): the
@@ -1796,10 +1844,12 @@ was removed with the shell hand-off — see §8. Its effects,
 shares them.)
 
 **Auto-resolve** (`pod_combat_auto_resolve_effect`) skips the rest of
-the fight with a prowess-sum roll. It sums alive-slot `slot_prowess` per
+the fight with a prowess-sum roll. It sums each alive slot occupant's
+live prowess (floored at 0 per slot, so a negative contribution can never
+hand `integer_range` a negative max) per
 team, adds per-team jitter (`sum + rand(0..sum)`), and the higher score
-wins. `slot_prowess` is captured at init (after discipline buffs), so it
-already reflects in-combat prowess. It writes the outcome via
+wins. Because the read is live, a team that has already taken a beating
+auto-resolves from the shape it is actually in. It writes the outcome via
 `set_outcome_pair_effect` (`PC_WON = yes` when the player score
 ties-or-beats the enemy), zeroes the loser leader's morale, and pushes
 the matching log row.
@@ -1987,7 +2037,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_values.txt` | Constants (`pod_combat_base_ap`, `pod_combat_max_morale`, etc.), slot-state script values (`pod_combat_slot_max_hp_value`, `pod_combat_slot_total_damage_sv`, `pod_combat_slot_morale_pct`, etc.), and category-cap helpers (`pod_combat_atk_count` etc.) for the loadout editor. All consumed by the GUI and combat effects. |
 | `pod_combat_values.txt` (version + caps) | Also holds `POD_current_combat_version` (hand-bumped when the move set changes; the configure-skills decision reloads the catalogue on version mismatch) and the loadout caps. Many constants in this file carry a `global_var:pod_combat_tune_*` override branch for the debug tuning window (`pod_combat_tuning_window.gui` + `pod_combat_tuning_guis.txt` + `pod_combat_tuning_effects.txt`): unset global = the shipped default; the window's Reset All clears every override. |
-| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs, the multiplicative `POD_soak_chance` rewrite, and the combat-tier-buff soak bridge. |
+| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs, the multiplicative `POD_soak_chance` rewrite, and the combat-tier-buff soak bridge. Six `# POD-Integration addition:` markers. |
 
 ### Decisions
 

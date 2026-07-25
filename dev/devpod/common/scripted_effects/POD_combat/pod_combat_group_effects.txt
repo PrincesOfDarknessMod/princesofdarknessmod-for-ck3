@@ -42,16 +42,16 @@
 # New mirrored field: one line here + the writeback in
 # pod_combat_save_side_to_story_helper + a remove_variable in the workspace
 # cleanup; full recipe in COMBAT_REFERENCE.info (the workspace section).
+#
+# Prowess is NOT a mirrored field - it is stashed live from the character by
+# pod_combat_stash_side_live_stats_effect below.
 pod_combat_load_side_from_story_helper = {
 	if = {
 		limit = { has_variable = slot_char }
 		save_scope_as = slot_story
 		scope:host = {
-			set_variable = { name = pod_combat_$SIDE$_soak value = scope:slot_story.var:slot_soak }
-			set_variable = { name = pod_combat_$SIDE$_base_soak value = scope:slot_story.var:slot_base_soak }
 			if = { limit = { scope:slot_story = { has_variable = slot_base_hit_chance } } set_variable = { name = pod_combat_$SIDE$_base_hit_chance value = scope:slot_story.var:slot_base_hit_chance } }
 			set_variable = { name = pod_combat_$SIDE$_morale value = scope:slot_story.var:slot_morale }
-			set_variable = { name = pod_combat_$SIDE$_prowess value = scope:slot_story.var:slot_prowess }
 			set_variable = { name = pod_combat_$SIDE$_hit_chance value = scope:slot_story.var:slot_hit_chance }
 			# slot_energy_used default-inits to 0 at story creation, so always
 			# present (no gate). Actor-side feeds AI energy-attrition weighting.
@@ -129,28 +129,9 @@ pod_combat_load_side_from_story_helper = {
 				set_variable = { name = pod_combat_$SIDE$_retaliate_miss_morale value = yes }
 			}
 			else = { remove_variable = pod_combat_$SIDE$_retaliate_miss_morale }
-			# Tier tracking vars (8 total: soak/hit x buff/debuff x round/combat).
-			# Presence on slot = active tier; absence-as-signal preserved.
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_round_tier } }
-				set_variable = { name = pod_combat_$SIDE$_soak_buff_round_tier value = scope:slot_story.var:slot_soak_buff_round_tier }
-			}
-			else = { remove_variable = pod_combat_$SIDE$_soak_buff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_buff_combat_tier } }
-				set_variable = { name = pod_combat_$SIDE$_soak_buff_combat_tier value = scope:slot_story.var:slot_soak_buff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_$SIDE$_soak_buff_combat_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_round_tier } }
-				set_variable = { name = pod_combat_$SIDE$_soak_debuff_round_tier value = scope:slot_story.var:slot_soak_debuff_round_tier }
-			}
-			else = { remove_variable = pod_combat_$SIDE$_soak_debuff_round_tier }
-			if = {
-				limit = { scope:slot_story = { has_variable = slot_soak_debuff_combat_tier } }
-				set_variable = { name = pod_combat_$SIDE$_soak_debuff_combat_tier value = scope:slot_story.var:slot_soak_debuff_combat_tier }
-			}
-			else = { remove_variable = pod_combat_$SIDE$_soak_debuff_combat_tier }
+			# Hit tier tracking vars (buff/debuff x round/combat). Presence on
+			# slot = active tier; absence-as-signal preserved. Soak tiers are not
+			# mirrored: they live on the combatant as pod_combat_tier_soak_*.
 			if = {
 				limit = { scope:slot_story = { has_variable = slot_hit_buff_round_tier } }
 				set_variable = { name = pod_combat_$SIDE$_hit_buff_round_tier value = scope:slot_story.var:slot_hit_buff_round_tier }
@@ -175,6 +156,35 @@ pod_combat_load_side_from_story_helper = {
 			# damage pipeline as var:pod_combat_$TARGET_SIDE$_char.
 			set_variable = { name = pod_combat_$SIDE$_char value = scope:slot_story.var:slot_char }
 		}
+		scope:host = { pod_combat_stash_side_live_stats_effect = { SIDE = $SIDE$ } }
+	}
+}
+
+# Per-action live stat stash. Caller scope = host, and pod_combat_$SIDE$_char
+# must already be written.
+#
+# Soak and prowess are read live off the combatant rather than snapshotted at
+# combat start: POD_soak_chance is the number PoD's wound roll actually rolls,
+# and wound-track penalties move prowess during the fight. The stash exists
+# because the AI weighting reads both inside random_list modifiers (once per
+# candidate move) - hoisting the read to the once-per-load boundary keeps that
+# a plain var read instead of re-walking POD_soak_chance per candidate.
+pod_combat_stash_side_live_stats_effect = {
+	if = {
+		limit = {
+			has_variable = pod_combat_$SIDE$_char
+			exists = var:pod_combat_$SIDE$_char
+		}
+		var:pod_combat_$SIDE$_char = {
+			save_scope_value_as = { name = live_prowess value = prowess }
+			save_scope_value_as = { name = live_soak value = POD_soak_chance }
+		}
+		set_variable = { name = pod_combat_$SIDE$_prowess value = scope:live_prowess }
+		set_variable = { name = pod_combat_$SIDE$_soak value = scope:live_soak }
+	}
+	else = {
+		remove_variable = pod_combat_$SIDE$_prowess
+		remove_variable = pod_combat_$SIDE$_soak
 	}
 }
 
@@ -191,8 +201,9 @@ pod_combat_load_actor_from_story_effect = {
 # is leader-baseline (set once at init in
 # pod_combat_calculate_all_hit_chances_effect), so without this every AI
 # swap / AoE per-target iteration / load would push the wrong number into
-# the damage roll. Reads pod_combat_actor_prowess (from the preceding
-# actor load) and pod_combat_target_prowess, then layers active hit tiers.
+# the damage roll. Reads pod_combat_actor_prowess (live-stashed by the
+# preceding actor load) and pod_combat_target_prowess, then layers active hit
+# tiers - so a combatant worn down by wounds loses accuracy as the fight runs.
 pod_combat_load_target_from_story_effect = {
 	pod_combat_load_side_from_story_helper = { SIDE = target }
 	if = {
@@ -336,11 +347,8 @@ pod_combat_save_side_to_story_helper = {
 			limit = { pod_combat_slot_should_be_marked_ko_trigger = yes }
 			pod_combat_mark_slot_ko_effect = yes
 		}
-		set_variable = { name = slot_soak           value = scope:host.var:pod_combat_$SIDE$_soak }
-		set_variable = { name = slot_base_soak      value = scope:host.var:pod_combat_$SIDE$_base_soak }
 		if = { limit = { scope:host = { has_variable = pod_combat_$SIDE$_base_hit_chance } } set_variable = { name = slot_base_hit_chance value = scope:host.var:pod_combat_$SIDE$_base_hit_chance } }
 		# slot_morale is written at the top of this block (before the KO check).
-		set_variable = { name = slot_prowess        value = scope:host.var:pod_combat_$SIDE$_prowess }
 		set_variable = { name = slot_hit_chance     value = scope:host.var:pod_combat_$SIDE$_hit_chance }
 		if = {
 			limit = { scope:host = { has_variable = pod_combat_$SIDE$_energy_used } }
@@ -407,28 +415,9 @@ pod_combat_save_side_to_story_helper = {
 			set_variable    = { name = slot_retaliate_miss_morale value = yes }
 		}
 		else = { remove_variable = slot_retaliate_miss_morale }
-		# Tier tracking vars (8 total: soak/hit x buff/debuff x round/combat).
-		# Presence on workspace = active tier on slot; absence-as-signal preserved.
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_buff_round_tier } }
-			set_variable    = { name = slot_soak_buff_round_tier    value = scope:host.var:pod_combat_$SIDE$_soak_buff_round_tier }
-		}
-		else = { remove_variable = slot_soak_buff_round_tier    }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_buff_combat_tier } }
-			set_variable    = { name = slot_soak_buff_combat_tier   value = scope:host.var:pod_combat_$SIDE$_soak_buff_combat_tier }
-		}
-		else = { remove_variable = slot_soak_buff_combat_tier   }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_debuff_round_tier } }
-			set_variable    = { name = slot_soak_debuff_round_tier  value = scope:host.var:pod_combat_$SIDE$_soak_debuff_round_tier }
-		}
-		else = { remove_variable = slot_soak_debuff_round_tier  }
-		if = {
-			limit = { scope:host = { has_variable = pod_combat_$SIDE$_soak_debuff_combat_tier } }
-			set_variable    = { name = slot_soak_debuff_combat_tier value = scope:host.var:pod_combat_$SIDE$_soak_debuff_combat_tier }
-		}
-		else = { remove_variable = slot_soak_debuff_combat_tier }
+		# Hit tier tracking vars (buff/debuff x round/combat). Presence on
+		# workspace = active tier on slot; absence-as-signal preserved. Soak
+		# tiers are not mirrored: they live on the combatant.
 		if = {
 			limit = { scope:host = { has_variable = pod_combat_$SIDE$_hit_buff_round_tier } }
 			set_variable    = { name = slot_hit_buff_round_tier     value = scope:host.var:pod_combat_$SIDE$_hit_buff_round_tier }
@@ -814,27 +803,24 @@ pod_combat_init_slot_from_character_effect = {
 		POD_enemy_knight_set_discipline_battle_effect = { CASTER = $ENEMY_LEADER$ }
 		POD_ally_knight_set_discipline_battle_effect = { CASTER = $CHARACTER$ }
 		force_character_skill_recalculation = yes
+		# Clear any soak tier left over from an earlier fight. The combat-end
+		# clear cannot reach a combatant who died during that fight, so this is
+		# what stops a resurrected character starting a new fight still buffed.
+		# Safe here: entering a fight proves the character is alive.
+		remove_variable = pod_combat_tier_soak_buff_round
+		remove_variable = pod_combat_tier_soak_buff_combat
+		remove_variable = pod_combat_tier_soak_debuff_round
+		remove_variable = pod_combat_tier_soak_debuff_combat
 	}
-	# Snapshot soak / prowess as saved scopes so the set_slot_var calls below
-	# pass them as VALUE without re-resolving against slot-story scope. HP is
-	# not snapshotted (SVs read live from PoD wound vars at render time).
-	$CHARACTER$ = {
-		save_scope_value_as = {
-			name = slot_soak
-			value = POD_soak_chance
-		}
-		save_scope_value_as = {
-			name = slot_prowess
-			value = prowess
-		}
-	}
-
-	pod_combat_set_slot_var_effect = { NAME = soak      VALUE = scope:slot_soak }
-	pod_combat_set_slot_var_effect = { NAME = base_soak VALUE = scope:slot_soak }
+	# Soak and prowess are NOT snapshotted here: both are read live off
+	# var:slot_char wherever they are needed, like HP. The discipline buffs above
+	# are character modifiers held to duel end, so a live read still includes
+	# them, and a live read additionally tracks the wound penalties a combatant
+	# picks up during the fight.
+	#
 	# Shared starting-morale SV (cap or tuned override, + the designer hook,
 	# floor 1) - same source as the slot constructor, so the hook survives init.
 	pod_combat_set_slot_var_effect = { NAME = morale    VALUE = pod_combat_starting_morale_value }
-	pod_combat_set_slot_var_effect = { NAME = prowess   VALUE = scope:slot_prowess }
 	pod_combat_set_slot_alive_effect = { VALUE = 1 }
 	# AI energy-use counter: the AI move picker layers stacking weight penalties
 	# on it to bias away from energy spends as the pool depletes (see
@@ -1295,46 +1281,58 @@ POD_combat_finalize_duel_effect = {
 # pod_combat_calculate_all_hit_chances_effect loop).
 pod_combat_calc_one_hit_chance_effect = {
 	# $OPP_PROWESS$ = the opposing team leader's prowess (a value the caller
-	#   snapshotted in host scope). Base hit = pod_combat_hit_chance_base +
+	#   captured in host scope). Base hit = pod_combat_hit_chance_base +
 	#   (own prowess - opposing leader prowess) / 2, clamped 20-95, then the
 	#   live hit_chance is rebuilt from base + active tiers.
-	save_scope_value_as = {
-		name = base_hit
-		value = {
-			value = pod_combat_hit_chance_base
-			add = {
-				value = var:slot_prowess
-				subtract = $OPP_PROWESS$
-				divide = 2
-			}
-			min = 20
-			max = 95
+	if = {
+		limit = { has_variable = slot_char exists = var:slot_char }
+		var:slot_char = {
+			save_scope_value_as = { name = own_prowess value = prowess }
 		}
+		save_scope_value_as = {
+			name = base_hit
+			value = {
+				value = pod_combat_hit_chance_base
+				add = {
+					value = scope:own_prowess
+					subtract = $OPP_PROWESS$
+					divide = 2
+				}
+				min = 20
+				max = 95
+			}
+		}
+		pod_combat_set_slot_var_effect = { NAME = base_hit_chance VALUE = scope:base_hit }
+		pod_combat_recalc_slot_hit_effect = yes
 	}
-	pod_combat_set_slot_var_effect = { NAME = base_hit_chance VALUE = scope:base_hit }
-	pod_combat_recalc_slot_stats_effect = yes
 }
 
 pod_combat_calculate_all_hit_chances_effect = {
 	# Compute every slot's base hit chance by iterating pod_combat_active_slots.
 	# base = pod_combat_hit_chance_base + (own prowess - opposing leader
 	# prowess) / 2, clamped 20-95. Player-team slots measure against the enemy
-	# leader; enemy-team slots against the PC. recalc_slot_stats then rebuilds
-	# live hit_chance + soak from base + active tiers (so tier debuffs survive
+	# leader; enemy-team slots against the PC. recalc_slot_hit then rebuilds
+	# live hit_chance from base + active tiers (so tier debuffs survive
 	# the round-end reset).
 	#
-	# Snapshot each leader's prowess in host scope first so the per-slot SV reads
-	# a saved value, not the host pointer chain from slot scope.
+	# Capture each leader's live prowess in host scope first so the per-slot
+	# calc reads a saved value, not the host pointer chain from slot scope.
 	#
-	# Guarded on both leaders existing: during the tooltip preview no slot
-	# stories exist, so the chained .var:slot_prowess reads would warn.
+	# Guarded on both leaders and their characters existing: during the tooltip
+	# preview no slot stories exist, so the chained reads would warn.
 	if = {
 		limit = {
 			has_variable = pod_combat_enemy_leader_slot
 			has_variable = pod_combat_pc_slot
+			var:pod_combat_enemy_leader_slot = { has_variable = slot_char }
+			var:pod_combat_pc_slot = { has_variable = slot_char }
 		}
-		save_scope_value_as = { name = enemy_leader_prowess value = var:pod_combat_enemy_leader_slot.var:slot_prowess }
-		save_scope_value_as = { name = pc_prowess           value = var:pod_combat_pc_slot.var:slot_prowess }
+		var:pod_combat_enemy_leader_slot.var:slot_char = {
+			save_scope_value_as = { name = enemy_leader_prowess value = prowess }
+		}
+		var:pod_combat_pc_slot.var:slot_char = {
+			save_scope_value_as = { name = pc_prowess value = prowess }
+		}
 		every_in_list = {
 			variable = pod_combat_active_slots
 			if = {
@@ -1379,13 +1377,15 @@ pod_combat_recalc_pc_hit_chance_effect = {
 			}
 		}
 		set_variable = { name = pod_combat_actor_base_hit_chance value = scope:pc_recalc_base_hit }
-		# Stash the target's prowess (display-only host var) so the PC hit-chance
+		# Stash both sides' prowess (display-only host vars) so the PC hit-chance
 		# breakdown tooltip can show the matchup without re-reading the transient
-		# workspace; refreshed here on every target swap / PC turn setup.
+		# workspace; refreshed here on every target swap / PC turn setup, so they
+		# report the same live values the base hit above was built from.
+		set_variable = { name = pod_combat_pc_hit_own_prowess    value = var:pod_combat_actor_prowess }
 		set_variable = { name = pod_combat_pc_hit_target_prowess value = var:pod_combat_target_prowess }
 		var:pod_combat_pc_slot = { pod_combat_set_slot_var_effect = { NAME = base_hit_chance VALUE = scope:pc_recalc_base_hit } }
 		pod_combat_recalc_hit_actor_effect = yes
-		var:pod_combat_pc_slot = { pod_combat_recalc_slot_stats_effect = yes }
+		var:pod_combat_pc_slot = { pod_combat_recalc_slot_hit_effect = yes }
 	}
 }
 
@@ -1486,6 +1486,7 @@ pod_combat_group_cleanup_effect = {
 	remove_variable = pod_combat_pc_target_team
 	remove_variable = pod_combat_pc_target_position
 	remove_variable = pod_combat_pc_target_char
+	remove_variable = pod_combat_pc_hit_own_prowess
 	remove_variable = pod_combat_pc_hit_target_prowess
 	remove_variable = pod_combat_best_init
 	remove_variable = pod_combat_best_found
@@ -2020,7 +2021,8 @@ pod_combat_ai_select_target_core_effect = {
 					has_variable = pod_combat_ai_target_pref
 					var:pod_combat_ai_target_pref = flag:threat
 				}
-				var:slot_prowess >= pod_combat_ai_target_pref_threat_threshold
+				exists = var:slot_char
+				var:slot_char.pod_combat_char_prowess_value >= pod_combat_ai_target_pref_threat_threshold
 			}
 		}
 		save_scope_as = chosen_target

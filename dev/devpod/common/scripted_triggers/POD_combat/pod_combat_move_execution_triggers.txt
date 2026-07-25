@@ -173,8 +173,8 @@ pod_combat_move_dynamic_gates_trigger = {
 						pod_combat_is_player_turn_trigger = yes
 						$STORY$ = { var:targeting = flag:single_ally }
 					}
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_combat_tier }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_round_tier }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_combat_tier }
 				}
@@ -182,8 +182,8 @@ pod_combat_move_dynamic_gates_trigger = {
 					limit = {
 						$STORY$ = { NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally } }
 					}
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_round_tier }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_combat_tier }
 				}
@@ -191,8 +191,8 @@ pod_combat_move_dynamic_gates_trigger = {
 				# debuff must not be rejected because that one target already has the tier.
 				trigger_if = {
 					limit = { $STORY$ = { NOT = { var:targeting = flag:team_enemy } } }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_combat_tier }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
+					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_round_tier }
 					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_combat_tier }
 				}
@@ -504,6 +504,34 @@ pod_combat_tier_upgrade_only_trigger = {
 			has_variable = pod_combat_$SIDE$_$TIER_VAR$
 		}
 		var:pod_combat_$SIDE$_$TIER_VAR$ < $STORY$.var:$TIER_VAR$
+	}
+}
+
+# Soak twin of the guard above. Soak tiers are not mirrored onto the workspace -
+# they live on the combatant as $BRIDGE_VAR$, which is the same store
+# POD_soak_chance rolls from - so the comparison reads through the side's
+# character pointer. An unset bridge var means tier 0, i.e. any tier is an
+# upgrade, matching the workspace twin's absent-var behaviour.
+# $BRIDGE_VAR$ = pod_combat_tier_soak_{buff,debuff}_{round,combat}.
+pod_combat_soak_tier_upgrade_only_trigger = {
+	trigger_if = {
+		limit = {
+			$STORY$ = { has_variable = $TIER_VAR$ }
+			has_variable = pod_combat_$SIDE$_char
+			exists = var:pod_combat_$SIDE$_char
+		}
+		# Nested, not a fourth clause in the limit above: CK3 does not
+		# short-circuit a limit, so a bridge-var read placed there would
+		# evaluate even when the char pointer is unset. This trigger sits on
+		# the PC move bar's per-frame is_valid, including the between-rounds
+		# window where the workspace pointers are cleared.
+		var:pod_combat_$SIDE$_char = {
+			trigger_if = {
+				limit = { has_variable = $BRIDGE_VAR$ }
+				var:$BRIDGE_VAR$ < $STORY$.var:$TIER_VAR$
+			}
+			trigger_else = { always = yes }
+		}
 	}
 }
 
@@ -880,9 +908,40 @@ pod_combat_slot_tier_rider_upgrades_trigger = {
 	trigger_else = { always = yes }
 }
 
+# Soak twin of the rider guard above, reading the occupant's soak tier bridge
+# var instead of a slot var (see pod_combat_soak_tier_upgrade_only_trigger).
+# A slot whose character is gone cannot benefit, so it reads as no upgrade.
+pod_combat_slot_soak_tier_rider_upgrades_trigger = {
+	$STORY$ = { has_variable = $TIER_VAR$ }
+	trigger_if = {
+		limit = { exists = var:slot_char }
+		# Nested for the same reason as the upgrade-only twin above.
+		var:slot_char = {
+			trigger_if = {
+				limit = { has_variable = $BRIDGE_VAR$ }
+				var:$BRIDGE_VAR$ < $STORY$.var:$TIER_VAR$
+			}
+			trigger_else = { always = yes }
+		}
+	}
+	# A slot whose occupant is gone cannot benefit.
+	trigger_else = { always = no }
+}
+
 # Admit a pure-utility team move if ANY affected living slot benefits, instead of
 # rejecting it off the one selected slot's state. save_temporary_scope_as gives
 # the AoE filters the host they read; fail OPEN between rounds (actor team unset).
+#
+# PERF, KNOWN AND ACCEPTED (decided 2026-07-24, B2b): this walks the roster, and on
+# the AI path it does so per candidate. It was NOT converted to a per-action cache
+# like the P01 tier check was, because unlike that one this trigger is reached from
+# the SHARED pod_combat_move_dynamic_gates_trigger - the player's move buttons
+# evaluate it per frame via is_valid, outside any AI action, so an AI-scoped cache
+# cannot serve it. Caching only the AI side would leave two copies of a correctness
+# gate free to drift, which is how two defects in this system already happened.
+# REOPEN THIS if a timed 20v20 End-Turn measurement shows the selector is actually
+# slow: all 77 AI turns in the first traced session finished inside one debug.log
+# second, so there is currently no evidence to justify the risk.
 pod_combat_team_utility_move_admissible_trigger = {
 	save_temporary_scope_as = host
 	trigger_if = {
@@ -897,8 +956,8 @@ pod_combat_team_utility_move_admissible_trigger = {
 			pod_combat_aoe_team_ally_filter_trigger = yes
 			OR = {
 				pod_combat_slot_stance_rider_useful_trigger = { STORY = $STORY$ }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_round_tier }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_combat_tier }
+				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
 				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_round_tier }
 				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_combat_tier }
 			}
@@ -911,8 +970,8 @@ pod_combat_team_utility_move_admissible_trigger = {
 			pod_combat_slot_is_alive_trigger = yes
 			pod_combat_aoe_team_enemy_filter_trigger = yes
 			OR = {
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier }
+				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
+				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
 				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_round_tier }
 				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_combat_tier }
 			}
@@ -996,6 +1055,7 @@ pod_combat_log_seg_burst_gate_trigger = {
 # still applies when it is actually scored, so at worst the smaller buff keeps a
 # slightly lower weight (never unpickable - the weight floors at @ai_weight_floor).
 pod_combat_ai_has_affordable_larger_buff_tier_trigger = {
+	# O(1) read of the per-action cache folded by
 	# pod_combat_ai_precompute_max_tiers_effect: the largest tier of $STAT_VAR$ the
 	# actor can afford right now. `exists a strictly-larger affordable tier` is
 	# exactly `max_affordable > candidate`, so this is equivalent to the loadout
