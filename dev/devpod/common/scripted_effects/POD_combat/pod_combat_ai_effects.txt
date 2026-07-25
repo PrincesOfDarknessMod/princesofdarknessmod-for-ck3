@@ -182,6 +182,15 @@
 # centred on 2 penalised 52% of all HP heals and tilted the AI off healing.
 @ai_payload_large       = 8    # damage/morale payload at the top of the range
 @ai_payload_high        = 4    # one step below the top
+@ai_restore_large       = 6    # heal / morale-heal at the top of its range
+# AP economy. A TIE-BREAKER, not a driver: spending big on the right move often
+# beats two mediocre ones, so this only nudges between comparable options.
+# MUST STAY BELOW 4, the step size of the B4 payload ladder (@ai_payload_high 4,
+# @ai_payload_large 8). At -5 it exceeded a full damage step and inverted the
+# ordering: a 5 AP / 4 damage move scored 8-5 = +3 while a 6 AP / 3 damage move
+# scored +4, so the AI preferred MORE AP spent for LESS damage - and the AP it
+# 'saved' bought nothing anyway, which is what the penalty itself asserts.
+@ai_ap_stranded         = -3   # this move would leave AP too small to buy anything
 @ai_stance_autowhiff       = -25 # stance-checked attack vs a stance it cannot bypass (guaranteed miss)
 
 # Personality/primitive thresholds.
@@ -861,6 +870,53 @@ pod_combat_ai_fold_max_tier_effect = {
 	}
 }
 
+# Folds the CHEAPEST affordable move in the loadout. Paired with the max-tier fold
+# below so both ride the same walk - no extra scan.
+pod_combat_ai_fold_min_ap_cost_effect = {
+	# this = a loadout move the caller already proved affordable.
+	#
+	# ZERO-COST MOVES ARE EXCLUDED, and that is load-bearing. Folding one drives the
+	# minimum to 0, which makes the strand floor equal current AP and turns the two
+	# compares in the modifier (`cost < ap` AND `cost > floor`) mutually exclusive -
+	# the penalty then cannot fire AT ALL for that actor, for the whole fight. All 21
+	# zero-cost moves are splat accelerators (werewolf / demon / kuei-jin / hunter /
+	# psychic / sorcerer / Celerity), so this would have silently disabled the feature
+	# for those splats and left it live for everyone else. It is also wrong on its own
+	# terms: a move costing 0 does not consume the remainder, so it can never redeem
+	# stranded AP. The exclusion lives HERE and not in the shared walk limit, because
+	# that walk also feeds the tier folds and 0-cost moves do carry real tier buffs.
+	# USABILITY, not just affordability. Measured: with an AP-only filter, 81% of
+	# turns that ended holding 2+ AP had a floor claiming that AP was spendable
+	# while the pool was empty - always the same shape, min_cost 2 against 2 AP
+	# left. A 2-cost move was AP-affordable but blocked on energy or once_per, so
+	# the floor sat too low and the penalty never fired on the turns that really
+	# strand. The gate below is the same one the roll applies, which makes the
+	# minimum exact: any move buyable at the REMAINDER must also be buyable now
+	# (it costs no more and the other gates are unchanged), so it is already in
+	# this set. Cost is one trigger call per loadout entry per action - far below
+	# the 8*M^2 per-candidate rescan the P01 cache removed from this same walk.
+	if = {
+		limit = {
+			has_variable = ap_cost
+			var:ap_cost > 0
+			save_temporary_scope_as = min_cost_candidate
+			$HOST$ = {
+				pod_combat_move_is_usable_now_trigger = {
+					STORY = scope:min_cost_candidate
+					ACTOR = scope:ai_actor
+				}
+			}
+		}
+		save_scope_value_as = { name = m_cost value = var:ap_cost }
+		$HOST$ = {
+			if = {
+				limit = { var:pod_combat_ai_min_ap_cost > scope:m_cost }
+				set_variable = { name = pod_combat_ai_min_ap_cost value = scope:m_cost }
+			}
+		}
+	}
+}
+
 pod_combat_ai_precompute_max_tiers_effect = {
 	# Seed 0 = 'no affordable tier of this stat'. Safe because a tier is always 1-3
 	# BY CONSTRUCTION: the generator parses tiers from `<stat>_<dir>_<size>_<dur>`
@@ -877,6 +933,12 @@ pod_combat_ai_precompute_max_tiers_effect = {
 		set_variable = { name = pod_combat_ai_maxtier_hit_buff_combat_tier value = 0 }
 		set_variable = { name = pod_combat_ai_maxtier_hit_debuff_round_tier value = 0 }
 		set_variable = { name = pod_combat_ai_maxtier_hit_debuff_combat_tier value = 0 }
+		# A MIN fold cannot seed 0 the way the MAX folds do - it would never be beaten.
+		# Seed above the catalogue ceiling (costs run 0-6) so the first affordable move
+		# always wins. If NOTHING is affordable the seed survives, which drives the
+		# strand floor far negative and simply never fires - correct, since a pass with
+		# no affordable move has no candidates to penalise anyway.
+		set_variable = { name = pod_combat_ai_min_ap_cost value = 99 }
 	}
 	every_in_list = {
 		variable = pod_combat_loadout
@@ -888,6 +950,7 @@ pod_combat_ai_precompute_max_tiers_effect = {
 				scope:combat_host.var:pod_combat_current_ap >= var:ap_cost
 			}
 		}
+		pod_combat_ai_fold_min_ap_cost_effect = { HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_round_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_combat_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_debuff_round_tier  HOST = scope:combat_host }
@@ -896,6 +959,17 @@ pod_combat_ai_precompute_max_tiers_effect = {
 		pod_combat_ai_fold_max_tier_effect = { STEM = hit_buff_combat_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = hit_debuff_round_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = hit_debuff_combat_tier  HOST = scope:combat_host }
+	}
+	# Strand floor = current AP minus the cheapest USABLE move (the fold applies the
+	# same gate the roll does, so this is exact rather than a lower bound). Precomputing the
+	# SUBTRACTION here is what keeps the weight modifier arithmetic-free: the test
+	# `0 < ap - cost < min_cost` rearranges to `cost < ap` AND `cost > ap - min_cost`,
+	# both plain compares of a candidate var against a host var. A weight `add` cannot
+	# take a named script_value and the candidate cannot be reached from inside a host
+	# scope switch, so any design needing per-candidate math would not have worked.
+	scope:combat_host = {
+		set_variable = { name = pod_combat_ai_ap_strand_floor value = var:pod_combat_current_ap }
+		change_variable = { name = pod_combat_ai_ap_strand_floor subtract = var:pod_combat_ai_min_ap_cost }
 	}
 }
 
@@ -922,6 +996,23 @@ pod_combat_ai_trace_pick_effect = {
 # AI-only gates cull further), so a cheaper count would report a number the
 # selector never saw. Must run AFTER the per-action precompute, whose host vars
 # the B03 exclusion gates read, or the count and the roll disagree.
+# Trace helper: folds the largest hp_damage in the eligible pool. Its own scope
+# switch means it is safe to call from an every_in_list body (an INLINE switch
+# there corrupts the iteration scope; an effect call does not).
+pod_combat_ai_trace_fold_max_dmg_effect = {
+	# this = an eligible loadout move; $HOST$ = combat host.
+	if = {
+		limit = { has_variable = hp_damage }
+		save_scope_value_as = { name = trace_dmg value = var:hp_damage }
+		$HOST$ = {
+			if = {
+				limit = { var:pod_combat_ai_trace_max_dmg < scope:trace_dmg }
+				set_variable = { name = pod_combat_ai_trace_max_dmg value = scope:trace_dmg }
+			}
+		}
+	}
+}
+
 pod_combat_ai_trace_count_eligible_effect = {
 	if = {
 		limit = { exists = global_var:pod_combat_tune_ai_trace }
@@ -931,7 +1022,14 @@ pod_combat_ai_trace_count_eligible_effect = {
 		# while the increment below wrote the host, which errored per candidate and
 		# left the logged count permanently 0. The every_in_list must STAY in actor
 		# scope - pod_combat_loadout is the actor's list.
-		scope:combat_host = { set_variable = { name = pod_combat_ai_trace_eligible value = 0 } }
+		scope:combat_host = {
+			set_variable = { name = pod_combat_ai_trace_eligible value = 0 }
+			# Biggest hp_damage the pool offers, so a pick can be read as a CHOICE
+			# rather than just an outcome: move=2 next to max_dmg=4 says the AI passed
+			# on the bigger hit. Same caveat as the count - this pool is the usable-now
+			# gate, slightly wider than the roll's (the AI-only gates cull further).
+			set_variable = { name = pod_combat_ai_trace_max_dmg value = 0 }
+		}
 		every_in_list = {
 			variable = pod_combat_loadout
 			limit = {
@@ -943,6 +1041,7 @@ pod_combat_ai_trace_count_eligible_effect = {
 					}
 				}
 			}
+			pod_combat_ai_trace_fold_max_dmg_effect = { HOST = scope:combat_host }
 			scope:combat_host = { change_variable = { name = pod_combat_ai_trace_eligible add = 1 } }
 		}
 	}
@@ -979,6 +1078,7 @@ pod_combat_ai_trace_turn_effect = {
 		remove_variable = pod_combat_ai_trace_actions
 		remove_variable = pod_combat_ai_trace_stop
 		remove_variable = pod_combat_ai_trace_eligible
+		remove_variable = pod_combat_ai_trace_max_dmg
 		remove_variable = pod_combat_ai_trace_move
 	}
 }
@@ -1738,6 +1838,29 @@ pod_combat_ai_select_and_execute_move_effect = {
 							}
 							trigger_else = { always = no }
 						}
+					}
+
+					# ===== AP economy =====
+					# Penalise a move that would leave a remainder too small to buy anything: 6 AP
+					# spent as 3+3 is two actions, spent as 4 it is one action plus 2 wasted. The
+					# trace measured ~20% of AI turns ending with 2+ AP and an empty pool.
+					# Both compares are candidate-var vs host-var (see the floor derivation in
+					# pod_combat_ai_precompute_max_tiers_effect for why no arithmetic appears here).
+					# ap_gain moves are excluded because they REFUND AP: the true remainder is
+					# ap - cost + gain, so the two compares below would over-state the strand. 21 of
+					# the 22 cost 0 AP and are already excluded by the ap_cost > 0 clause, but
+					# time_out_of_time is COSTED (minor) and grants 1, so this guard is what keeps
+					# the arithmetic exact rather than merely redundant.
+					modifier = {
+						add = @ai_ap_stranded
+						# A move that spends no AP cannot strand any. Explicit rather than relying on
+						# the ap_gain exclusion below: that only covers 0-cost moves because every
+						# 0-cost move in the CURRENT catalogue happens to grant AP, which the generator
+						# does not enforce in either direction.
+						var:ap_cost > 0
+						NOT = { has_variable = ap_gain }
+						var:ap_cost < scope:combat_host.var:pod_combat_current_ap
+						var:ap_cost > scope:combat_host.var:pod_combat_ai_ap_strand_floor
 					}
 
 					# ===== B4 payload magnitude =====
