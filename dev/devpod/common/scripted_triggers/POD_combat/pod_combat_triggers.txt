@@ -89,10 +89,27 @@ pod_combat_ai_turn_not_controlled_trigger = {
 }
 
 # The loaded target is an AI (players are immune to mind control and never
-# waste-gate). Host scope; guarded for the no-target-loaded case.
+# waste-gate). Host scope. The presence check must GATE the deref from a
+# trigger_if limit: as a plain sibling it still returns the right boolean, but
+# the deref evaluates anyway (no short-circuit) and errors with no target loaded.
 pod_combat_ai_target_is_ai_trigger = {
-	has_variable = pod_combat_target_char
-	var:pod_combat_target_char = { is_ai = yes }
+	trigger_if = {
+		limit = { has_variable = pod_combat_target_char }
+		var:pod_combat_target_char = { is_ai = yes }
+	}
+	trigger_else = { always = no }
+}
+
+# True for a candidate whose effect reaches the loaded workspace target:
+# single_enemy always, and team_enemy (the selected slot is a guaranteed member
+# of the burst, so its loaded state is a valid weight proxy). Lets the
+# target-aware offensive weights credit AoE the same as a single-target hit.
+# Evaluated in the candidate-move scope, where var:targeting resolves.
+pod_combat_ai_candidate_targets_enemy_trigger = {
+	OR = {
+		var:targeting = flag:single_enemy
+		var:targeting = flag:team_enemy
+	}
 }
 
 ###### TEAM-ALIVE TRIGGERS ######
@@ -115,33 +132,10 @@ pod_combat_ai_has_available_ally_trigger = {
 	}
 }
 
-pod_combat_ai_has_ally_needing_heal_trigger = {
-	# $STORY$ = a single_ally heal move. True if some alive non-self ally would actually benefit (below full HP /
-	# below morale cap), so the AI doesn't pick an ally-heal nobody needs - actor self-state is irrelevant here.
-	# scope:host capture mirrors pod_combat_ai_has_available_ally_trigger above.
-	save_temporary_scope_as = host
-	any_in_list = {
-		variable = pod_combat_active_slots
-		pod_combat_slot_is_alive_trigger = yes
-		NOT = {
-			AND = {
-				var:combat_team = scope:host.var:pod_combat_current_actor_team
-				var:team_position = scope:host.var:pod_combat_current_actor_position
-			}
-		}
-		var:combat_team = scope:host.var:pod_combat_current_actor_team
-		# Heal-type-aware -
-		# unify with the team_ally gate (pod_combat_ai_has_team_member_needing_heal_trigger)
-		# so a SUPERFICIAL single_ally heal isn't admitted toward an
-		# aggravated-only-wounded ally, where it would heal 0 boxes.
-		pod_combat_slot_heal_is_useful_trigger = { SLOT = this STORY = $STORY$ }
-	}
-}
-
 pod_combat_ai_has_team_member_needing_heal_trigger = {
 	# $STORY$ = a team_ally heal move. True if any alive same-team slot INCLUDING
 	# THE ACTOR would actually benefit. Distinct from
-	# pod_combat_ai_has_ally_needing_heal_trigger (which EXCLUDES the actor's own
+	# pod_combat_ai_has_ally_benefiting_trigger (which EXCLUDES the actor's own
 	# slot, fine for single_ally, wrong for team_ally): a team heal still helps
 	# the team when only the actor is wounded, so a team heal useful only because
 	# the actor is hurt must be kept. Reuses pod_combat_slot_heal_is_useful_trigger
@@ -159,30 +153,17 @@ pod_combat_ai_has_team_member_needing_heal_trigger = {
 # Heal-type-aware "can this move's heal actually help THIS slot's character".
 # $SLOT$ = a POD_combat_slot story scope; $STORY$ = the move story. Shared by the
 # runtime team-ally admit (pod_combat_apply_team_ally_hp_heal_effect), both AI
-# heal keeps (pod_combat_ai_has_ally_needing_heal_trigger /
+# heal keeps (pod_combat_ai_has_ally_benefiting_trigger /
 # pod_combat_ai_has_team_member_needing_heal_trigger), and the AI ally-swap
 # (pod_combat_ai_swap_to_ally_target_effect), so all stay in lockstep. OR
 # across the move's heal kinds (a move may carry both hp_heal and morale_heal).
 # heal_type is always set when hp_heal is (the generator emits TYPE on every
-# hp_heal), so the var:heal_type reads inside the hp_heal branch never hit an
-# unset var.
+# hp_heal), but a non-heal move reaching this trigger (the C04 benefit check
+# calls it on stance/tier-only moves) has neither, so the var:heal_type reads
+# are gated in the HP helper below.
 pod_combat_slot_heal_is_useful_trigger = {
 	OR = {
-		# HP heal. Aggravated spills into superficial, so any wound qualifies;
-		# superficial only clears superficial boxes, so it needs one present.
-		AND = {
-			$STORY$ = { has_variable = hp_heal }
-			OR = {
-				AND = {
-					$STORY$ = { var:heal_type = flag:aggravated }
-					$SLOT$ = { var:slot_char = { POD_empty_damage_boxes < POD_health_track_length } }
-				}
-				AND = {
-					$STORY$ = { NOT = { var:heal_type = flag:aggravated } }
-					$SLOT$ = { var:slot_char = { POD_superficial_damage_boxes > 0 } }
-				}
-			}
-		}
+		pod_combat_slot_hp_heal_is_useful_trigger = { SLOT = $SLOT$ STORY = $STORY$ }
 		# Morale heal, useful below the morale cap.
 		AND = {
 			$STORY$ = { has_variable = morale_heal }
@@ -191,11 +172,99 @@ pod_combat_slot_heal_is_useful_trigger = {
 	}
 }
 
+# Split out so the trigger_if / trigger_else pair sits at the top level of its
+# own trigger: trigger_else must FOLLOW its trigger_if as a sibling (nesting it
+# inside the trigger_if body is a load error), and a bare trigger_if inside an
+# OR has ambiguous skip semantics. The limit gates both var:heal_type reads - a
+# same-block has_variable does not stop them (CK3 has no short-circuit).
+pod_combat_slot_hp_heal_is_useful_trigger = {
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = hp_heal  has_variable = heal_type } }
+		OR = {
+			# Aggravated spills into superficial, so any wound qualifies.
+			AND = {
+				$STORY$ = { var:heal_type = flag:aggravated }
+				$SLOT$ = { var:slot_char = { POD_empty_damage_boxes < POD_health_track_length } }
+			}
+			# Superficial only clears superficial boxes, so it needs one present.
+			AND = {
+				$STORY$ = { NOT = { var:heal_type = flag:aggravated } }
+				$SLOT$ = { var:slot_char = { POD_superficial_damage_boxes > 0 } }
+			}
+		}
+	}
+	trigger_else = { always = no }
+}
+
+# C04 precision: does the move do anything useful for this slot - a useful heal,
+# a missing stance, or a tier upgrade. $SLOT$ = a slot story; $STORY$ = the move.
+pod_combat_slot_can_benefit_from_move_trigger = {
+	OR = {
+		pod_combat_slot_heal_is_useful_trigger = { SLOT = $SLOT$ STORY = $STORY$ }
+		$SLOT$ = { pod_combat_slot_stance_rider_useful_trigger = { STORY = $STORY$ } }
+		$SLOT$ = { pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_round_tier } }
+		$SLOT$ = { pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_combat_tier } }
+		$SLOT$ = { pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_round_tier } }
+		$SLOT$ = { pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_combat_tier } }
+	}
+}
+
+# True when the PC slot pointer exists AND still resolves to a seated character.
+# Nested so the slot_char deref only runs once the pointer is known to exist.
+pod_combat_pc_slot_is_loadable_trigger = {
+	trigger_if = {
+		limit = { has_variable = pod_combat_pc_slot }
+		var:pod_combat_pc_slot = { has_variable = slot_char }
+	}
+	trigger_else = { always = no }
+}
+
+# Whitelist of summon recipes pod_combat_apply_summon_recipe_effect can
+# initialise. Consumed by pod_combat_summon_combatant_glue_effect's limit
+# BEFORE create_character, so an unknown recipe never produces an
+# uninitialised shell. Lives here, not beside the effect: CK3 keys the
+# trigger and effect databases off their directories, so a trigger declared
+# in common/scripted_effects/ never resolves. Extend this and the dispatch
+# in pod_combat_summon_effects.txt together.
+pod_combat_summon_recipe_is_known_trigger = {
+	trigger_if = {
+		limit = { $MOVE_STORY$ = { has_variable = summon_recipe } }
+		$MOVE_STORY$ = { var:summon_recipe = flag:wraith }
+	}
+	trigger_else = { always = no }
+}
+
+# AI: is there a same-team ally (non-self) the move would benefit. Clones
+# the single_ally heal keep it replaced, widened to the full benefit predicate.
+pod_combat_ai_has_ally_benefiting_trigger = {
+	# Fail closed in the between-rounds window when the actor pointer is briefly
+	# unset (the combat window still re-evals the PC move bar is_valid then); the
+	# any_in_list body reads scope:host.var:pod_combat_current_actor_team unguarded.
+	trigger_if = {
+		limit = { has_variable = pod_combat_current_actor_team }
+		save_temporary_scope_as = host
+		any_in_list = {
+			variable = pod_combat_active_slots
+			pod_combat_slot_is_alive_trigger = yes
+			NOT = { AND = { var:combat_team = scope:host.var:pod_combat_current_actor_team  var:team_position = scope:host.var:pod_combat_current_actor_position } }
+			var:combat_team = scope:host.var:pod_combat_current_actor_team
+			pod_combat_slot_can_benefit_from_move_trigger = { SLOT = this STORY = $STORY$ }
+		}
+	}
+	trigger_else = { always = no }
+}
+
 pod_combat_slot_should_be_marked_ko_trigger = {
 	# Slot-scoped. Shared KO predicate for all post-action sites.
 	# Reads var:slot_morale, so callers MUST flush post-action morale to the slot field first.
 	# KO sources: death, incapacitation, wound-track-full (non-fatal duels where is_alive stays yes), morale-broken.
 	OR = {
+		# A combatant whose character was removed from the game (a fatal duel whose
+		# unlanded loser CK3 garbage-collects, or a despawned summon) is functionally
+		# KO'd. The three char clauses below silently no-op on the none scope, so
+		# without this the slot stays slot_alive=1 and the AI keeps targeting a none
+		# character (crashes the wound pipeline).
+		NOT = { exists = var:slot_char }
 		var:slot_char = { is_alive = no }
 		var:slot_char = { pod_combat_is_incapacitated_trigger = yes }
 		var:slot_char = { POD_total_damage_boxes >= POD_health_track_length }

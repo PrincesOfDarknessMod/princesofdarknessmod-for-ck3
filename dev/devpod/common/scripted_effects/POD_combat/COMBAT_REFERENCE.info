@@ -422,6 +422,13 @@ discipline is supernatural with `override_checks_spirit_gate = yes`; an
 always-hits physical move is physical with `override_requires_hit_roll =
 no`.)
 
+The generator also stamps the metadata flag `requires_control_contact`
+when a `single_enemy` row has an explicit `attack_type` but zero HP and
+morale damage. That flag does not change the resolver's shape; it tells
+the move engine that the row's non-damage control payload must invoke
+this resolver before being applied. A blank `attack_type` keeps pure
+utility/control guaranteed.
+
 #### Contact resolution
 
 `pod_combat_resolve_contact_effect` walks the tree and writes
@@ -484,7 +491,10 @@ splat-weakness multipliers and aggravated classification:
 | `cold_iron` | `cold_iron` |
 
 An **element** rides its real `death_reason` into PoD core, which
-decides aggravated / superficial / **immune** **per target** .
+decides aggravated / superficial / **immune** **per target** from the
+splat-vulnerability matrix (`POD_damage_type_is_aggravated` +
+`POD_has_immunity_to_damage_type`, rebuilt 2026-07-12 — see
+`docs/DAMAGE_MATRIX_REBUILD_PLAN.md` §2.3 for the authoritative table).
 Immunities, downgrades (e.g. sun-as-superficial), and splat multipliers
 all apply. **`aggravated`** forces `REASON = duel_aggravated` for every
 target. The elemental mapping is identity in nine of ten cases;
@@ -494,7 +504,8 @@ the enum (`pod_combat_triggers.txt`):
 `pod_combat_move_class_is_elemental_trigger` (the ten elements) and
 `pod_combat_class_always_aggravated_trigger` (`aggravated` / `fire` /
 `balefire` — an AI/log heuristic for "aggravated against the typical
-target").
+target"; the authoritative per-victim verdict is the matrix above, not
+this trigger).
 
 The same kind table is mirrored by
 `pod_combat_deal_typed_retal_damage_effect` (typed counters) and
@@ -790,6 +801,8 @@ set up, the PC acts on player input, then AI turns after the PC resolve
 when the PC ends its turn. A 1v1 is just a degenerate NvN (player/0 +
 enemy/0), so there is one code path for every roster.
 
+> **AI selector — 2026-07-23 update.** A large AI pass changed several contracts in this section and below. Current behavior: the AI turn ceiling is the effective AP cap + 2 headroom (not a fixed 6), with a no-pick alternate-target retry and a `pod_combat_ai_turn_stalled` guard; controlled (dominated) turns admit only adverse `single_enemy` moves; initiative debuffs **stack** (accumulate) within a round rather than take-max; the shared redundancy gate rejects a move only when its **entire** payload is a redundant rider (hybrids stay usable), and retaliation arming is take-strongest; a per-action `pod_combat_ai_precompute_action_summary_effect` feeds the selector pending drain/control/DoT/initiative state plus recipient-aware heal urgency. **Refinement pass (2026-07-24):** the redundancy gate is now team/ally-aware (a pure team or `single_ally` utility move is admitted when any eligible slot benefits and disabled with a `pod_combat_move_redundant_tt` tooltip only when every target is already covered); the finish scan also fires on a morale kill (`pod_combat_ai_morale_finish_threshold`, actor must hold a morale-damage move, both capability scans AP-gated) and recomputes per action; a candidate whose entire payload is a non-improving ap-drain / mind-control / DoT is hard-excluded from the roll (hybrids keep the soft penalty, plus `@ai_partial_waste` for an already-active stance/retal rider); both AI tuning knobs (finish threshold, kill-priority boxes) are live in the debug tuning window; and the +12 tempo bonus is re-gated to the <= 3 AP band (B10). Full list: [`docs/COMBAT_AI_BEHAVIOR_REVIEW_AND_IMPLEMENTATION_PLAN_2026-07-23-validated.md`](docs/COMBAT_AI_BEHAVIOR_REVIEW_AND_IMPLEMENTATION_PLAN_2026-07-23-validated.md) ("Implementation status") and the `AI_LOGIC_GUIDE.md` banner.
+
 #### Initiative
 
 `pod_combat_calculate_initiative_effect` rolls `slot_initiative` for
@@ -867,16 +880,17 @@ focus-fire mark, set AP, then run the moves via
 workspace, marks the slot acted (consuming any one-shot control marker),
 and runs the victory check.
 
-`pod_combat_ai_take_turn_effect` is a `while` with `count = 6` and a
-`limit` that stops early when the actor is out of AP, combat ended, a
-controlled turn fizzled, or the actor itself was downed mid-turn
-(retaliation / recoil can KO the attacker between its own actions):
+`pod_combat_ai_take_turn_effect` is a `while` with
+`count = pod_combat_ai_turn_action_cap_value` and a `limit` that stops
+early when the pass stalled, combat ended, a controlled turn fizzled, or
+the actor itself was downed mid-turn (retaliation / recoil can KO the
+attacker between its own actions):
 
 ```
 while = {
-    count = 6
+    count = pod_combat_ai_turn_action_cap_value
     limit = {
-        pod_combat_current_ap_value >= 1
+        NOT = { has_variable = pod_combat_ai_turn_stalled }
         NOT = { pod_combat_is_over_trigger = yes }
         NOT = { has_variable = pod_combat_turn_control_fizzled }
         NOT = { pod_combat_current_actor_is_down_trigger = yes }
@@ -885,13 +899,17 @@ while = {
 }
 ```
 
-`count = 6` is the hard per-turn action ceiling (hang-safe); the `limit`
-is the real stop. A `while` rather than a 6× unroll because
-net-AP-positive moves can refund AP mid-turn, so the action count is not
-fixed. Each `try_action` re-picks the target if the current one died,
-runs one weighted move selection + execute, and saves the workspace per
-action (so the next try sees a KO'd target as dead and the victory check
-trips the remaining tries' is-over gate).
+`count` (the tunable effective AP cap + 2 headroom) is the hard per-turn
+action ceiling (hang-safe); the `limit` is the real stop. A `while`
+rather than a fixed unroll because net-AP-positive moves can refund AP
+mid-turn, so the action count is not fixed. There is deliberately NO
+`pod_combat_current_ap_value >= 1` clause: per-move AP affordability is
+hoisted to the front of `pod_combat_move_is_usable_now_trigger`, so at 0
+AP only the 21 zero-AP moves survive selection, and every one of them is
+`once_per`-gated. That gives the AI the same zero-AP behaviour the PC has
+always had (C02 parity); an out-of-AP actor with nothing left to cast
+picks nothing, which sets `pod_combat_ai_turn_stalled` and ends both this
+loop and `try_action`.
 
 #### STEP vs AUTO
 
@@ -1781,7 +1799,7 @@ Code-side entry points and where they live.
 | File | Purpose |
 |---|---|
 | `pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. Also home to the loadout copy effects and the move-sheet scratch-list machinery (`pod_combat_sheet_rebuild_effect` / `_set_sort_effect` / `_reset_effect`). |
-| `pod_combat_move_list_effects.txt` | The move catalogue: one `POD_init_combat_move` block per move (validator suppressions live in `pod_combat_error_suppression_effects.txt`, not here). |
+| `pod_combat_move_list_effects.txt` | The move catalogue: one `POD_init_combat_move` block per move (validator suppressions live in `pod_combat_error_suppression_effects.txt`, not here). Generated from the CSV by `generate_combat_files.py` (the file header says do not hand-edit). |
 | `pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§17 phase contract above. |
 | `pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
 | `pod_combat_group_effects.txt` | Duel builder (`POD_combat_create_duel_effect` / `_duel_add_ally_effect` / `_duel_add_enemy_effect` / `_finalize_duel_effect` + the `pod_combat_init_all_slots_effect` dispatcher), workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
@@ -1818,7 +1836,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_values.txt` | Constants (`pod_combat_base_ap`, `pod_combat_max_morale`, etc.), slot-state script values (`pod_combat_slot_max_hp_value`, `pod_combat_slot_total_damage_sv`, `pod_combat_slot_morale_pct`, etc.), and category-cap helpers (`pod_combat_atk_count` etc.) for the loadout editor. All consumed by the GUI and combat effects. |
 | `pod_combat_values.txt` (version + caps) | Also holds `POD_current_combat_version` (hand-bumped when the move set changes; the configure-skills decision reloads the catalogue on version mismatch) and the loadout caps. Many constants in this file carry a `global_var:pod_combat_tune_*` override branch for the debug tuning window (`pod_combat_tuning_window.gui` + `pod_combat_tuning_guis.txt` + `pod_combat_tuning_effects.txt`): unset global = the shipped default; the window's Reset All clears every override. |
-| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs and the combat-tier-buff soak bridge. |
+| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs and the combat-tier-buff soak bridge. Five `# POD-Integration addition:` markers. |
 
 ### Decisions
 
@@ -1829,7 +1847,7 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `pod_combat_decisions.txt` | Player-facing decisions (`pod_combat_configure_skills`). |
-| `pod_combat_move_decisions.txt` | One hidden decision per move - holds the card art and the unlock requirement *shown* in the editor, not the gate itself. The actual gate (editor and combat alike) is the `pod_combat_move_unlock_triggers.txt` dispatcher; decisions implicitly require ruler status, which unlanded combatants fail. |
+| `pod_combat_move_decisions.txt` | One hidden decision per move - holds the card art and the unlock requirement *shown* in the editor, not the gate itself. The actual gate (editor and combat alike) is the `pod_combat_move_unlock_triggers.txt` dispatcher; decisions implicitly require ruler status, which unlanded combatants fail. Generated from the CSV by `generate_combat_files.py`. |
 
 ### Character interactions
 
@@ -1864,7 +1882,7 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `gui/POD_combat_static_l_english.yml` | Hand-authored loc — desc keys, log loc, capability callouts, etc. |
-| `gui/POD_combat_l_english.yml` | Three keys per move: `pod_combat_move_<key>` (bare display name), `_desc` (PODCombatMoveDesc stat-card target), `_tooltip` (flavor sentence). |
+| `gui/POD_combat_l_english.yml` | Three keys per move: `pod_combat_move_<key>` (bare display name), `_desc` (PODCombatMoveDesc stat-card target), `_tooltip` (flavor sentence). Generated from the CSV by `generate_combat_files.py`, alongside the hand-authored static loc file. |
 
 ### Customizable localization
 
@@ -1884,6 +1902,25 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `00_POD_game_concepts.txt` (PoD file, delta) | Concept cards for combat stats, stances, and elemental damage flavors are direct additions in PoD's game-concepts file (replaces the old `pod_combat_concepts.txt`). Aggravated / superficial classification links into PoD's `POD_aggravated_damage` / `POD_superficial_damage` concepts instead of redefining them. |
+
+### Move-authoring pipeline
+
+The Python CSV generator is the live build step for the move catalogue:
+it reads `pod_combat_skills_master.csv` (the source of truth for every
+move) and emits the move list, the per-move decisions, the unlock
+dispatcher, and the generated loc - each written with a `do not
+hand-edit` header. The version constant is NOT generated: add or change
+a move by editing the CSV, running `generate_combat_files.py`, and
+hand-bumping `POD_current_combat_version` in `pod_combat_values.txt`,
+per the Skill Authoring Guide. Hand-authoring a move outside the CSV is
+the exception, covered by the Manual Move Authoring Guide.
+
+| File | Purpose |
+|---|---|
+| `scripts/python/POD-Combat/MANUAL_MOVE_AUTHORING_GUIDE.md` | How to hand-author a move outside the CSV - the exception (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`). |
+| `scripts/python/POD-Combat/generate_combat_files.py` | The CSV-to-game-files generator: reads the CSV and emits the move list, per-move decisions, unlock dispatcher, and generated loc (the version constant is hand-bumped in `pod_combat_values.txt`). |
+| `scripts/python/POD-Combat/pod_combat_skills_master.csv` | **Source of truth** for every combat move - the generator's input dataset. |
+| `scripts/python/POD-Combat/SKILL_AUTHORING_GUIDE.md` | **The authoring guide** - CSV column reference (each column maps to the move-story variable it sets) + design guidance. |
 
 ---
 
@@ -2141,8 +2178,11 @@ pod_combat_initiative_modifier_value = {
 
 ### Add a move
 
-Adding a combat move is not covered here. The Manual Move Authoring
-Guide for hand-authoring a move
+Adding a combat move is not covered here. Moves are generated from
+`pod_combat_skills_master.csv` by `generate_combat_files.py` - see the
+Skill Authoring Guide for the CSV columns, or the Manual Move Authoring
+Guide (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`) for hand-authoring
+a move outside the CSV.
 
 ### Cross-file change checklists
 
@@ -2160,7 +2200,11 @@ E.g. acid, void. The single-axis classification (`var:damage_type`, see
 integration, AI weakness selection, tooltip rendering, and the
 combat-log dispatcher.
 
-1. **Enum + moves**: A move calls
+1. **Enum + moves**: add the class to `DAMAGE_ELEMENTS` in
+   `generate_combat_files.py` — the CSV `damage_type` column is
+   enum-validated against it (`sunlight` aliases to `sun`), and the
+   generator skips the emit when no primitive consumes the class (the
+   `dead_class` gap report). A hand-authored move calls
    `POD_combat_move_set_damage_class = { VALUE = X }` — always **after**
    `POD_combat_move_set_hp_damage`, whose default `superficial` stamp
    would clobber an earlier class write.
@@ -2301,6 +2345,15 @@ gate behavior in the contact resolver and related pipelines.
 3. **Error suppression**:
    `pod_combat_suppress_optional_move_var = { VAR = X }` in
    `pod_combat_error_suppression_effects.txt`.
-4. **Authoring**:  Moves call that setter directly.
-   Document the new flag in the Skill Authoring Guide's
+4. **Authoring**: the generator emits `POD_combat_move_set_flag = { NAME
+   = X }` from the flag's CSV column; hand-authored moves call that setter
+   directly. Document the new flag in the Skill Authoring Guide's
    capability/presence-flag table.
+5. **Documentation**: `SKILL_AUTHORING_GUIDE.md` is the CSV-column
+   reference; the Manual Move Authoring Guide covers hand-authoring a
+   move outside the CSV.
+6. **Capability default**: if the flag has an attack-type default,
+   update `CAPABILITY_DEFAULTS` (and the `override_*` handling) in
+   `generate_combat_files.py` — the generator resolves `attack_type`
+   defaults into explicit `POD_combat_move_set_flag` lines at emit
+   time; nothing applies defaults at runtime.

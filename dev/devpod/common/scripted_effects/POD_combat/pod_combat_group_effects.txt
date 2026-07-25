@@ -225,31 +225,37 @@ pod_combat_mark_slot_ko_effect = {
 		# itself a KO source, so the floor both keeps the design rule (an ally
 		# falling demoralizes but never breaks you outright) and guarantees the
 		# shock can never trigger a KO of its own.
-		save_scope_as = ally_down_slot
-		var:slot_char = { save_scope_as = ally_down_char }
-		set_variable = { name = pod_combat_ally_shock_hits value = 0 }
-		# Literal team dispatch: combat_team is a flag var, so the teammate
-		# filter compares literals through the parametric helper instead of
-		# lifting the flag (lifted flags degrade to 'value' type and every
-		# later flag compare silently type-errors).
+		# Char-dependent shock/log: skip when the combatant's character was removed
+		# from the game (fatal-duel cleanup / despawned summon). The slot still flips
+		# KO above; there is just no char to read or name.
 		if = {
-			limit = { var:combat_team = flag:player }
-			pod_combat_ally_down_shock_team_helper = { TEAM = player }
-		}
-		else = {
-			pod_combat_ally_down_shock_team_helper = { TEAM = enemy }
-		}
-		# Lift the hit count into a scope value (numbers survive that fine) and
-		# clear the scratch var BEFORE the host re-entry, keeping this body
-		# "slot-local writes first, scope switches last" like the DoT tick loop.
-		save_scope_value_as = { name = ally_shock_hits value = var:pod_combat_ally_shock_hits }
-		remove_variable = pod_combat_ally_shock_hits
-		# One system row per KO that actually shook somebody. In a 1v1 (or when
-		# every teammate already sits at the floor) nothing happened, so no row.
-		if = {
-			limit = { scope:ally_shock_hits > 0 }
-			scope:host = {
-				pod_combat_push_system_log_named_effect = { MESSAGE_KEY = ally_down_shock CHARACTER = scope:ally_down_char }
+			limit = { exists = var:slot_char }
+			save_scope_as = ally_down_slot
+			var:slot_char = { save_scope_as = ally_down_char }
+			set_variable = { name = pod_combat_ally_shock_hits value = 0 }
+			# Literal team dispatch: combat_team is a flag var, so the teammate
+			# filter compares literals through the parametric helper instead of
+			# lifting the flag (lifted flags degrade to 'value' type and every
+			# later flag compare silently type-errors).
+			if = {
+				limit = { var:combat_team = flag:player }
+				pod_combat_ally_down_shock_team_helper = { TEAM = player }
+			}
+			else = {
+				pod_combat_ally_down_shock_team_helper = { TEAM = enemy }
+			}
+			# Lift the hit count into a scope value (numbers survive that fine) and
+			# clear the scratch var BEFORE the host re-entry, keeping this body
+			# "slot-local writes first, scope switches last" like the DoT tick loop.
+			save_scope_value_as = { name = ally_shock_hits value = var:pod_combat_ally_shock_hits }
+			remove_variable = pod_combat_ally_shock_hits
+			# One system row per KO that actually shook somebody. In a 1v1 (or when
+			# every teammate already sits at the floor) nothing happened, so no row.
+			if = {
+				limit = { scope:ally_shock_hits > 0 }
+				scope:host = {
+					pod_combat_push_system_log_named_effect = { MESSAGE_KEY = ally_down_shock CHARACTER = scope:ally_down_char }
+				}
 			}
 		}
 	}
@@ -1802,20 +1808,78 @@ pod_combat_ai_record_focus_target_effect = {
 	}
 }
 
-# once-per-turn precompute, sets host var pod_combat_ai_enemy_finishable=1 iff any alive enemy of the acting actor is at
+# per-ACTION precompute (called from pod_combat_ai_precompute_action_summary_effect so it refreshes with live AP), sets
+# host var pod_combat_ai_enemy_finishable=1 iff any alive enemy of the acting actor is at
 # <=1 empty box (same finish threshold the move selector's hp-finish tier reads).
 # The heal modifier reads it so a dying actor only tops up when no kill is
 # available. any_in_list (a TRIGGER) not every_in_list-with-inline-write, to keep
 # the iteration scope clean. Host var is safe: consumed within the same turn.
 pod_combat_ai_flag_finishable_enemy_effect = {
+	# Per-ACTION (called from pod_combat_ai_precompute_action_summary_effect): an
+	# enemy the actor can reliably finish THIS action, either HP or morale, gated
+	# on the actor holding an affordable damaging move of the right kind - else a
+	# dying no-damage support keeps its emergency-heal bonus. Side-aware on a
+	# stolen turn. Consumed by the critical-heal modifier's NOR read.
 	save_scope_as = host
 	if = {
 		limit = {
-			any_in_list = {
-				variable = pod_combat_active_slots
-				pod_combat_slot_is_alive_trigger = yes
-				NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
-				var:slot_char.POD_empty_damage_boxes <= pod_combat_ai_hp_finish_threshold
+			OR = {
+				# HP finish: attackable enemy at/below the HP threshold + affordable hp_damage.
+				AND = {
+					any_in_list = {
+						variable = pod_combat_active_slots
+						pod_combat_slot_is_alive_trigger = yes
+						# The set the actor can attack THIS turn: normally the opposing team; on a
+						# controlled (dominated) turn the betrayed own side.
+						trigger_if = {
+							limit = { scope:host = { has_variable = pod_combat_turn_is_controlled } }
+							var:combat_team = scope:host.var:pod_combat_current_actor_team
+							NOT = { var:team_position = scope:host.var:pod_combat_current_actor_position }
+						}
+						trigger_else = {
+							NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
+						}
+						var:slot_char.POD_empty_damage_boxes <= pod_combat_ai_hp_finish_threshold
+					}
+					var:pod_combat_actor_char = {
+						any_in_list = {
+							variable = pod_combat_loadout
+							has_variable = hp_damage
+							trigger_if = {
+								limit = { has_variable = ap_cost }
+								scope:host.var:pod_combat_current_ap >= var:ap_cost
+							}
+						}
+					}
+				}
+				# Morale finish: attackable enemy at/below the morale threshold + affordable morale_damage.
+				AND = {
+					any_in_list = {
+						variable = pod_combat_active_slots
+						pod_combat_slot_is_alive_trigger = yes
+						# The set the actor can attack THIS turn: normally the opposing team; on a
+						# controlled (dominated) turn the betrayed own side.
+						trigger_if = {
+							limit = { scope:host = { has_variable = pod_combat_turn_is_controlled } }
+							var:combat_team = scope:host.var:pod_combat_current_actor_team
+							NOT = { var:team_position = scope:host.var:pod_combat_current_actor_position }
+						}
+						trigger_else = {
+							NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
+						}
+						var:slot_morale <= pod_combat_ai_morale_finish_threshold
+					}
+					var:pod_combat_actor_char = {
+						any_in_list = {
+							variable = pod_combat_loadout
+							has_variable = morale_damage
+							trigger_if = {
+								limit = { has_variable = ap_cost }
+								scope:host.var:pod_combat_current_ap >= var:ap_cost
+							}
+						}
+					}
+				}
 			}
 		}
 		set_variable = { name = pod_combat_ai_enemy_finishable value = 1 }
@@ -1879,6 +1943,11 @@ pod_combat_ai_check_control_fizzle_effect = {
 # Caller scope = the combat host.
 pod_combat_ai_select_target_core_effect = {
 	save_scope_as = host
+	# This-pass proof: clear here, set only when the roll below actually matches a
+	# slot. Guards the consumer against reusing a scope:chosen_target left over from
+	# an earlier selection this turn (e.g. the alternate-target retry rolling empty),
+	# which would otherwise silently re-target the stale slot.
+	remove_variable = pod_combat_ai_target_picked
 	pod_combat_ai_resolve_focus_actor_effect = yes
 	random_in_list = {
 		variable = pod_combat_active_slots
@@ -1895,6 +1964,18 @@ pod_combat_ai_select_target_core_effect = {
 				AND = {
 					var:combat_team = scope:host.var:pod_combat_current_actor_team
 					var:team_position = scope:host.var:pod_combat_current_actor_position
+				}
+			}
+			# Alternate-target retry: skip the exhausted target the caller flagged
+			# (set/cleared by pod_combat_ai_retry_alternate_target_effect). Unset =
+			# normal selection - trigger_if passes when its limit is false.
+			trigger_if = {
+				limit = { scope:host = { has_variable = pod_combat_ai_excluded_target_team } }
+				NOT = {
+					AND = {
+						var:combat_team = scope:host.var:pod_combat_ai_excluded_target_team
+						var:team_position = scope:host.var:pod_combat_ai_excluded_target_position
+					}
 				}
 			}
 		}
@@ -1947,9 +2028,10 @@ pod_combat_ai_select_target_core_effect = {
 			}
 		}
 		save_scope_as = chosen_target
+		scope:host = { set_variable = pod_combat_ai_target_picked }
 	}
 	if = {
-		limit = { exists = scope:chosen_target }
+		limit = { scope:host = { has_variable = pod_combat_ai_target_picked } }
 		scope:host = {
 			set_variable = { name = pod_combat_selected_target_team     value = scope:chosen_target.var:combat_team }
 			set_variable = { name = pod_combat_selected_target_position value = scope:chosen_target.var:team_position }
@@ -2147,6 +2229,9 @@ pod_combat_advance_one_ai_turn_effect = {
 # each step marks one slot acted.
 pod_combat_run_remaining_ai_turns_effect = {
 	while = {
+		# Hang-safe ceiling (each step marks one slot acted, so real termination is
+		# <= combatant count; only trips on a malformed no-progress state).
+		count = pod_combat_ai_outer_turn_cap_value
 		limit = {
 			NOT = { has_variable = pod_combat_is_over }
 			any_in_list = {
@@ -2156,6 +2241,19 @@ pod_combat_run_remaining_ai_turns_effect = {
 			}
 		}
 		pod_combat_advance_one_ai_turn_effect = yes
+	}
+	# No-progress diagnostic: bounded loop stopped with alive unacted slots while
+	# the fight is not over -> a step failed to mark progress.
+	if = {
+		limit = {
+			NOT = { has_variable = pod_combat_is_over }
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_slot_has_not_acted_trigger = yes
+			}
+		}
+		debug_log = "pod_combat: run_remaining_ai_turns hit iteration cap with unacted alive slots"
 	}
 }
 
@@ -2168,6 +2266,8 @@ pod_combat_run_remaining_ai_turns_effect = {
 pod_combat_run_pre_pc_ai_turns_effect = {
 	pod_combat_find_next_actor_effect = yes
 	while = {
+		# Hang-safe ceiling; see pod_combat_run_remaining_ai_turns_effect.
+		count = pod_combat_ai_outer_turn_cap_value
 		limit = {
 			has_variable = pod_combat_current_actor_team
 			NOT = { has_variable = pod_combat_is_over }
@@ -2181,6 +2281,22 @@ pod_combat_run_pre_pc_ai_turns_effect = {
 			}
 		}
 		pod_combat_advance_one_ai_turn_effect = yes
+	}
+
+	# No-progress diagnostic: bounded pre-PC loop stopped before reaching the PC
+	# while a non-PC actor remained and the fight was not over.
+	if = {
+		limit = {
+			has_variable = pod_combat_current_actor_team
+			NOT = { has_variable = pod_combat_is_over }
+			NOT = { AND = { var:pod_combat_current_actor_team = flag:player var:pod_combat_current_actor_position = 0 } }
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_slot_has_not_acted_trigger = yes
+			}
+		}
+		debug_log = "pod_combat: run_pre_pc_ai_turns hit iteration cap before reaching the PC"
 	}
 
 	# PC reached (and combat not over) -> set up its turn. The loop leaves
@@ -2357,6 +2473,13 @@ pod_combat_execute_ai_turn_effect = {
 		}
 	}
 
+	# Fresh AI-turn scratch: clear the progress/stall flags and any leftover
+	# alternate-target exclusion so a prior actor's stall can't block this turn.
+	remove_variable = pod_combat_ai_turn_stalled
+	remove_variable = pod_combat_ai_action_executed
+	remove_variable = pod_combat_ai_excluded_target_team
+	remove_variable = pod_combat_ai_excluded_target_position
+
 	# Select target (controlled-aware) + check the controlled-turn fizzle. The
 	# inverted-aware selection is SHARED with the per-action re-pick in
 	# pod_combat_ai_refresh_target_if_dead_effect, so a multi-AP stolen turn keeps
@@ -2380,10 +2503,8 @@ pod_combat_execute_ai_turn_effect = {
 	# pod_combat_ai_record_focus_target_effect.
 	pod_combat_ai_record_focus_target_effect = yes
 
-	# Refresh the "any finishable enemy?" host flag ONCE per turn (here, not per candidate) so the move
-	# selector's critical-heal modifier reads a value current as of this actor's
-	# turn. Consumed within the same turn, so the host var can't leak across actors.
-	pod_combat_ai_flag_finishable_enemy_effect = yes
+	# (Finishable-enemy flag moved to the per-action precompute so its affordability
+	# check reads live AP - see pod_combat_ai_precompute_action_summary_effect.)
 
 	# Set AP for this actor's turn (shared seed: effective cap / regen carry-over).
 	pod_combat_seed_turn_ap_effect = yes
