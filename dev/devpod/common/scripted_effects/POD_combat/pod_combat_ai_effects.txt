@@ -166,6 +166,22 @@
 @ai_summon_outnumbered    = 12   # summon while down a teammate (KO'd same-team slot)
 @ai_retaliate_when_exposed = 10  # arm a retaliation while hp < max
 @ai_into_armed_retaliation = -8  # attack a target whose counter is already armed
+# B4 payload magnitude. The catalogue is narrow (hp_damage 1-4, morale_damage 1-5,
+# hp_heal 1-4, morale_heal 1-4), so this is a ladder over the top of each range
+# rather than a curve. Modest on purpose: magnitude is a baseline-quality signal and
+# must not swamp the situational logic (soak / stance / finish) layered on top.
+#
+# STRICTLY NON-NEGATIVE, and that is load-bearing. A negative 'weak payload' band
+# reads as 'a poor instance of ITS OWN channel', which is only meaningful when the
+# move has exactly one payload. Summed across channels it inverted move ordering: a
+# hybrid carrying hp_damage 3 PLUS morale_damage 1 scored BELOW a plain hp_damage 3,
+# i.e. the strictly better move rated worse (31 catalogue moves, e.g.
+# demon_extinguish_life, vampire_bite, inferno). With every band >= 0 an extra
+# payload can only ever add, so the ordering is monotone by construction.
+# It also removes a baseline trap: hp_heal's modal value is 1, so a 'weak' band
+# centred on 2 penalised 52% of all HP heals and tilted the AI off healing.
+@ai_payload_large       = 8    # damage/morale payload at the top of the range
+@ai_payload_high        = 4    # one step below the top
 @ai_stance_autowhiff       = -25 # stance-checked attack vs a stance it cannot bypass (guaranteed miss)
 
 # Personality/primitive thresholds.
@@ -547,6 +563,7 @@ pod_combat_ai_take_turn_effect = {
 		}
 		pod_combat_ai_try_action_effect = yes
 	}
+	pod_combat_ai_trace_turn_effect = yes
 }
 
 pod_combat_ai_try_action_effect = {
@@ -792,6 +809,180 @@ pod_combat_ai_fold_recipient_urgency_effect = {
 	}
 }
 
+###################
+###### AI DECISION TRACE (debug-gated observability)
+###################
+# One machine-parseable debug.log line per AI pick and per AI turn, so a fight
+# can be audited from the log instead of by reading the selector. OFF unless
+# global_var:pod_combat_tune_ai_trace is set (tuning window > AI decision trace).
+#
+# CONTRACT, all three parts load-bearing:
+#  1. EVERY cost sits inside the gate. The gate limit is ONE clause (`exists =
+#     global_var:...`) because trigger blocks do not short-circuit, so each extra
+#     'safety' clause would be paid on every action with the trace OFF.
+#  2. The record is emitted by debug_log against a loc key, which resolves through
+#     the full data-binding pipeline. The loc strings read host state via
+#     GetPlayer.MakeScope.Var(...) rather than ROOT: root is NOT reliably the PC
+#     at combat call sites, while the combat host always is.
+#  3. Fields are staged onto pod_combat_ai_trace_* host vars FIRST. A loc string
+#     cannot see saved scopes (scope:chosen_move), and .GetFlagKey on an UNSET var
+#     is unsafe - only .GetValue|0 has a fallback - so anything a loc key reads as
+#     a flag must be provably set. All trace vars are stripped in the host cleanup.
+#
+# NOT captured in this version (deliberate): per-action OUTCOME. The pod_combat_last_*
+# result vars are wiped by pod_combat_push_log_effect before control returns here,
+# so an outcome record has to live inside the execution path and encode its flags
+# numerically to stay read-safe. Outcomes are already visible in the in-game combat
+# log; the decision side is what had no readout at all.
+# P01 max-affordable-tier cache. Folds, in ONE loadout walk per action, the largest
+# tier of each stat the actor can currently afford. Replaces a per-candidate rescan:
+# pod_combat_ai_candidate_has_undersized_buff_trigger ORs eight branches and CK3 does
+# not short-circuit, so all eight ran a full loadout any_in_list for EVERY candidate -
+# 8*M work per candidate, 8*M^2 per action. This is 8*M once.
+#
+# Called from ACTOR scope (inside var:pod_combat_actor_char), NOT from the per-action
+# summary precompute: that runs before scope:ai_actor is bound, and pod_combat_loadout
+# is the ACTOR's list. Seeds are written through scope:combat_host explicitly for the
+# same reason the trace counter has to - `this` here is the acting character.
+#
+# Equivalence rests on AP being stable between this fold and the roll: nothing executes
+# in between, so the cached affordability is the same answer the live scan gave.
+pod_combat_ai_fold_max_tier_effect = {
+	# this = a loadout move already proven affordable by the caller's limit.
+	if = {
+		limit = { has_variable = $STEM$ }
+		save_scope_value_as = { name = m_tier value = var:$STEM$ }
+		$HOST$ = {
+			if = {
+				limit = { var:pod_combat_ai_maxtier_$STEM$ < scope:m_tier }
+				set_variable = { name = pod_combat_ai_maxtier_$STEM$ value = scope:m_tier }
+			}
+		}
+	}
+}
+
+pod_combat_ai_precompute_max_tiers_effect = {
+	# Seed 0 = 'no affordable tier of this stat'. Safe because a tier is always 1-3
+	# BY CONSTRUCTION: the generator parses tiers from `<stat>_<dir>_<size>_<dur>`
+	# tokens, accepts only small/medium/large, and maps them through
+	# TIER_ORDER = {small:1, medium:2, large:3}. There is no path to a tier <= 0,
+	# which matters because such a tier would make the cached compare answer TRUE
+	# where the loadout scan this replaced answered FALSE.
+	scope:combat_host = {
+		set_variable = { name = pod_combat_ai_maxtier_soak_buff_round_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_soak_buff_combat_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_soak_debuff_round_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_soak_debuff_combat_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_hit_buff_round_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_hit_buff_combat_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_hit_debuff_round_tier value = 0 }
+		set_variable = { name = pod_combat_ai_maxtier_hit_debuff_combat_tier value = 0 }
+	}
+	every_in_list = {
+		variable = pod_combat_loadout
+		# Affordability mirrors the old scan: a move with no ap_cost is free, so the
+		# skipped trigger_if reads true and it counts.
+		limit = {
+			trigger_if = {
+				limit = { has_variable = ap_cost }
+				scope:combat_host.var:pod_combat_current_ap >= var:ap_cost
+			}
+		}
+		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_round_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_combat_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = soak_debuff_round_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = soak_debuff_combat_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = hit_buff_round_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = hit_buff_combat_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = hit_debuff_round_tier  HOST = scope:combat_host }
+		pod_combat_ai_fold_max_tier_effect = { STEM = hit_debuff_combat_tier  HOST = scope:combat_host }
+	}
+}
+
+# Stages the pick fields and emits the record. Host scope; scope:chosen_move and
+# scope:ai_actor must be live. Called from the execute gate in the selector.
+pod_combat_ai_trace_pick_effect = {
+	if = {
+		limit = { exists = global_var:pod_combat_tune_ai_trace }
+		set_variable = { name = pod_combat_ai_trace_move value = scope:chosen_move }
+		# Self-seeding: the counter is removed at turn end, so the first pick of a
+		# turn has no var to change_variable against.
+		if = {
+			limit = { has_variable = pod_combat_ai_trace_actions }
+			change_variable = { name = pod_combat_ai_trace_actions add = 1 }
+		}
+		else = { set_variable = { name = pod_combat_ai_trace_actions value = 1 } }
+		debug_log = pod_combat_trace_pick
+	}
+}
+
+# Counts how many loadout entries would survive the SAME pool filter the roll
+# uses. Deliberately re-runs the selector's own limit rather than a cheaper
+# approximation: pod_combat_move_is_usable_now_trigger alone is NOT the pool (six
+# AI-only gates cull further), so a cheaper count would report a number the
+# selector never saw. Must run AFTER the per-action precompute, whose host vars
+# the B03 exclusion gates read, or the count and the roll disagree.
+pod_combat_ai_trace_count_eligible_effect = {
+	if = {
+		limit = { exists = global_var:pod_combat_tune_ai_trace }
+		# Seed on the HOST explicitly: this effect is called from inside
+		# var:pod_combat_actor_char = { ... }, so `this` is the ACTING CHARACTER,
+		# not the host. A bare set_variable here created the counter on the actor
+		# while the increment below wrote the host, which errored per candidate and
+		# left the logged count permanently 0. The every_in_list must STAY in actor
+		# scope - pod_combat_loadout is the actor's list.
+		scope:combat_host = { set_variable = { name = pod_combat_ai_trace_eligible value = 0 } }
+		every_in_list = {
+			variable = pod_combat_loadout
+			limit = {
+				save_temporary_scope_as = ai_candidate_move
+				scope:combat_host = {
+					pod_combat_move_is_usable_now_trigger = {
+						STORY = scope:ai_candidate_move
+						ACTOR = scope:ai_actor
+					}
+				}
+			}
+			scope:combat_host = { change_variable = { name = pod_combat_ai_trace_eligible add = 1 } }
+		}
+	}
+}
+
+# Emits the per-turn record and clears the per-turn counters. Host scope, called
+# once after the action loop. The stop reason is resolved in script (not in the
+# loc string) so the record carries a stable integer instead of a flag that might
+# be unset: 1 combat over, 2 actor downed, 3 controlled turn fizzled, 4 stalled
+# (a pass picked nothing), 5 hit the per-turn action cap.
+pod_combat_ai_trace_turn_effect = {
+	if = {
+		limit = { exists = global_var:pod_combat_tune_ai_trace }
+		if = {
+			limit = { pod_combat_is_over_trigger = yes }
+			set_variable = { name = pod_combat_ai_trace_stop value = 1 }
+		}
+		else_if = {
+			limit = { pod_combat_current_actor_is_down_trigger = yes }
+			set_variable = { name = pod_combat_ai_trace_stop value = 2 }
+		}
+		else_if = {
+			limit = { has_variable = pod_combat_turn_control_fizzled }
+			set_variable = { name = pod_combat_ai_trace_stop value = 3 }
+		}
+		else_if = {
+			limit = { has_variable = pod_combat_ai_turn_stalled }
+			set_variable = { name = pod_combat_ai_trace_stop value = 4 }
+		}
+		else = {
+			set_variable = { name = pod_combat_ai_trace_stop value = 5 }
+		}
+		debug_log = pod_combat_trace_turn
+		remove_variable = pod_combat_ai_trace_actions
+		remove_variable = pod_combat_ai_trace_stop
+		remove_variable = pod_combat_ai_trace_eligible
+		remove_variable = pod_combat_ai_trace_move
+	}
+}
+
 pod_combat_ai_select_and_execute_move_effect = {
 	# Weighted random_in_list over the loadout, then swap / execute /
 	# restore. pod_combat_actor_char (the acting combatant) is written by
@@ -879,6 +1070,15 @@ pod_combat_ai_select_and_execute_move_effect = {
 				limit = { has_variable = cond_mode  var:cond_mode = flag:bonus }
 				pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
 			}
+
+			# Debug trace only: count the pool the roll is about to see. Placed here
+			# because this is the one point where the count and the roll agree - the
+			# per-action precompute above has written the host vars the exclusion
+			# gates read, and the roll has not yet consumed anything.
+			# One loadout walk that retires the per-candidate tier rescan (P01).
+			pod_combat_ai_precompute_max_tiers_effect = yes
+
+			pod_combat_ai_trace_count_eligible_effect = yes
 
 			# Iteration scope = the candidate story. save_temporary_scope_as
 			# binds it as ai_candidate_move so the trigger can still reach it
@@ -1540,6 +1740,82 @@ pod_combat_ai_select_and_execute_move_effect = {
 						}
 					}
 
+					# ===== B4 payload magnitude =====
+					# Until now only PRESENCE of these vars was scored, so a move hitting for 1
+					# ranked identically to one hitting for 4 (162 hp_damage moves indistinguishable).
+					# Bands are exclusive WITHIN a channel; across channels they deliberately sum, and
+					# because every band is >= 0 that sum can only reward a bigger total payload (see
+					# the define block - a negative band here inverted hybrid ordering).
+					#
+					# Gated OFF once the target is already inside the finish band. PoD soak is a
+					# SINGLE all-or-nothing roll for the whole payload, so against a target on its
+					# last box a 1-damage and a 4-damage hit are worth the same: both fill it, both
+					# are soaked with the same probability. Left ungated, the ladder stacked on the
+					# finish bonuses and outbid a CERTAIN kill with a 40%-to-hit swing.
+					modifier = {
+						add = @ai_payload_large
+						has_variable = hp_damage
+						var:hp_damage >= 4
+						scope:combat_host = {
+							trigger_if = {
+								limit = { has_variable = pod_combat_target_char }
+								var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+							}
+							trigger_else = { always = no }
+						}
+					}
+					modifier = {
+						add = @ai_payload_high
+						has_variable = hp_damage
+						var:hp_damage = 3
+						scope:combat_host = {
+							trigger_if = {
+								limit = { has_variable = pod_combat_target_char }
+								var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+							}
+							trigger_else = { always = no }
+						}
+					}
+					modifier = {
+						add = @ai_payload_large
+						has_variable = morale_damage
+						var:morale_damage >= 4
+						scope:combat_host = {
+							trigger_if = {
+								limit = { has_variable = pod_combat_target_morale }
+								var:pod_combat_target_morale > @ai_thresh_mor_finish_low
+							}
+							trigger_else = { always = no }
+						}
+					}
+					modifier = {
+						add = @ai_payload_high
+						has_variable = morale_damage
+						var:morale_damage = 3
+						scope:combat_host = {
+							trigger_if = {
+								limit = { has_variable = pod_combat_target_morale }
+								var:pod_combat_target_morale > @ai_thresh_mor_finish_low
+							}
+							trigger_else = { always = no }
+						}
+					}
+
+					# Restore magnitude. Orthogonal to the B01 recipient-urgency weights above: those
+					# score how badly the RECIPIENT needs it, these how much the move restores. No
+					# finish gate (there is no heal analogue of the last-box case) and no weak band
+					# (hp_heal's modal value is 1, so one would penalise the majority of heals).
+					modifier = {
+						add = @ai_restore_large
+						has_variable = hp_heal
+						var:hp_heal >= 3
+					}
+					modifier = {
+						add = @ai_restore_large
+						has_variable = morale_heal
+						var:morale_heal >= 3
+					}
+
 					# ===== PRIMITIVE SITUATIONALS (DoT / control / stun) =====
 					# Keyed only on signals that exist. Target reads mirror the HP-finish
 					# idiom above (scope:combat_host + pod_combat_target_char), and are
@@ -1979,6 +2255,12 @@ pod_combat_ai_select_and_execute_move_effect = {
 					}
 				}
 			}
+			# Trace BEFORE the swap: the weights scored against the pre-swap workspace
+			# target, so that is the state the record should describe. Emitting after
+			# the restore logged the restored enemy instead (and, for an AoE, whichever
+			# slot the sweep happened to load last). Inside the gate, so a pick logged
+			# here always goes on to execute.
+			scope:combat_host = { pod_combat_ai_trace_pick_effect = yes }
 			pod_combat_ai_swap_for_story_effect     = { STORY = scope:chosen_move }
 			POD_execute_combat_move           = { STORY = scope:chosen_move }
 			pod_combat_ai_restore_after_move_effect = { STORY = scope:chosen_move }
