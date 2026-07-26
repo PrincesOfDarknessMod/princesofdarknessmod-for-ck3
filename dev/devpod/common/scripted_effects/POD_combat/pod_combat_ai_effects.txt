@@ -13,8 +13,10 @@
 # ─────────────────────────────────────────────────────────────
 # AI TUNING CONSTANTS - edit these to tweak AI behaviour
 # ─────────────────────────────────────────────────────────────
-# Designer-tuned biases for AI move choice, applied by the weight block in
-# pod_combat_ai_select_and_execute_move_effect. Weight deltas first,
+# Designer-tuned biases for AI behaviour. Most are read by the weight block in
+# pod_combat_ai_select_and_execute_move_effect; the @ai_pers_* and @ai_intent_*
+# families are NOT - those feed the intent chooser's lottery and the
+# once-per-combat target-preference derivation. Weight deltas first,
 # comparison thresholds at the bottom.
 
 # Anti-repetition (three-deep history).
@@ -115,8 +117,9 @@
 # PERSONALITY + PRIMITIVE-SITUATIONAL CONSTANTS
 # ─────────────────────────────────────────────────────────────
 # Personality bias magnitudes, consumed by pod_combat_apply_personality_profile_effect
-# (the precompute) and the PERSONALITY BAND read-modifiers. Pre-clamp per-trait
-# contributions; cross-axis sums are bounded by the @ai_pers_clamp_* values below.
+# (the precompute) and read by the intent chooser's lottery branches and the
+# target-preference threshold. Pre-clamp per-trait contributions; cross-axis sums
+# are bounded by the @ai_pers_clamp_* values below.
 @ai_pers_aggressive     = 8
 @ai_pers_bold           = 8
 @ai_pers_savage         = 5
@@ -141,12 +144,30 @@
 @ai_pers_clamp_control_neg  = @[ai_pers_clamp_control * -1]
 @ai_pers_clamp_savage_neg   = @[ai_pers_clamp_savage * -1]
 
-# Category post-sum clamp (atk/def/ctl/pwr). Compatible same-category traits
-# stack unbounded (~+76 worst-case ATK), enough to swamp the +30 heal-need and
-# let a dying aggressive AI fight to its death. The heal-vs-attack inequality
-# works out to C < 11.5; clamp at 10 for margin. A single strong trait
-# (timid +10, bold/aggressive +8) still reads in full.
-@ai_pers_clamp_cat      = 10
+# Category post-sum clamp (atk/def/ctl/pwr). Compatible same-category traits stack
+# unbounded (~+76 worst-case ATK), which would let one temperament swamp every
+# other signal it is summed against.
+#
+# The bound used to be derived from an in-pool heal-vs-attack inequality (C < 11.5),
+# because the band added this bias to individual moves and a big enough ATK bias
+# could outrun the heal bonus on a dying actor. That is no longer what enforces the
+# dying-AI-heals behaviour: the chooser's EMERGENCY branch does, deterministically
+# and before any lottery. What the clamp bounds now is the intent BRANCH WEIGHTS.
+#
+# Sized from measurement, not taste. At 10, a paired craven-vs-aggressive run (the
+# tuning window's temperament override, same roster run twice) moved intent shares
+# by only ~8.5pp: every @ai_intent_* situational add is at or above +/-10, so they
+# swamped temperament. 18 scales that to ~15pp, and the ceiling is principled - it
+# stays UNDER @ai_intent_finishable (20), so however extreme the temperament it can
+# never outrank "there is a kill available".
+#
+# Consequence worth knowing: pressure reads TWO axes (_atk and _pwr), so a
+# maximally passive AND humble actor drives that branch to 25-36 = -11, and
+# random_list drops a non-positive branch. That is benign rather than a stall - the
+# ungated weight-1 escape branch still resolves, the actor announces `none` and
+# rolls UNRESTRICTED, which reads as "this one never commits to pressing". A single
+# strong trait (timid +10, bold/aggressive +8) still reads in full.
+@ai_pers_clamp_cat      = 18
 @ai_pers_clamp_cat_neg      = @[ai_pers_clamp_cat * -1]
 
 # Primitive situational weights (DoT / mind control / stun / summon / retaliate).
@@ -226,21 +247,53 @@
 @ai_heal_critical         = 20   # extra heal weight for a dying actor with no kill available
 @ai_thresh_heal_critical  = 1    # actor_hp_value <= this (at its last box) = "dying"
 
+# ── TACTICAL INTENT ──────────────────────────────────────────────
+# The AI commits to ONE intent per action (pressure / break / setup / stabilize)
+# and the roll is then restricted to moves serving it. Restricting the POOL is a
+# far stronger lever than nudging weights inside it: measured, a weight nudge
+# moves selection shares by ~1pp against a ~5pp detection floor, while pool
+# restriction moves them by tens of points.
+#
+# These are the situational nudges on the intent LOTTERY, not on individual moves.
+# They are large next to the +/-10 personality biases because an intent is a
+# whole-pool decision, and small next to the branch base (25) so no single
+# situation makes an intent certain.
+@ai_intent_finishable      = 20   # a kill is on the table -> press it (BOTH damage intents: the finishable flag covers HP and morale finishes alike)
+# ...and the other half of that, which is NOT optional. Finish priority lives
+# entirely in the roll's WEIGHT block (@ai_hp_finish_1box and friends), but the
+# intent restricts the pool at the LIMIT layer, which is evaluated first - a weight
+# bonus cannot outbid an exclusion. So announcing setup or stabilize with a kill
+# available does not merely under-weight the finisher, it deletes it from the pool.
+# Rewarding the damage intents alone is far too weak a counterweight, because
+# random_list weights are relative: +20 on two branches still leaves ~35% of
+# finishable actions announcing a non-damage intent, and measured on the shadow log
+# that would flip roughly 10% of ALL actions away from an available kill. This
+# mirrors the guard the deterministic emergency branch and the critical-heal
+# modifier already apply (NOT = { var:pod_combat_ai_enemy_finishable = 1 }), as a
+# penalty rather than a hard gate so a genuinely urgent team heal can still win.
+@ai_intent_team_hurt       = 20   # some same-team slot has a deficit a heal could address
+@ai_intent_setup_early     = 12   # early round with energy still in hand - a setup has time to pay off
+@ai_intent_target_shaken   = 15   # target morale already low - finish the break
+@ai_intent_finish_focus    = -20  # setup / stabilize while a kill is on the table - see above
+@ai_intent_thresh_early    = 2    # pod_combat_round <= this counts as early
+@ai_intent_thresh_energy   = 2    # actor_energy_used < this counts as "energy still in hand" (mirrors @ai_combat_buff_reward's band)
+
 
 # per-actor personality precompute.
 # Runs ONCE per combat on scope:ai_actor (the acting NPC), writing the seven bias
-# vars the PERSONALITY BAND reads at candidate-scoring time. Cleared at the
+# vars the intent chooser reads when it picks the action's intent. Cleared at the
 # AI-character cleanup site (slot init + group teardown), NOT host teardown.
 #
 # Contract: seed all seven biases to 0, sum per-trait contributions, then clamp
 # LAST. The three cross-axis vars (_dot/_control/_savage) clamp because multiple
 # compatible traits write them (e.g. sadistic + ambitious both writing _control);
 # the four category vars clamp because many opposed-pair-independent traits stack
-# them (~+76 worst-case ATK unclamped) - see @ai_pers_clamp_cat for why that would
-# otherwise let a dying aggressive AI skip the heal. Magnitudes are the @ai_pers_*
+# them (~+76 worst-case ATK unclamped) - see @ai_pers_clamp_cat for what that
+# bound protects now (the intent branch weights; the dying-AI case moved to the
+# chooser's deterministic emergency branch). Magnitudes are the @ai_pers_*
 # constants in the tuning header.
 pod_combat_apply_personality_profile_effect = {
-	# Seed all seven biases to 0 -> branch-free, safe reads in the weight block.
+	# Seed all seven biases to 0 -> branch-free, safe reads at every consumer.
 	set_variable = { name = pod_combat_pers_bias_atk     value = 0 }
 	set_variable = { name = pod_combat_pers_bias_def     value = 0 }
 	set_variable = { name = pod_combat_pers_bias_ctl     value = 0 }
@@ -323,7 +376,8 @@ pod_combat_apply_personality_profile_effect = {
 		change_variable = { name = pod_combat_pers_bias_dot subtract = @ai_pers_passive }
 	}
 	# callous: efficient lethality - kills rather than savors. Control routes to
-	# _control (not _ctl) so the band de-dup and clamp apply.
+	# _control (not _ctl) because they now feed DIFFERENT intent branches: _control
+	# the setup branch, _ctl the break branch.
 	if = {
 		limit = { has_trait = callous }
 		change_variable = { name = pod_combat_pers_bias_atk     add = @ai_pers_aggressive }
@@ -453,10 +507,9 @@ pod_combat_apply_personality_profile_effect = {
 	# accumulate from many opposed-pair-independent traits (CK3 has no
 	# 3-trait cap), so the post-sum bound is required; magnitude rationale
 	# on @ai_pers_clamp_cat.
-	# NOTE: raising @ai_pers_clamp_cat above the heal/finish need-bonuses is
-	# intentionally capped here - the heal-vs-attack inequality is the hard
-	# ceiling, so category bias does NOT scale linearly past 10. A designer
-	# expecting linear scaling above the clamp would misread this block.
+	# NOTE: category bias does NOT scale linearly past the clamp. It is now bounded
+	# against the intent branch base rather than the old in-pool heal inequality -
+	# see @ai_pers_clamp_cat. A designer expecting linear scaling would misread this.
 	if = {
 		limit = { var:pod_combat_pers_bias_atk > @ai_pers_clamp_cat }
 		set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat }
@@ -488,6 +541,44 @@ pod_combat_apply_personality_profile_effect = {
 	if = {
 		limit = { var:pod_combat_pers_bias_pwr < @ai_pers_clamp_cat_neg }
 		set_variable = { name = pod_combat_pers_bias_pwr value = @ai_pers_clamp_cat_neg }
+	}
+
+	# ---- Fight-C harness: temperament override (debug knob, OFF by default) ----
+	# Stamps a preset archetype over the trait-derived biases so the SAME roster can
+	# be run twice with temperament as the only variable. Building two rosters that
+	# differ only in personality is impractical in-game, and any roster difference
+	# would confound the very gap the test measures.
+	#
+	# Runs AFTER the clamps, so the presets ARE the clamped extremes - the widest
+	# separation the system can express, which is the right probe for "does
+	# temperament still reach behaviour now that it lives at the intent level".
+	# Everything except the two category axes that drive the pressure/stabilize gap
+	# is zeroed, including the axes feeding the target preference below: both arms
+	# then pick targets identically, so the measured difference is intent and
+	# nothing else.
+	if = {
+		limit = {
+			OR = {
+				exists = global_var:pod_combat_tune_ai_pers_craven
+				exists = global_var:pod_combat_tune_ai_pers_aggro
+			}
+		}
+		set_variable = { name = pod_combat_pers_bias_ctl     value = 0 }
+		set_variable = { name = pod_combat_pers_bias_pwr     value = 0 }
+		set_variable = { name = pod_combat_pers_bias_dot     value = 0 }
+		set_variable = { name = pod_combat_pers_bias_control value = 0 }
+		set_variable = { name = pod_combat_pers_bias_savage  value = 0 }
+		if = {
+			limit = { exists = global_var:pod_combat_tune_ai_pers_craven }
+			# Craven: maximally defensive -> expect the stabilize share to dominate.
+			set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat_neg }
+			set_variable = { name = pod_combat_pers_bias_def value = @ai_pers_clamp_cat }
+		}
+		else = {
+			# Aggressive: maximally offensive -> expect the pressure share to dominate.
+			set_variable = { name = pod_combat_pers_bias_atk value = @ai_pers_clamp_cat }
+			set_variable = { name = pod_combat_pers_bias_def value = @ai_pers_clamp_cat_neg }
+		}
 	}
 
 	# derive a single mutually-exclusive target
@@ -586,6 +677,14 @@ pod_combat_ai_try_action_effect = {
 		# value after selection means the pass picked nothing (empty roll, or a pick
 		# the usable-now recheck refused).
 		remove_variable = pod_combat_ai_action_executed
+		# The intent lock is per-ATTEMPT, and this is the only site that can make it
+		# so. It is deliberately NOT cleared by the alternate-target retry below,
+		# which runs inside this same attempt and has to stay unrestricted. Getting
+		# this wrong is silent and total: the lock is a HOST var, so one leaked lock
+		# would pin every later actor on both teams to an unrestricted roll for the
+		# rest of the fight, and the trace would report that as an honest run of
+		# intent=none.
+		remove_variable = pod_combat_ai_intent_lock
 
 		# (refresh helper is a no-op while the current target still lives)
 		pod_combat_ai_refresh_target_if_dead_effect = yes
@@ -604,7 +703,38 @@ pod_combat_ai_try_action_effect = {
 			# tries' is_over gate.
 			pod_combat_save_workspace_effect = yes
 
-			# No pick this pass: try ONE alternate target (excluding the exhausted
+			# The restricted roll came up empty. The intent promised a pool the roll's
+			# AI-only gates then emptied - the per-intent counters are an UPPER BOUND
+			# on that pool by construction, so this is expected traffic, not a fault.
+			# Lock the intent off and re-roll ONCE unrestricted against the same
+			# target rather than spending the action on nothing. The lock deliberately
+			# survives into the alternate-target retry below (that stays unrestricted
+			# too, which is the pre-intent last-resort behaviour) and is cleared at the
+			# top of the next attempt.
+			#
+			# Guarded compare: only a RESTRICTING intent can strand the roll, and
+			# re-rolling after an unrestricted one would just repeat the same empty
+			# pool. flag:none is both the escape branch and the lock's own answer, so
+			# without this the fallback would re-enter itself.
+			if = {
+				limit = {
+					NOT = { has_variable = pod_combat_ai_action_executed }
+					NOT = { has_variable = pod_combat_turn_control_fizzled }
+					trigger_if = {
+						limit = { has_variable = pod_combat_ai_intent }
+						NOR = {
+							var:pod_combat_ai_intent = flag:none
+							var:pod_combat_ai_intent = flag:steal
+						}
+					}
+					trigger_else = { always = no }
+				}
+				set_variable = { name = pod_combat_ai_intent_lock value = 1 }
+				pod_combat_ai_select_and_execute_move_effect = yes
+				pod_combat_save_workspace_effect = yes
+			}
+
+			# Still no pick: try ONE alternate target (excluding the exhausted
 			# one) before conceding, then stall so the loop stops rescanning identical
 			# state up to the action ceiling.
 			if = {
@@ -628,6 +758,17 @@ pod_combat_ai_try_action_effect = {
 # was found (the core leaves selected_target unchanged when the roll finds none).
 # Host (PC) scope, matching try_action.
 pod_combat_ai_retry_alternate_target_effect = {
+	# THIS PASS IS THE LAST RESORT, so it always rolls unrestricted. The lock lives
+	# here rather than at the call site because that is the only way the invariant
+	# survives: try_action's fallback sets the lock only for a RESTRICTING intent,
+	# which correctly skips flag:none - and flag:none is over-represented in exactly
+	# the population that reaches this retry, since it is the only valid lottery
+	# branch when all four usable counters are 0, which is also what empties a roll.
+	# Without this the re-selector would draw a FRESH restricting intent against the
+	# new target with no fallback behind it, and an empty pool there forfeits every
+	# remaining action of the turn with AP still in hand.
+	# Cleared at the top of the next try_action, so it cannot outlive this attempt.
+	set_variable = { name = pod_combat_ai_intent_lock value = 1 }
 	if = {
 		limit = { has_variable = pod_combat_selected_target_team }
 		set_variable = { name = pod_combat_ai_excluded_target_team     value = var:pod_combat_selected_target_team }
@@ -720,8 +861,10 @@ pod_combat_ai_precompute_action_summary_effect = {
 	}
 
 	# B02 finishable-enemy opportunity, per action so its affordability check sees
-	# live AP: sets pod_combat_ai_enemy_finishable (read by the critical-heal
-	# modifier). Its own save_scope_as = host re-saves this same host - safe.
+	# live AP: sets pod_combat_ai_enemy_finishable, read by the critical-heal
+	# modifier, by the intent chooser's emergency gate, and by the finishable /
+	# finish-focus adds on all four lottery branches. Its own save_scope_as = host
+	# re-saves this same host - safe.
 	pod_combat_ai_flag_finishable_enemy_effect = yes
 
 	# B01 recipient urgency: fold the MAX heal/morale urgency over same-team slots
@@ -870,21 +1013,12 @@ pod_combat_ai_fold_max_tier_effect = {
 	}
 }
 
-# Folds the CHEAPEST affordable move in the loadout. Paired with the max-tier fold
-# below so both ride the same walk - no extra scan.
-pod_combat_ai_fold_min_ap_cost_effect = {
-	# this = a loadout move the caller already proved affordable.
+# Folds the per-action caches that ride the loadout walk for one USABLE move: the
+# cheapest AP cost (the strand floor) and the four tactical-intent counters. Paired
+# with the max-tier fold above so all of it rides the same walk - no extra scan.
+pod_combat_ai_fold_usable_move_effect = {
+	# this = a loadout move the caller already proved AP-affordable.
 	#
-	# ZERO-COST MOVES ARE EXCLUDED, and that is load-bearing. Folding one drives the
-	# minimum to 0, which makes the strand floor equal current AP and turns the two
-	# compares in the modifier (`cost < ap` AND `cost > floor`) mutually exclusive -
-	# the penalty then cannot fire AT ALL for that actor, for the whole fight. All 21
-	# zero-cost moves are splat accelerators (werewolf / demon / kuei-jin / hunter /
-	# psychic / sorcerer / Celerity), so this would have silently disabled the feature
-	# for those splats and left it live for everyone else. It is also wrong on its own
-	# terms: a move costing 0 does not consume the remainder, so it can never redeem
-	# stranded AP. The exclusion lives HERE and not in the shared walk limit, because
-	# that walk also feeds the tier folds and 0-cost moves do carry real tier buffs.
 	# USABILITY, not just affordability. Measured: with an AP-only filter, 81% of
 	# turns that ended holding 2+ AP had a floor claiming that AP was spendable
 	# while the pool was empty - always the same shape, min_cost 2 against 2 AP
@@ -895,24 +1029,146 @@ pod_combat_ai_fold_min_ap_cost_effect = {
 	# (it costs no more and the other gates are unchanged), so it is already in
 	# this set. Cost is one trigger call per loadout entry per action - far below
 	# the 8*M^2 per-candidate rescan the P01 cache removed from this same walk.
+	#
+	# The intent counters ride the same gate, but be clear about what that gate is
+	# NOT: the roll culls further with several AI-only gates (redundancy, pure-heal,
+	# stance whiff, stolen-turn offense), so each counter is an UPPER BOUND on its
+	# intent's real pool, not the pool. That is the SAFE direction - an over-count
+	# costs at most one lock fallback, while an under-count would hide an intent the
+	# AI could have served. Only the control gates are mirrored below, because those
+	# are the ones an actor inflicts on itself and then repeats every action.
 	if = {
 		limit = {
-			has_variable = ap_cost
-			var:ap_cost > 0
-			save_temporary_scope_as = min_cost_candidate
+			save_temporary_scope_as = usable_fold_move
 			$HOST$ = {
 				pod_combat_move_is_usable_now_trigger = {
-					STORY = scope:min_cost_candidate
+					STORY = scope:usable_fold_move
 					ACTOR = scope:ai_actor
 				}
 			}
 		}
-		save_scope_value_as = { name = m_cost value = var:ap_cost }
-		$HOST$ = {
-			if = {
-				limit = { var:pod_combat_ai_min_ap_cost > scope:m_cost }
-				set_variable = { name = pod_combat_ai_min_ap_cost value = scope:m_cost }
+
+		# --- cheapest usable cost -> AP strand floor ---
+		# ZERO-COST MOVES ARE EXCLUDED, and that is load-bearing. Folding one drives
+		# the minimum to 0, which makes the strand floor equal current AP and turns
+		# the two compares in the modifier (`cost < ap` AND `cost > floor`) mutually
+		# exclusive - the penalty then cannot fire AT ALL for that actor, for the
+		# whole fight. All 21 zero-cost moves are splat accelerators (werewolf /
+		# demon / kuei-jin / hunter / psychic / sorcerer / Celerity), so this would
+		# have silently disabled the feature for those splats and left it live for
+		# everyone else. It is also wrong on its own terms: a move costing 0 does not
+		# consume the remainder, so it can never redeem stranded AP. The exclusion is
+		# scoped to THIS fold and not the shared usable gate above, because the intent
+		# counters below DO want the zero-cost accelerators counted.
+		if = {
+			limit = {
+				trigger_if = {
+					limit = { has_variable = ap_cost }
+					var:ap_cost > 0
+				}
+				trigger_else = { always = no }
 			}
+			save_scope_value_as = { name = m_cost value = var:ap_cost }
+			$HOST$ = {
+				if = {
+					limit = { var:pod_combat_ai_min_ap_cost > scope:m_cost }
+					set_variable = { name = pod_combat_ai_min_ap_cost value = scope:m_cost }
+				}
+			}
+		}
+
+		# --- tactical-intent counters ---
+		# How many usable moves serve each intent, so the chooser can only announce
+		# an intent the roll can actually fill. Membership is derived from the
+		# PAYLOAD the move stamps, not its authored category: a CTL-category move
+		# whose only payload is morale damage breaks morale, whatever it is filed as.
+		# Overlap is intended - a damage+debuff move serves pressure AND setup.
+		#
+		# THIS MEMBERSHIP EXISTS IN THREE COPIES. Change one, change all three:
+		#   1. here (the counters)
+		#   2. the intent dispatch ladder in the roll limit below
+		#   3. scripts/python/POD-Combat/verify_intent_membership.py (the drift guard,
+		#      which also proves no costed move is orphaned by all four)
+		# Every write goes through $HOST$: `this` here is the move story.
+		if = {
+			limit = {
+				OR = {
+					has_variable = hp_damage
+					# A morale DoT is attrition on the break axis, not the HP one.
+					AND = {
+						has_variable = dot_amount
+						NOT = { has_variable = dot_morale }
+					}
+				}
+			}
+			$HOST$ = { change_variable = { name = pod_combat_ai_usable_pressure_n add = 1 } }
+		}
+		if = {
+			limit = {
+				OR = {
+					has_variable = morale_damage
+					AND = {
+						has_variable = dot_amount
+						has_variable = dot_morale
+					}
+				}
+			}
+			$HOST$ = { change_variable = { name = pod_combat_ai_usable_break_n add = 1 } }
+		}
+		if = {
+			limit = {
+				OR = {
+					has_variable = soak_buff_round_tier
+					has_variable = soak_buff_combat_tier
+					has_variable = soak_debuff_round_tier
+					has_variable = soak_debuff_combat_tier
+					has_variable = hit_buff_round_tier
+					has_variable = hit_buff_combat_tier
+					has_variable = hit_debuff_round_tier
+					has_variable = hit_debuff_combat_tier
+					has_variable = initiative_debuff
+					has_variable = remove_guard
+					# The two control payloads count only when the roll would keep them,
+					# via the SAME predicates the roll uses - a dominator that has already
+					# dominated its target must stop counting its inert domination moves,
+					# or it announces setup and empties the roll every action for the rest
+					# of the fight. A hybrid still counts through its other payload arm.
+					AND = {
+						has_variable = mind_control
+						save_temporary_scope_as = intent_count_move
+						$HOST$ = { pod_combat_ai_mind_control_is_useful_trigger = { STORY = scope:intent_count_move } }
+					}
+					AND = {
+						has_variable = ap_drain
+						save_temporary_scope_as = intent_count_move
+						$HOST$ = { pod_combat_ai_ap_drain_is_useful_trigger = { STORY = scope:intent_count_move } }
+					}
+					has_variable = bypass_dodge
+					has_variable = bypass_stealth
+					has_variable = drain
+					has_variable = summons_combatant
+					has_variable = steal_gold
+					has_variable = gain_dread
+					has_variable = bonus_effect
+					has_variable = retaliate_damage
+					has_variable = retaliate_morale
+				}
+			}
+			$HOST$ = { change_variable = { name = pod_combat_ai_usable_setup_n add = 1 } }
+		}
+		if = {
+			limit = {
+				OR = {
+					has_variable = hp_heal
+					has_variable = morale_heal
+					has_variable = set_guard
+					has_variable = dodge
+					has_variable = stealth
+					has_variable = soak_buff_round_tier
+					has_variable = soak_buff_combat_tier
+				}
+			}
+			$HOST$ = { change_variable = { name = pod_combat_ai_usable_stabilize_n add = 1 } }
 		}
 	}
 }
@@ -939,6 +1195,13 @@ pod_combat_ai_precompute_max_tiers_effect = {
 		# strand floor far negative and simply never fires - correct, since a pass with
 		# no affordable move has no candidates to penalise anyway.
 		set_variable = { name = pod_combat_ai_min_ap_cost value = 99 }
+		# Per-intent usable-move counts. Re-seeded every action: the chooser refuses
+		# to announce an intent whose count is 0, so a stale count from the previous
+		# action would let it pick an intent this loadout can no longer serve.
+		set_variable = { name = pod_combat_ai_usable_pressure_n value = 0 }
+		set_variable = { name = pod_combat_ai_usable_break_n value = 0 }
+		set_variable = { name = pod_combat_ai_usable_setup_n value = 0 }
+		set_variable = { name = pod_combat_ai_usable_stabilize_n value = 0 }
 	}
 	every_in_list = {
 		variable = pod_combat_loadout
@@ -950,7 +1213,7 @@ pod_combat_ai_precompute_max_tiers_effect = {
 				scope:combat_host.var:pod_combat_current_ap >= var:ap_cost
 			}
 		}
-		pod_combat_ai_fold_min_ap_cost_effect = { HOST = scope:combat_host }
+		pod_combat_ai_fold_usable_move_effect = { HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_round_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_buff_combat_tier  HOST = scope:combat_host }
 		pod_combat_ai_fold_max_tier_effect = { STEM = soak_debuff_round_tier  HOST = scope:combat_host }
@@ -973,6 +1236,197 @@ pod_combat_ai_precompute_max_tiers_effect = {
 	}
 }
 
+# Picks ONE tactical intent for this action; the roll's intent dispatch arm then
+# restricts the candidate pool to the moves serving it.
+#
+# ACTOR scope (called from inside var:pod_combat_actor_char): the personality bias
+# reads are bare, and EVERY host read and write goes through scope:combat_host -
+# a bare read here would silently answer on the acting character and invert the
+# finishable and counter tests.
+#
+# All three outputs are written on EVERY path. The trace reads the intent flag
+# with .GetFlagKey, which errors on an unset variable, and the dispatch ladder
+# compares flag literals - an intent surviving from the previous action would
+# restrict this one to the wrong pool. Written out longhand per branch rather
+# than through a macro helper so the flag literals stay greppable.
+pod_combat_ai_choose_intent_effect = {
+	# Seeded here, not per branch: `intent` is what the chooser DECIDED, while
+	# intent_emg and intent_locked are how it got there. Only the lock branch
+	# raises this, and a locked pass genuinely does decide flag:none - the two
+	# fields together are what let the trace tell a lock fallback (an intent whose
+	# pool the roll could not fill) apart from the escape branch legitimately
+	# rolling none, which is the acceptance measure for the whole restriction.
+	scope:combat_host = { set_variable = { name = pod_combat_ai_intent_locked value = 0 } }
+	if = {
+		limit = { scope:combat_host = { has_variable = pod_combat_ai_intent_lock } }
+		# The restricted roll already came up empty this action, so run the rest of
+		# it unrestricted. The lock is READ here, not cleared: it has to survive into
+		# the alternate-target retry so that runs unrestricted too, which is the
+		# pre-intent last-resort behaviour. Cleared at the top of the next try_action.
+		#
+		scope:combat_host = {
+			set_variable = { name = pod_combat_ai_intent value = flag:none }
+			set_variable = { name = pod_combat_ai_intent_n value = 0 }
+			set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+			set_variable = { name = pod_combat_ai_intent_locked value = 1 }
+		}
+	}
+	else_if = {
+		limit = { scope:combat_host = { has_variable = pod_combat_turn_is_controlled } }
+		# A stolen turn is already hard-gated to single-target offense by the roll.
+		# Layering an intent on top of those gates could empty the pool outright.
+		scope:combat_host = {
+			set_variable = { name = pod_combat_ai_intent value = flag:steal }
+			set_variable = { name = pod_combat_ai_intent_n value = 5 }
+			set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+		}
+	}
+	else_if = {
+		limit = {
+			scope:combat_host = {
+				pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+				NOT = { var:pod_combat_ai_enemy_finishable = 1 }
+				var:pod_combat_ai_usable_stabilize_n > 0
+			}
+		}
+		# Emergency: at the last box with no kill available. Deterministic rather
+		# than a lottery branch, because this is what now guarantees the dying-AI-
+		# stabilizes behaviour that the category clamp used to have to enforce
+		# inside the pool (see @ai_pers_clamp_cat). Accepted edge: an actor whose
+		# stabilize pool holds only stances turtles instead of healing - the pool
+		# is what the loadout makes it.
+		scope:combat_host = {
+			set_variable = { name = pod_combat_ai_intent value = flag:stabilize }
+			set_variable = { name = pod_combat_ai_intent_n value = 4 }
+			set_variable = { name = pod_combat_ai_intent_emg value = 1 }
+		}
+	}
+	else = {
+		# Branch bases are literal 25. random_list has NO weight floor (unlike the
+		# move roll's `min`), so a base must outrun the worst-case negative modifier
+		# sum: the biases clamp to +/-10 and setup reads two of them, so 25 - 20 = 5
+		# keeps every intent reachable at the worst temperament.
+		#
+		# @ai_intent_finish_focus is the deliberate exception: stacked with a hostile
+		# temperament it CAN drop setup or stabilize out of the list entirely, which is
+		# the intended reading - an aggressive AI with a kill in front of it does not
+		# stop to buff. The list still always resolves, because the weight-1 escape
+		# branch at the bottom is ungated and modifier-free.
+		#
+		# This is where personality now lives - one primary axis per intent, instead
+		# of a per-move band inside the roll. An aggressive AI picks the pressure
+		# INTENT more often and then picks well within it, which is both more
+		# coherent to watch and a big enough effect to actually measure.
+		random_list = {
+			25 = {
+				trigger = { scope:combat_host = { var:pod_combat_ai_usable_pressure_n > 0 } }
+				modifier = { add = var:pod_combat_pers_bias_atk }
+				# _pwr rides pressure, NOT setup. It reads "commits to a big, flashy
+				# play" (arrogant/zealous positive; paranoid/humble/lazy negative),
+				# which is a statement about pressing, not about buffing.
+				#
+				# It also has to be a different branch from _control, and that is the
+				# load-bearing part: `paranoid` writes control +@ai_pers_wary and pwr
+				# -@ai_pers_wary from the SAME constant, so summing both onto setup
+				# CANCELLED them exactly - the trait most defined by wanting control
+				# plays had zero effect on the intent that holds them, and went
+				# net-negative once _control hit its clamp. The deleted per-move band
+				# scored the two against disjoint move sets, so +8/-8 was real
+				# discrimination there; one branch turned it into arithmetic.
+				modifier = { add = var:pod_combat_pers_bias_pwr }
+				modifier = {
+					add = @ai_intent_finishable
+					scope:combat_host = { var:pod_combat_ai_enemy_finishable = 1 }
+				}
+				scope:combat_host = {
+					set_variable = { name = pod_combat_ai_intent value = flag:pressure }
+					set_variable = { name = pod_combat_ai_intent_n value = 1 }
+					set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+				}
+			}
+			25 = {
+				trigger = { scope:combat_host = { var:pod_combat_ai_usable_break_n > 0 } }
+				modifier = { add = var:pod_combat_pers_bias_ctl }
+				modifier = {
+					add = @ai_intent_finishable
+					scope:combat_host = { var:pod_combat_ai_enemy_finishable = 1 }
+				}
+				modifier = {
+					add = @ai_intent_target_shaken
+					scope:combat_host = {
+						trigger_if = {
+							limit = { has_variable = pod_combat_target_morale }
+							var:pod_combat_target_morale <= @ai_thresh_mor_finish_mid
+						}
+						trigger_else = { always = no }
+					}
+				}
+				scope:combat_host = {
+					set_variable = { name = pod_combat_ai_intent value = flag:break }
+					set_variable = { name = pod_combat_ai_intent_n value = 2 }
+					set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+				}
+			}
+			25 = {
+				trigger = { scope:combat_host = { var:pod_combat_ai_usable_setup_n > 0 } }
+				modifier = { add = var:pod_combat_pers_bias_control }
+				modifier = {
+					add = @ai_intent_finish_focus
+					scope:combat_host = { var:pod_combat_ai_enemy_finishable = 1 }
+				}
+				modifier = {
+					add = @ai_intent_setup_early
+					scope:combat_host = {
+						var:pod_combat_round <= @ai_intent_thresh_early
+						var:pod_combat_actor_energy_used < @ai_intent_thresh_energy
+					}
+				}
+				scope:combat_host = {
+					set_variable = { name = pod_combat_ai_intent value = flag:setup }
+					set_variable = { name = pod_combat_ai_intent_n value = 3 }
+					set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+				}
+			}
+			25 = {
+				trigger = { scope:combat_host = { var:pod_combat_ai_usable_stabilize_n > 0 } }
+				modifier = { add = var:pod_combat_pers_bias_def }
+				modifier = {
+					add = @ai_intent_finish_focus
+					scope:combat_host = { var:pod_combat_ai_enemy_finishable = 1 }
+				}
+				# The beneficiary COUNTS, not the urgency weights: a count above zero
+				# means some same-team slot (the actor included) has a deficit a heal
+				# could actually address, which is an exact integer test.
+				modifier = {
+					add = @ai_intent_team_hurt
+					scope:combat_host = {
+						OR = {
+							var:pod_combat_ai_team_ben_hp > 0
+							var:pod_combat_ai_team_ben_mor > 0
+						}
+					}
+				}
+				scope:combat_host = {
+					set_variable = { name = pod_combat_ai_intent value = flag:stabilize }
+					set_variable = { name = pod_combat_ai_intent_n value = 4 }
+					set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+				}
+			}
+			# Unrestricted escape. Deliberately ungated so the list always has a valid
+			# branch (an actor whose whole loadout is momentarily unusable has all four
+			# counters at 0), and deliberately tiny so it reads as a rare release valve
+			# rather than a fifth option.
+			1 = {
+				scope:combat_host = {
+					set_variable = { name = pod_combat_ai_intent value = flag:none }
+					set_variable = { name = pod_combat_ai_intent_n value = 0 }
+					set_variable = { name = pod_combat_ai_intent_emg value = 0 }
+				}
+			}
+		}
+	}
+}
+
 # Stages the pick fields and emits the record. Host scope; scope:chosen_move and
 # scope:ai_actor must be live. Called from the execute gate in the selector.
 pod_combat_ai_trace_pick_effect = {
@@ -990,12 +1444,6 @@ pod_combat_ai_trace_pick_effect = {
 	}
 }
 
-# Counts how many loadout entries would survive the SAME pool filter the roll
-# uses. Deliberately re-runs the selector's own limit rather than a cheaper
-# approximation: pod_combat_move_is_usable_now_trigger alone is NOT the pool (six
-# AI-only gates cull further), so a cheaper count would report a number the
-# selector never saw. Must run AFTER the per-action precompute, whose host vars
-# the B03 exclusion gates read, or the count and the roll disagree.
 # Trace helper: folds the largest hp_damage in the eligible pool. Its own scope
 # switch means it is safe to call from an every_in_list body (an INLINE switch
 # there corrupts the iteration scope; an effect call does not).
@@ -1013,6 +1461,12 @@ pod_combat_ai_trace_fold_max_dmg_effect = {
 	}
 }
 
+# Counts how many loadout entries would survive the SAME pool filter the roll
+# uses. Deliberately re-runs the selector's own limit rather than a cheaper
+# approximation: pod_combat_move_is_usable_now_trigger alone is NOT the pool (six
+# AI-only gates cull further), so a cheaper count would report a number the
+# selector never saw. Must run AFTER the per-action precompute, whose host vars
+# the B03 exclusion gates read, or the count and the roll disagree.
 pod_combat_ai_trace_count_eligible_effect = {
 	if = {
 		limit = { exists = global_var:pod_combat_tune_ai_trace }
@@ -1153,7 +1607,9 @@ pod_combat_ai_select_and_execute_move_effect = {
 			# first target selection; this guarded copy is a no-op once that
 			# fired and only computes here if the hoist somehow did not. Runs once per
 			# combat (guard var on the AI char, cleared at the slot-init / group-
-			# teardown AI cleanup) so the weight block only READS the bias vars.
+			# teardown AI cleanup) so the intent chooser and the target-preference
+			# derivation only ever READ the bias vars. The weight block no longer reads
+			# them at all - see the note above the floor.
 			scope:ai_actor = {
 				if = {
 					limit = { NOT = { has_variable = pod_combat_pers_profile_done } }
@@ -1171,13 +1627,21 @@ pod_combat_ai_select_and_execute_move_effect = {
 				pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
 			}
 
-			# Debug trace only: count the pool the roll is about to see. Placed here
-			# because this is the one point where the count and the roll agree - the
-			# per-action precompute above has written the host vars the exclusion
-			# gates read, and the roll has not yet consumed anything.
-			# One loadout walk that retires the per-candidate tier rescan (P01).
+			# One loadout walk that retires the per-candidate tier rescan (P01), and
+			# folds the per-intent usable counts the chooser below reads.
 			pod_combat_ai_precompute_max_tiers_effect = yes
 
+			# Tactical intent for this action. AFTER the walk (it reads the per-intent
+			# counters that walk folds) and BEFORE the roll, whose dispatch arm reads
+			# the intent it writes.
+			pod_combat_ai_choose_intent_effect = yes
+
+			# Debug trace only: count the pool the roll is about to see. Placed here
+			# because the per-action precompute above has written the host vars the
+			# exclusion gates read and the roll has not yet consumed anything. Note
+			# this is the PRE-INTENT pool: the intent narrows the roll after this
+			# count, so the two agree only on an unrestricted (none / steal) action.
+			# The per-intent counts in the same trace record are the narrowed view.
 			pod_combat_ai_trace_count_eligible_effect = yes
 
 			# Iteration scope = the candidate story. save_temporary_scope_as
@@ -1231,21 +1695,19 @@ pod_combat_ai_select_and_execute_move_effect = {
 								scope:ai_candidate_move = { has_variable = summons_combatant }
 							}
 						}
-						# Mind-control waste gate: never pick the move when the
-						# current target can never be dominated (a player, or a
-						# defended target this caster cannot bypass).
+						# Control waste gates: never pick a control move that cannot
+						# change anything about the current target - an undominatable
+						# or already-dominated victim, or a drain no deeper than the
+						# one already pending. Both predicates are named triggers
+						# because the intent counter fold has to apply the identical
+						# test; see pod_combat_ai_mind_control_is_useful_trigger.
 						trigger_if = {
 							limit = { scope:ai_candidate_move = { has_variable = mind_control } }
-							pod_combat_ai_target_is_ai_trigger = yes
-							# Nested so the target_char deref runs only once the mirror is known to
-							# exist: a has_variable in the SAME limit would not stop it.
-							trigger_if = {
-								limit = { has_variable = pod_combat_target_char }
-								trigger_if = {
-									limit = { var:pod_combat_target_char = { POD_has_strong_mental_defenses_trigger = yes } }
-									scope:ai_actor = { can_bypass_mental_defenses_trigger = yes }
-								}
-							}
+							pod_combat_ai_mind_control_is_useful_trigger = { STORY = scope:ai_candidate_move }
+						}
+						trigger_if = {
+							limit = { scope:ai_candidate_move = { has_variable = ap_drain } }
+							pod_combat_ai_ap_drain_is_useful_trigger = { STORY = scope:ai_candidate_move }
 						}
 
 						# single_pc needs a loadable PC slot: without one the swap is a no-op and the
@@ -1255,29 +1717,14 @@ pod_combat_ai_select_and_execute_move_effect = {
 							pod_combat_pc_slot_is_loadable_trigger = yes
 						}
 
-						# B03 hard exclusions: a pure control move that would change nothing is dropped
-						# from the pool entirely (the stall / alternate-target retry covers an emptied
-						# pool). Hybrids keep their other payload and take the soft @ai_control_wasted
-						# penalty instead. The tgt_* summary vars are always-written by the precompute,
-						# so these host reads are guard-free.
-						trigger_if = {
-							limit = {
-								scope:ai_candidate_move = {
-									has_variable = ap_drain
-									NOR = { has_variable = hp_damage  has_variable = morale_damage  has_variable = dot_amount  has_variable = initiative_debuff  has_variable = mind_control  has_variable = remove_guard has_variable = soak_debuff_round_tier  has_variable = soak_debuff_combat_tier  has_variable = hit_debuff_round_tier  has_variable = hit_debuff_combat_tier }
-								}
-							}
-							var:pod_combat_ai_tgt_ap_drain < scope:ai_candidate_move.var:ap_drain
-						}
-						trigger_if = {
-							limit = {
-								scope:ai_candidate_move = {
-									has_variable = mind_control
-									NOR = { has_variable = hp_damage  has_variable = morale_damage  has_variable = dot_amount  has_variable = initiative_debuff  has_variable = ap_drain  has_variable = remove_guard has_variable = soak_debuff_round_tier  has_variable = soak_debuff_combat_tier  has_variable = hit_debuff_round_tier  has_variable = hit_debuff_combat_tier }
-								}
-							}
-							NOT = { var:pod_combat_ai_tgt_controlled = 1 }
-						}
+						# B03 hard exclusion, DoT: a pure burn no stronger than the one already
+						# running is dropped from the pool entirely (the stall / alternate-target
+						# retry covers an emptied pool). Hybrids keep their other payload and take
+						# the soft penalty instead. The control equivalents moved up into the
+						# shared waste triggers above; this one stays inline because the intent
+						# counters do not mirror it (exactly one catalogue move is a pure DoT, and
+						# it sits in pressure, the largest pool, so it can never be its sole
+						# member). tgt_* summary vars are always-written, so these reads are bare.
 						trigger_if = {
 							limit = {
 								scope:ai_candidate_move = {
@@ -1378,6 +1825,112 @@ pod_combat_ai_select_and_execute_move_effect = {
 							}
 							pod_combat_ai_has_team_member_needing_heal_trigger = { STORY = scope:ai_candidate_move }
 						}
+
+						# ===== TACTICAL INTENT DISPATCH =====
+						# The intent chosen for this action (pod_combat_ai_choose_intent_effect,
+						# which runs earlier in this same effect, so the read needs no guard)
+						# restricts the pool to the moves serving it. This is the lever the
+						# whole feature exists for: measured in shadow mode over 1029 picks it
+						# moves 52% of restricting picks, where a weight nudge inside the roll
+						# moves about 1%.
+						#
+						# Membership is the PAYLOAD a move stamps, not its authored category:
+						# a CTL-filed move whose only payload is morale damage breaks morale.
+						# THIS LIST EXISTS IN THREE COPIES - change one, change all three:
+						# here, the counter fold in pod_combat_ai_fold_usable_move_effect, and
+						# scripts/python/POD-Combat/verify_intent_membership.py (which proves
+						# no costed move is orphaned by all four).
+						#
+						# The two control payloads are listed PLAIN here, unlike in the fold:
+						# the roll already drops a useless mind_control / ap_drain through the
+						# shared waste triggers above, so repeating the test would be dead
+						# weight. The fold has to apply it because nothing else culls its count.
+						#
+						# Zero-AP moves are admitted under EVERY intent - they cost the turn
+						# nothing, so excluding one could only ever throw away a free action.
+						# ap_cost is stamped on all 567 moves by POD_init_combat_move, so it
+						# reads without a guard.
+						#
+						# NO trigger_else, deliberately: flag:none and flag:steal do not
+						# restrict. A stolen turn is already hard-gated to single-target
+						# offense above, and none is the lock fallback and the escape branch.
+						trigger_if = {
+							limit = { var:pod_combat_ai_intent = flag:pressure }
+							scope:ai_candidate_move = {
+								OR = {
+									var:ap_cost = 0
+									has_variable = hp_damage
+									# A morale burn is attrition on the break axis, not this one.
+									AND = {
+										has_variable = dot_amount
+										NOT = { has_variable = dot_morale }
+									}
+								}
+							}
+						}
+						trigger_else_if = {
+							limit = { var:pod_combat_ai_intent = flag:break }
+							scope:ai_candidate_move = {
+								OR = {
+									var:ap_cost = 0
+									has_variable = morale_damage
+									AND = {
+										has_variable = dot_amount
+										has_variable = dot_morale
+									}
+								}
+							}
+						}
+						trigger_else_if = {
+							limit = { var:pod_combat_ai_intent = flag:setup }
+							scope:ai_candidate_move = {
+								OR = {
+									var:ap_cost = 0
+									has_variable = soak_buff_round_tier
+									has_variable = soak_buff_combat_tier
+									has_variable = soak_debuff_round_tier
+									has_variable = soak_debuff_combat_tier
+									has_variable = hit_buff_round_tier
+									has_variable = hit_buff_combat_tier
+									has_variable = hit_debuff_round_tier
+									has_variable = hit_debuff_combat_tier
+									has_variable = mind_control
+									has_variable = ap_drain
+									has_variable = initiative_debuff
+									has_variable = remove_guard
+									has_variable = bypass_dodge
+									has_variable = bypass_stealth
+									has_variable = drain
+									has_variable = summons_combatant
+									has_variable = steal_gold
+									has_variable = gain_dread
+									has_variable = bonus_effect
+									has_variable = retaliate_damage
+									has_variable = retaliate_morale
+								}
+							}
+						}
+						trigger_else_if = {
+							limit = { var:pod_combat_ai_intent = flag:stabilize }
+							scope:ai_candidate_move = {
+								OR = {
+									var:ap_cost = 0
+									has_variable = hp_heal
+									has_variable = morale_heal
+									has_variable = set_guard
+									has_variable = dodge
+									has_variable = stealth
+									has_variable = soak_buff_round_tier
+									has_variable = soak_buff_combat_tier
+								}
+							}
+						}
+						# Everything else - flag:none, flag:steal, and a locked pass -
+						# admits the whole pool. REQUIRED, not stylistic: a TRIGGER
+						# else-chain must be terminated by a trigger_else, and the engine
+						# rejects `trigger_else_if with no trigger_else` at load even
+						# though an open chain happens to evaluate the way you want.
+						trigger_else = { always = yes }
 					}
 				}
 
@@ -2298,66 +2851,13 @@ pod_combat_ai_select_and_execute_move_effect = {
 						NOT = { has_variable = is_starter_move }
 					}
 
-					# ===== PERSONALITY BAND =====
-					# Reads the precomputed scope:ai_actor bias vars and dispatches
-					# on the CANDIDATE's own combat_category flag and primitive
-					# has_variable s - no has_trait at candidate time. Suppressed on
-					# a stolen (dominated) turn so the dominator intent drives the
-					# steal, not the victim temperament; the control flag is
-					# HOST-scoped.
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_atk
-						var:combat_category = flag:ATK
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_def
-						var:combat_category = flag:DEF
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					# De-dup: a control PRIMITIVE candidate reads _control, not its
-					# CTL category bias. So suppress _ctl on mind_control / ap_drain
-					# moves to avoid double-counting.
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_ctl
-						var:combat_category = flag:CTL
-						NOT = { has_variable = mind_control }
-						NOT = { has_variable = ap_drain }
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_pwr
-						var:combat_category = flag:PWR
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_dot
-						has_variable = dot_rounds
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					# _control covers BOTH control primitives (one modifier each,
-					# so a both-flag move reads it twice - intentional; the var is
-					# clamped at +/-10).
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_control
-						has_variable = mind_control
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_control
-						has_variable = ap_drain
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-					# Savage compounds ATK for a berserker (intentional, bounded by
-					# the +8 clamp); gates on classes that always land aggravated
-					# (the trigger carries its own has_variable guard - damage_type
-					# is absent on buff/heal/utility candidates).
-					modifier = {
-						add = scope:ai_actor.var:pod_combat_pers_bias_savage
-						pod_combat_class_always_aggravated_trigger = yes
-						pod_combat_ai_turn_not_controlled_trigger = yes
-					}
-
+					# NOTE: no personality modifiers here. Temperament is expressed
+					# ONE level up, when the chooser picks the action's intent, and
+					# re-applying it per candidate would double-count the same bias
+					# inside a pool already selected on it. The bias vars still exist
+					# and are still read - by the chooser's lottery branches and by
+					# the target-preference threshold.
+					#
 					# Floor: random_in_list silently drops items with weight
 					# <= 0, so a move buried by situational penalties would
 					# become unpickable. Floor keeps it as a fallback.
