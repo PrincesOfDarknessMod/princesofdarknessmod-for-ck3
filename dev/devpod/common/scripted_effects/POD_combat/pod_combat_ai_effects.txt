@@ -589,6 +589,7 @@ pod_combat_ai_refresh_target_if_dead_effect = {
 		# the sole-survivor fizzle - it may have just KO'd its last teammate - so the
 		# remaining actions stop (try_action gates on the fizzle flag) instead of
 		# striking a corpse, before reloading the workspace.
+		pod_combat_ai_trace_sel_ctx_effect = { CTX = 2 }
 		pod_combat_ai_select_target_for_turn_effect = yes
 		pod_combat_ai_check_control_fizzle_effect = yes
 		pod_combat_load_workspace_effect = yes
@@ -651,9 +652,17 @@ pod_combat_ai_try_action_effect = {
 		# rest of the fight, and the trace would report that as an honest run of
 		# intent=none.
 		remove_variable = pod_combat_ai_intent_lock
+		# Per-ATTEMPT, like the lock above: it records that THIS attempt snapped, and
+		# the retry reads it to decide whether to block further snapping this turn.
+		remove_variable = pod_combat_ai_snap_done
 
 		# (refresh helper is a no-op while the current target still lives)
 		pod_combat_ai_refresh_target_if_dead_effect = yes
+
+		# Then, if a kill is on the field and the mark is not on it, move the mark.
+		# After the dead-target refresh (so a corpse is replaced first) and before the
+		# move pipeline (so intent and scoring see the snapped target).
+		pod_combat_ai_snap_to_finishable_target_effect = yes
 
 		# A controlled (dominated) turn that has run out of own-side targets to
 		# betray (refresh just set pod_combat_turn_control_fizzled) stops acting for
@@ -718,6 +727,79 @@ pod_combat_ai_try_action_effect = {
 	}
 }
 
+# One bounded mid-turn re-target: when a finishable enemy is on the field and this
+# actor is NOT pointed at one, swing the mark onto it before the action is chosen.
+# Closes the gap the anti-thrash rule leaves open - the AI otherwise keeps its mark
+# all turn, so a kill that appears on another slot is simply unreachable until the
+# next turn, by which time someone else has usually taken it or it has healed.
+#
+# Runs at the head of each action attempt, BEFORE the move pipeline, so the intent
+# chooser and the scoring walk both see the snapped target. That ordering is what
+# makes the snap intent-independent: a non-damage intent does not care which enemy is
+# marked, and the break branch's shaken nudge then reads the snapped target's morale,
+# which is the answer it should have had all along.
+#
+# The finishable summary is RECOMPUTED here rather than reused. The copy the previous
+# action left is one action stale, and on a turn's FIRST attempt it belongs to the
+# previous ACTOR - possibly the opposing side, possibly inverted by a controlled turn.
+# By this point the workspace is loaded and AP is seeded, so the recompute sees this
+# actor's real state. It is idempotent; the per-action precompute runs it again.
+#
+# Host scope, matching try_action.
+pod_combat_ai_snap_to_finishable_target_effect = {
+	if = {
+		limit = {
+			NOT = { has_variable = pod_combat_turn_control_fizzled }
+			# Set once the alternate-target retry has had to move off a mark the snap
+			# chose. It does NOT bound snaps per turn - the gate legitimately reopens
+			# whenever the current mark stops being finishable, most often because it
+			# died and the refresh replaced it, and snapping onto the next kill is the
+			# point. What it bounds is the one pathological reopening: an AP-affordable
+			# "finisher" that is out of energy or has spent its once_per leaves the
+			# enemy flagged while the roll comes up empty, so the snap and the retry
+			# would trade the mark until the action cap.
+			NOT = { has_variable = pod_combat_ai_snap_blocked }
+			has_variable = pod_combat_selected_target_team
+		}
+		pod_combat_ai_flag_finishable_enemy_effect = yes
+		if = {
+			limit = {
+				var:pod_combat_ai_enemy_finishable = 1
+				var:pod_combat_ai_cur_target_finishable = 0
+			}
+			# Restrict the roll to finishable slots for this ONE call. A weighted
+			# re-roll will not do: even with the x3 a finishable slot takes only
+			# ~15-25% of a full pool (measured), so the gate would stay open and the
+			# snap would re-fire every action. Restriction closes it in one roll -
+			# the new mark IS finishable, so the next attempt reads
+			# pod_combat_ai_cur_target_finishable = 1 and the snap no-ops.
+			set_variable = { name = pod_combat_ai_snap_restrict value = 1 }
+			pod_combat_ai_trace_sel_ctx_effect = { CTX = 4 }
+			pod_combat_ai_select_target_for_turn_effect = yes
+			# Cleared unconditionally and immediately. The dead-target refresh and the
+			# alternate-target retry share this selector and MUST stay unrestricted; a
+			# leak into the retry could restrict it to the very slot it just excluded,
+			# guaranteeing an empty roll and forfeiting the rest of the turn.
+			remove_variable = pod_combat_ai_snap_restrict
+			if = {
+				# The core's this-pass proof. An empty restricted roll leaves the old
+				# mark and its workspace untouched, which is the correct no-op rather
+				# than a half-applied re-target.
+				limit = { has_variable = pod_combat_ai_target_picked }
+				pod_combat_ai_check_control_fizzle_effect = yes
+				pod_combat_load_workspace_effect = yes
+				pod_combat_ai_record_focus_target_effect = yes
+				# Two scopes, deliberately. snap_done is per-ATTEMPT and feeds the pick
+				# trace; snapped_this_turn survives the attempt boundary because the
+				# loop the retry has to break is cross-attempt by nature - snap in one
+				# attempt, retry in the next.
+				set_variable = { name = pod_combat_ai_snap_done value = 1 }
+				set_variable = { name = pod_combat_ai_snapped_this_turn value = 1 }
+			}
+		}
+	}
+}
+
 # One bounded alternate-target attempt after a no-pick pass: exclude the
 # exhausted target, re-select (controlled-aware, via the shared core), reload,
 # and re-run the selector once. Only re-executes if a genuinely different target
@@ -735,11 +817,38 @@ pod_combat_ai_retry_alternate_target_effect = {
 	# remaining action of the turn with AP still in hand.
 	# Cleared at the top of the next try_action, so it cannot outlive this attempt.
 	set_variable = { name = pod_combat_ai_intent_lock value = 1 }
+	# If the kill-snap has moved the mark at any point THIS TURN, stop it snapping
+	# again for the rest of the turn. The snap would otherwise put the mark straight
+	# back onto the enemy this retry is abandoning: its gate only asks "is the current
+	# target finishable", which stays true for an enemy the actor cannot actually
+	# finish (an affordable finisher that is out of energy or has spent its once_per),
+	# so the two would trade the mark until the action cap.
+	#
+	# Reads the TURN-scoped var, not pod_combat_ai_snap_done. try_action clears
+	# snap_done at the head of every attempt, and the hand-off this guards against is
+	# cross-attempt - the snap lands in one attempt and the retry that undoes it runs
+	# in a later one - so keying on the per-attempt var armed the block only in the
+	# case that was never the problem.
+	#
+	# Slightly over-restrictive by choice: a snap earlier in the turn blocks a later
+	# one even onto a different enemy. With ~2 actions per turn that costs almost
+	# nothing, and the precise alternative (remember which slot was snapped to and
+	# block only when the retry abandons that one) is more state to leak.
+	if = {
+		limit = { has_variable = pod_combat_ai_snapped_this_turn }
+		set_variable = { name = pod_combat_ai_snap_blocked value = 1 }
+	}
+	# This action's target is now the retry's choice, not the snap's. Clearing here
+	# keeps the pick record's snap= field honest: without it a retry that deliberately
+	# re-targets to a NON-finishable slot still logs snap=1, which reads as a snap that
+	# failed to land on a kill.
+	remove_variable = pod_combat_ai_snap_done
 	if = {
 		limit = { has_variable = pod_combat_selected_target_team }
 		set_variable = { name = pod_combat_ai_excluded_target_team     value = var:pod_combat_selected_target_team }
 		set_variable = { name = pod_combat_ai_excluded_target_position value = var:pod_combat_selected_target_position }
 	}
+	pod_combat_ai_trace_sel_ctx_effect = { CTX = 3 }
 	pod_combat_ai_select_target_for_turn_effect = yes
 	pod_combat_ai_check_control_fizzle_effect = yes
 	pod_combat_load_workspace_effect = yes
@@ -814,6 +923,7 @@ pod_combat_ai_precompute_action_summary_effect = {
 	set_variable = { name = pod_combat_ai_tgt_dot_amount value = 0 }
 	set_variable = { name = pod_combat_ai_tgt_dot_rounds value = 0 }
 	set_variable = { name = pod_combat_ai_tgt_dot_morale value = 0 }
+	set_variable = { name = pod_combat_ai_tgt_hp value = 0 }
 	if = {
 		limit = { has_variable = pod_combat_selected_target_team }
 		every_in_list = {
@@ -865,10 +975,10 @@ pod_combat_ai_precompute_action_summary_effect = {
 	}
 }
 
-# Copies the selected target slot's control / DoT state onto the host summary
-# vars. this = the target slot; $HOST$ = combat host. Values ride scope values
-# (numbers) so no flag degrades; DoT-morale is literal-branch seeded from the
-# slot_dot_kind flag, never a value copy.
+# Copies the selected target slot's control / DoT state, and its remaining wound
+# boxes, onto the host summary vars. this = the target slot; $HOST$ = combat host.
+# Values ride scope values (numbers) so no flag degrades; DoT-morale is
+# literal-branch seeded from the slot_dot_kind flag, never a value copy.
 pod_combat_ai_mirror_target_pending_effect = {
 	save_scope_value_as = { name = m_ctrl value = 0 }
 	if = { limit = { has_variable = slot_controlled } save_scope_value_as = { name = m_ctrl value = var:slot_controlled } }
@@ -878,11 +988,20 @@ pod_combat_ai_mirror_target_pending_effect = {
 	if = { limit = { has_variable = slot_dot_rounds } save_scope_value_as = { name = m_dotr value = var:slot_dot_rounds } }
 	save_scope_value_as = { name = m_dotm value = 0 }
 	if = { limit = { has_variable = slot_dot_kind  var:slot_dot_kind = flag:morale } save_scope_value_as = { name = m_dotm value = 1 } }
+	# Wound boxes live on the character, not the slot, so this one needs a scope
+	# switch - safe here because the caller reaches this through an effect CALL, not
+	# an inline switch in its every_in_list body.
+	save_scope_value_as = { name = m_hp value = 0 }
+	if = {
+		limit = { exists = var:slot_char }
+		var:slot_char = { save_scope_value_as = { name = m_hp value = POD_empty_damage_boxes } }
+	}
 	$HOST$ = {
 		set_variable = { name = pod_combat_ai_tgt_controlled value = scope:m_ctrl }
 		set_variable = { name = pod_combat_ai_tgt_dot_amount value = scope:m_dota }
 		set_variable = { name = pod_combat_ai_tgt_dot_rounds value = scope:m_dotr }
 		set_variable = { name = pod_combat_ai_tgt_dot_morale value = scope:m_dotm }
+		set_variable = { name = pod_combat_ai_tgt_hp value = scope:m_hp }
 	}
 }
 
@@ -1523,6 +1642,16 @@ pod_combat_ai_trace_turn_effect = {
 		remove_variable = pod_combat_ai_trace_eligible
 		remove_variable = pod_combat_ai_trace_max_dmg
 		remove_variable = pod_combat_ai_trace_move
+		remove_variable = pod_combat_ai_trace_sel_ctx
+		remove_variable = pod_combat_ai_trace_sel_cand
+		remove_variable = pod_combat_ai_trace_sel_kb_hp
+		remove_variable = pod_combat_ai_trace_sel_kb_mor
+		remove_variable = pod_combat_ai_trace_sel_actor_t
+		remove_variable = pod_combat_ai_trace_sel_picked
+		remove_variable = pod_combat_ai_trace_sel_team
+		remove_variable = pod_combat_ai_trace_sel_pos
+		remove_variable = pod_combat_ai_trace_sel_hp
+		remove_variable = pod_combat_ai_trace_sel_mor
 	}
 }
 
