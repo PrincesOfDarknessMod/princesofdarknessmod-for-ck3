@@ -186,10 +186,10 @@ pod_combat_apply_retaliation_effect = {
 	# $KIND_VAR$        = flag-valued workspace var: morale, aggravated, or an
 	#                     elemental damage class (fire/cold/...).
 	#
-	# bypass_guard: retaliation ignores the actor's guard (guard is for
-	# incoming attacks, not counter strikes). Its scope-export return
-	# contract leaves the main attack's outcome / attack_result vars
-	# untouched.
+	# Retaliation bypasses guard: guard applies to incoming attacks, not
+	# counter strikes. pod_combat_deal_hp_damage_bypass_guard_effect's
+	# scope-export return contract leaves the main attack's outcome /
+	# attack_result vars untouched.
 
 	# ── Spirit-damage gate ──
 	# Retaliation skips the contact resolver (reflex, not a deliberate
@@ -281,10 +281,12 @@ pod_combat_apply_retaliation_effect = {
 
 pod_combat_deal_typed_retal_damage_effect = {
 	# Typed retaliation: map the $KIND_VAR$ class flag to a PoD death_reason and
-	# deal it bypass-guard (the reflex path). Mirrors the direct-hit switch in
-	# pod_combat_apply_single_hp_damage_effect (identity in 7 of 8 elements;
-	# holy -> true_faith) plus the aggravated arm - keep the kind tables in
-	# step. An element's aggravated-ness comes from PoD's weakness mapping.
+	# deal it bypass-guard (the reflex path). One arm per elemental class, each
+	# flag name passing through as the REASON suffix except holy -> true_faith,
+	# plus the aggravated arm; superficial / unset falls back to duel. Mirrors
+	# the direct-hit switch in pod_combat_apply_single_hp_damage_effect and the
+	# DoT switch in pod_combat_deal_dot_tick_from_host_effect - keep all three
+	# in step. An element's aggravated-ness comes from PoD's weakness mapping.
 	# $TARGET_SIDE$ = who takes the counter. $AMOUNT$ = pre-soak amount.
 	switch = {
 		trigger = var:$KIND_VAR$
@@ -346,7 +348,7 @@ pod_combat_apply_dot_wound_effect = {
 		save_scope_value_as = { name = dot_boxes_applied value = scope:final_damage }
 		POD_vanilla_wound_treatment = { REASON = $REASON$ }
 		if = {
-			# POD-Integration practice-spar addition: no lasting balefire stacks in practice.
+			# No lasting balefire stacks in practice.
 			limit = { scope:death_reason = flag:death_balefire  NOT = { has_character_flag = pod_combat_practice_active } }
 			while = { count = scope:final_damage  POD_add_modifier_and_track_stacks = { TYPE = character MODIFIER = balefire_health_modifier } }
 		}
@@ -781,8 +783,9 @@ pod_combat_deal_hp_damage_bypass_guard_effect = {
 # attack, then reverts for future actions.
 #
 # $ACTOR_SIDE$ = "actor" or "target" - workspace side that just attacked.
-# Retaliation deliberately does NOT route through here (it goes via the
-# bare bypass_guard helper) - a reflex strike doesn't break stealth.
+# Retaliation deliberately does NOT route through here (it goes straight to
+# pod_combat_deal_hp_damage_bypass_guard_effect) - a reflex strike doesn't
+# break stealth.
 pod_combat_consume_actor_stealth_effect = {
 	pod_combat_break_stealth_workspace_effect = { SIDE = $ACTOR_SIDE$ }
 }
@@ -1414,9 +1417,13 @@ pod_combat_push_log_effect = {
 			set_variable = { name = actor_side value = -1 }
 		}
 		# AoE burst index (set only inside an AoE iterator): 0 = first row,
-		# 1+ = subsequent. The GUI's buff-rider gate uses it to emit
-		# move-level stance / tier-buff lines once per burst. Absent on
-		# non-AoE / §16 wrap-up rows so the rider renders normally.
+		# 1+ = subsequent. Input to the segment-visibility bake below, where
+		# pod_combat_log_seg_burst_gate_trigger reads it so each move-declared
+		# segment renders once per burst instead of once per target row. Absent
+		# on non-AoE rows, which therefore pass the gate; an AoE's §16 wrap-up
+		# row instead inherits the LAST per-target index, because the host var
+		# survives the per-target clear (see the seg_recoil bake below).
+		# The GUI never reads it - it sees only the baked seg_<x>_* vars.
 		if = {
 			limit = { scope:combat_host = { has_variable = pod_combat_aoe_iter_burst_index } }
 			set_variable = { name = aoe_burst_index value = scope:combat_host.var:pod_combat_aoe_iter_burst_index }
@@ -1533,18 +1540,23 @@ pod_combat_push_log_effect = {
 		# The pod_combat_log_*_visible_value / pod_combat_log_before_<x>_value
 		# SVs in pod_combat_values.txt are thin has_variable reads of these
 		# vars. Rows that skip this bake (system / DoT / mind / daze rows)
-		# carry no seg vars and read as all-invisible, same as before.
+		# carry no seg vars and read as all-invisible.
 		# Segment conditions:
 		# - heal / morale riders: amount captured and > 0, NAND outcome
 		#     equals the segment's primary (NAND, not NOT: outcome is always
 		#     stamped above, so a multi-child NOT (= NOR) would be
 		#     permanently false and silently kill the rider).
 		# - retal rider: retal_fired overlay present, never suppressed.
-		# - recoil + intent segments: burst-gated via the shared trigger
-		#     (entry's aoe_burst_index was captured above) so move-level
-		#     lines render once per AoE burst, not once per target row.
-		# seg_bake_prior is the running "any earlier content" counter; the
-		# head counts unless outcome=utility (its loc renders "").
+		# - move-declared segments (those read off entry.var:move - tier
+		#     buffs, stance, armed retaliation, AP swing, initiative debuff):
+		#     gated on pod_combat_log_seg_burst_gate_trigger (the entry's
+		#     aoe_burst_index captured above) so a move-level claim renders
+		#     once per AoE burst, not once per target row. The amount-driven
+		#     segments (the riders above plus recoil and energy) are NOT gated;
+		#     recoil and energy carry their reason inline.
+		# seg_bake_prior is the running "any earlier content" counter. The row's
+		# result head (PODCombatLogResultText) counts as content unless
+		# outcome=utility, whose loc renders "".
 		if = {
 			limit = { NOT = { var:outcome = flag:utility } }
 			set_variable = { name = seg_bake_prior value = 1 }
@@ -2286,15 +2298,16 @@ pod_combat_cleanup_effect = {
 	# precompute); host vars, strip here so they do not leak into the next fight.
 	remove_variable = pod_combat_ai_heal_weight_superficial
 	remove_variable = pod_combat_ai_heal_weight_aggravated
-	# Per-AI-turn progress/stall + alternate-target-retry scratch (Slice 3). Host
-	# vars cleared at each AI-turn start, stripped here so they can't leak between
+	# Per-AI-turn progress/stall + alternate-target-retry scratch. Host vars
+	# cleared at each AI-turn start, stripped here so they can't leak between
 	# fights.
 	remove_variable = pod_combat_ai_turn_stalled
 	remove_variable = pod_combat_ai_action_executed
 	remove_variable = pod_combat_ai_target_picked
 	remove_variable = pod_combat_ai_excluded_target_team
 	remove_variable = pod_combat_ai_excluded_target_position
-	# Per-AI-action summary vars (B01/B02/B03 precompute); host vars, strip here.
+	# Per-AI-action summary vars from pod_combat_ai_precompute_action_summary_effect
+	# (target snapshot + own-team recipient-urgency weights); host vars, strip here.
 	remove_variable = pod_combat_ai_stun_threshold
 	remove_variable = pod_combat_ai_tgt_ap_drain
 	remove_variable = pod_combat_ai_tgt_init_bonus
@@ -2309,7 +2322,7 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_ai_team_mor_w
 	remove_variable = pod_combat_ai_team_ben_hp
 	remove_variable = pod_combat_ai_team_ben_mor
-	# Per-action AI caches: the P01 max-usable-tier set and the AP-strand pair
+	# Per-action AI caches: the max-usable-tier set and the AP-strand pair
 	# (always written, gameplay-affecting), then the debug trace scratch (normally
 	# cleared by pod_combat_ai_trace_turn_effect; these cover a fight that ends
 	# mid-turn with the trace on).
@@ -2409,10 +2422,10 @@ pod_combat_cleanup_effect = {
 }
 
 ###### PRACTICE-SPAR WOUND SNAPSHOT / RESTORE ######
-# a practice (fatality = practice) spar now applies REAL
-# wounds live during the fight (so it has stakes), is unkillable (pod_combat_nonfatal_active
-# stamped at finalize), and leaves NO lasting harm - the pre-fight wound state is snapshot
-# at combat start and restored at combat end. Both run in host scope (active-slot list).
+# A practice (fatality = practice) spar applies REAL wounds live during the fight
+# (so it has stakes), is unkillable (pod_combat_nonfatal_active stamped at
+# finalize), and leaves NO lasting harm - the pre-fight wound state is snapshot at
+# combat start and restored at combat end. Both run in host scope (active-slot list).
 
 # this = a combatant char. Snapshot its wound track (the two damage vars, read via
 # the SVs so an unset track reads 0) for restore at combat end.
@@ -2439,8 +2452,9 @@ pod_combat_restore_practice_wounds_effect = {
 	every_in_list = {
 		variable = pod_combat_active_slots
 		# The has_variable guard skips a combatant with no snapshot (a never-seated capped
-		# reinforcement); a mid-fight SUMMON is snapshotted at seat time (pod_combat_add_ally/
-		# enemy_midfight_effect), so it restores + gets pod_combat_practice_active stripped.
+		# reinforcement); a mid-fight SUMMON is snapshotted at seat time (in
+		# pod_combat_add_ally_midfight_effect / pod_combat_add_enemy_midfight_effect), so it
+		# restores + gets pod_combat_practice_active stripped.
 		limit = { var:slot_char = { has_variable = pod_combat_practice_sup_snapshot } }
 		var:slot_char = {
 			# The wound track is two vars (superficial + aggravated). Restore each to its

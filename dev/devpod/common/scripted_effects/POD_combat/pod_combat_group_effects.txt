@@ -18,8 +18,9 @@
 #                      pod_combat_target_* mirrors and the $ACTOR_SIDE$ /
 #                      $TARGET_SIDE$ parametric values.
 #   player / enemy - team membership (combat_team = flag:player/enemy).
-#                      Teams are UNBOUNDED - every slot is reached by
-#                      iterating pod_combat_active_slots and matching
+#                      No fixed positional cap (only the soft cap above) -
+#                      every slot is reached by iterating
+#                      pod_combat_active_slots and matching
 #                      (combat_team, team_position). The ONLY pointer vars
 #                      are the two leaders, pod_combat_pc_slot (player/0)
 #                      and pod_combat_enemy_leader_slot (enemy/0).
@@ -529,7 +530,6 @@ pod_combat_load_workspace_effect = {
 		}
 	}
 
-	# Set the current_hit_chance for the damage pipeline
 	if = {
 		limit = { has_variable = pod_combat_actor_hit_chance }
 		set_variable = { name = pod_combat_current_hit_chance value = var:pod_combat_actor_hit_chance }
@@ -629,11 +629,9 @@ pod_combat_bake_one_unlock_effect = {
 # loadout is settled + the fera warform pre-pass (so unlocks read the fighting
 # form). Runs on the PC scope (this = combat host; root is unset at finalize).
 pod_combat_bake_pc_loadout_unlocks_effect = {
-	# `this` is the PC (combat host) here; `root` is NOT (it is unset at finalize).
 	# Capture `this` BEFORE the every_in_list switches it to each move story, and
 	# pass that as the unlock actor. The every_in_list reading pod_combat_loadout
-	# off `this` is what proves `this` is the valid host (it is the surface the
-	# original root-based bug still iterated).
+	# off `this` is what proves `this` is the valid host.
 	save_scope_as = pod_combat_bake_actor
 	clear_variable_list = pod_combat_unlocked_moves
 	every_in_list = {
@@ -756,7 +754,10 @@ pod_combat_save_workspace_effect = {
 
 ##############################################################################################
 # SECTION 4: SLOT INITIALIZATION FROM CHARACTER
-# Reads a character's health track, soak, and prowess and stores them in slot variables.
+# Seeds the per-fight slot state and applies the character-side combat modifiers
+# (discipline buffs, duel marker). HP, soak and prowess are never stored on the
+# slot - they are read live off var:slot_char; slot_mirror_* is a display-only
+# wound-bar mirror.
 ##############################################################################################
 
 # All per-fight AI scratch on an AI character, cleared as one unit: the
@@ -932,7 +933,7 @@ POD_combat_create_duel_effect = {
 
 	# Close the config window if open. The sheet scratch list goes with it -
 	# this is a close path like pod_combat_close_skills, and skipping the
-	# clear would leave up to 618 story refs in the save.
+	# clear would leave one story ref per catalogue move in the save.
 	remove_variable = pod_combat_config_open
 	clear_variable_list = pod_combat_sheet_rows
 
@@ -1000,7 +1001,7 @@ POD_combat_create_duel_effect = {
 
 POD_combat_duel_add_ally_effect = {
 	# $CHARACTER$ = next ally; appended at player/<pod_combat_player_team_size>,
-	# counter bumped (unbounded). Occupancy only; stat init runs at finalize.
+	# counter bumped. Occupancy only; stat init runs at finalize.
 	# Runs in the PC (host) scope, so the first ally lands at player/1.
 	#
 	# pod_combat_max_team_size is a runaway guardrail; an add past it is dropped.
@@ -1145,7 +1146,6 @@ POD_combat_finalize_duel_effect = {
 	# Deferred from add_* (see Section 5 header for why).
 	pod_combat_init_all_slots_effect = yes
 
-	# -- Calculate hit chances for all combatants --
 	# Leader-baseline hit chances (formula in the effect). Pair-specific recalc
 	# against the selected target happens later via pod_combat_recalc_pc_hit_chance_effect.
 	pod_combat_calculate_all_hit_chances_effect = yes
@@ -1282,8 +1282,9 @@ POD_combat_finalize_duel_effect = {
 pod_combat_calc_one_hit_chance_effect = {
 	# $OPP_PROWESS$ = the opposing team leader's prowess (a value the caller
 	#   captured in host scope). Base hit = pod_combat_hit_chance_base +
-	#   (own prowess - opposing leader prowess) / 2, clamped 20-95, then the
-	#   live hit_chance is rebuilt from base + active tiers.
+	#   (own prowess - opposing leader prowess) / 2, clamped to the shared
+	#   pod_combat_hit_chance_min/max window, then the live hit_chance is
+	#   rebuilt from base + active tiers.
 	if = {
 		limit = { has_variable = slot_char exists = var:slot_char }
 		var:slot_char = {
@@ -1298,8 +1299,8 @@ pod_combat_calc_one_hit_chance_effect = {
 					subtract = $OPP_PROWESS$
 					divide = 2
 				}
-				min = 20
-				max = 95
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
 			}
 		}
 		pod_combat_set_slot_var_effect = { NAME = base_hit_chance VALUE = scope:base_hit }
@@ -1310,7 +1311,8 @@ pod_combat_calc_one_hit_chance_effect = {
 pod_combat_calculate_all_hit_chances_effect = {
 	# Compute every slot's base hit chance by iterating pod_combat_active_slots.
 	# base = pod_combat_hit_chance_base + (own prowess - opposing leader
-	# prowess) / 2, clamped 20-95. Player-team slots measure against the enemy
+	# prowess) / 2, clamped to the pod_combat_hit_chance_min/max window.
+	# Player-team slots measure against the enemy
 	# leader; enemy-team slots against the PC. recalc_slot_hit then rebuilds
 	# live hit_chance from base + active tiers (so tier debuffs survive
 	# the round-end reset).
@@ -1353,7 +1355,7 @@ pod_combat_calculate_all_hit_chances_effect = {
 ##############################################################################################
 
 pod_combat_recalc_pc_hit_chance_effect = {
-	# Rebuild slot 0's base_hit_chance from the loaded target's prowess,
+	# Rebuild the PC slot's base_hit_chance from the loaded target's prowess,
 	# then full tier recalc so active hit buffs/debuffs reapply on the new
 	# base. Called on PC target swap (pod_combat_select_target) and from the
 	# tier-recalc path. PC-only by design (the `_pc_` name encodes that);
@@ -1372,8 +1374,8 @@ pod_combat_recalc_pc_hit_chance_effect = {
 					subtract = var:pod_combat_target_prowess
 					divide = 2
 				}
-				min = 20
-				max = 95
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
 			}
 		}
 		set_variable = { name = pod_combat_actor_base_hit_chance value = scope:pc_recalc_base_hit }
@@ -1654,14 +1656,14 @@ pod_combat_build_turn_order_list_effect = {
 ##############################################################################################
 
 pod_combat_find_next_actor_effect = {
-	# Find the alive combatant with highest unprocessed initiative. best_init
-	# starts at -999, not -1: slot_init_bonus can go NEGATIVE (stacked
-	# initiative_debuff), and a -1 floor would skip any slot landing <= -1
-	# (strict > never fires), stealing turns from heavily-debuffed combatants.
+	# Find the alive combatant with highest unprocessed initiative. The seed sits
+	# below every reachable initiative because slot_init_bonus can go NEGATIVE
+	# (stacked initiative_debuff), and a -1 floor would skip any slot landing
+	# <= -1 on the strict > compare, stealing turns from debuffed combatants.
 	set_variable = { name = pod_combat_best_init value = -999 }
 	# Tiebreak ordinal of the running best (is_enemy asc, then team_position asc),
 	# matching pod_combat_calc_turn_orders_effect so the initiative track's predicted
-	# order is authoritative. Seeded to 2 (> the max real is_enemy of 1) so the first
+	# order is authoritative. Seeded above the max real is_enemy so the first
 	# candidate always wins via the best_found gate, never via this compare.
 	set_variable = { name = pod_combat_best_is_enemy value = 2 }
 	# best_found presence = a candidate was picked; absence after the scan = none.
@@ -1714,8 +1716,8 @@ pod_combat_find_next_actor_effect = {
 		}
 	}
 
-	# Set the current actor from the best slot found, or clear the pointer
-	# if nobody qualified (all alive slots have acted -> round is over).
+	# Absent best_found = every alive slot has already acted, so the else clears
+	# current_actor and the round is over.
 	if = {
 		limit = { has_variable = pod_combat_best_found }
 		set_variable = { name = pod_combat_current_actor_team value = var:pod_combat_best_team }
@@ -1865,19 +1867,27 @@ pod_combat_ai_fold_finishable_slot_effect = {
 }
 
 # Per-ACTION precompute (called from pod_combat_ai_precompute_action_summary_effect,
-# so its affordability reads see live AP). Answers "is there someone this actor can
-# finish right now", split BY KIND, because the two kinds do not overlap for most
-# actors: 73 of the 98 morale-damage moves deal no HP damage at all, so a morale
-# specialist and a bruiser are looking at different enemies. Side-aware, so a
-# controlled (dominated) actor evaluates the side it has been turned against.
+# so its affordability reads see live AP). THE definition of "finishable" for the
+# whole AI: an attackable slot at or under the HP or morale finish threshold
+# (pod_combat_ai_hp_finish_threshold / pod_combat_ai_morale_finish_threshold) while
+# the actor owns an AP-affordable move of that kind. That is a priority heuristic,
+# not proof of a kill: it tests no energy, once-per availability, damage magnitude,
+# soak, immunity, hit roll or resolved result. Consumers read the output flags
+# rather than re-deriving them, with one exception: the kill-snap admit arm in
+# pod_combat_ai_target_candidate_trigger mirrors the per-slot threshold tests
+# below and has to move with them.
+#
+# Split BY KIND, because the two kinds do not overlap for most actors: most
+# morale-damage moves deal no HP damage at all, so a morale specialist and a
+# bruiser are looking at different enemies. Side-aware, so a controlled
+# (dominated) actor evaluates the side it has been turned against.
 #
 # Outputs, all host vars and ALL written every call so readers need no guard:
-#   pod_combat_ai_enemy_finishable       1 if either kind fired. This is the
-#                                        pre-split contract, still consumed by the
-#                                        intent chooser's emergency gate, the
-#                                        finishable / finish-focus adds on all four
-#                                        lottery branches, and the critical-heal
-#                                        modifier.
+#   pod_combat_ai_enemy_finishable       1 if either kind fired. The combined
+#                                        flag, read by the intent chooser's
+#                                        emergency gate, the finishable /
+#                                        finish-focus adds on all four lottery
+#                                        branches, and the critical-heal modifier.
 #   pod_combat_ai_enemy_finishable_hp    the two halves.
 #   pod_combat_ai_enemy_finishable_mor
 #   pod_combat_ai_cur_target_finishable  1 if the currently selected target is
@@ -1895,9 +1905,8 @@ pod_combat_ai_fold_finishable_slot_effect = {
 pod_combat_ai_flag_finishable_enemy_effect = {
 	save_scope_as = host
 	# Capability once per call rather than once per slot. Deliberately affordability
-	# only, NOT pod_combat_move_is_usable_now_trigger: that is the behaviour this
-	# effect has always had, and widening it here would quietly move the intent
-	# lottery, which reads the combined flag on every branch.
+	# only, NOT pod_combat_move_is_usable_now_trigger: widening it here would quietly
+	# move the intent lottery, which reads the combined flag on every branch.
 	save_scope_value_as = { name = fin_can_hp value = 0 }
 	save_scope_value_as = { name = fin_can_mor value = 0 }
 	if = {
@@ -2014,8 +2023,10 @@ pod_combat_ai_check_control_fizzle_effect = {
 	}
 }
 
-# Can the acting AI actually deal each kind of damage this turn? Always-written
-# host vars pod_combat_ai_can_dmg_hp / _mor (0 or 1).
+# Does the acting AI own an AP-affordable move of each damage kind this turn?
+# Always-written host vars pod_combat_ai_can_dmg_hp / _mor (0 or 1). Ownership
+# plus affordability only, like the finishable scan - no energy, once-per or
+# magnitude test. The two price affordability differently on purpose (below).
 #
 # Two reads here are deliberately NOT the obvious ones, because the selector is
 # entered from three paths that disagree about what is loaded (turn start, the
@@ -2140,8 +2151,10 @@ pod_combat_ai_select_target_core_effect = {
 		weight = {
 			base = 1
 			modifier = { add = 50 }
-			# Kill priority (factor 3): converge on an enemy this actor can actually
-			# finish, on either track.
+			# Kill priority (factor 3): converge on an enemy inside the kill band on
+			# a track this actor can damage. The band (pod_combat_ai_kill_priority_boxes
+			# / pod_combat_ai_morale_kill_priority) sits one step looser than the finish
+			# thresholds, so this fires before a target is finishable.
 			#
 			# ONE factor with an OR, never two stacking factors. An enemy low on both
 			# tracks does not die any faster - the actor kills it through one of them
@@ -2150,7 +2163,7 @@ pod_combat_ai_select_target_core_effect = {
 			#
 			# Each arm is gated on the matching capability, which is what stops a
 			# morale specialist being dragged toward an HP-dying enemy it has no way
-			# to finish: 73 of the 98 morale-damage moves deal no HP damage at all.
+			# to hurt: most morale-damage moves deal no HP damage at all.
 			# The gate only bites on a specialist, since almost any loadout with an
 			# attack clears the AP cap - that narrowness is the point, not a defect.
 			#
@@ -2172,7 +2185,7 @@ pod_combat_ai_select_target_core_effect = {
 			}
 			# Cross-turn focus-fire: stick to last turn's mark. Kept ADDITIVE and
 			# strictly below the gap the kill factor opens (focus < 51), so a fresh
-			# finishable enemy on a different slot still outranks a healthy focused
+			# kill-band enemy on a different slot still outranks a healthy focused
 			# stick - see the weight budget above. One identity match per candidate,
 			# no list-walk.
 			modifier = {
@@ -2186,8 +2199,9 @@ pod_combat_ai_select_target_core_effect = {
 			# gated read via the already-resolved scope:focus_actor, no per-candidate
 			# trait walk). wounded/threat are mutually exclusive. wounded's threshold
 			# (pod_combat_ai_target_pref_wounded_threshold, one past the kill
-			# trigger) means a sadist also leans toward moderately-hurt
-			# (non-finishable) targets; the factor-3 floor still handles the finish.
+			# trigger) means a sadist also leans toward moderately-hurt targets
+			# outside the kill band; the factor-3 arm still ranks kill-band
+			# targets above them.
 			modifier = {
 				add = pod_combat_ai_target_pref_wounded_weight
 				exists = scope:focus_actor
@@ -2560,7 +2574,6 @@ pod_combat_process_group_turns_effect = {
 		pod_combat_set_slot_var_effect = { NAME = ap_leftover VALUE = prev.var:pod_combat_current_ap }
 	}
 
-	# Save PC's workspace back to the PC slot
 	pod_combat_save_workspace_effect = yes
 
 	# Round-duration debuffs expire at the END of the holder's turn (they afflicted
@@ -2752,10 +2765,9 @@ pod_combat_execute_ai_turn_effect = {
 	# pod_combat_ai_record_focus_target_effect.
 	pod_combat_ai_record_focus_target_effect = yes
 
-	# (Finishable-enemy flag moved to the per-action precompute so its affordability
-	# check reads live AP - see pod_combat_ai_precompute_action_summary_effect.)
+	# The finishable-enemy flag is raised per action, not here, so its affordability
+	# check reads live AP (pod_combat_ai_precompute_action_summary_effect).
 
-	# Set AP for this actor's turn (shared seed: effective cap / regen carry-over).
 	pod_combat_seed_turn_ap_effect = yes
 
 	# Run AI moves (uses existing pod_combat_ai_take_turn_effect which reads
@@ -2819,8 +2831,8 @@ pod_combat_check_group_victory_effect = {
 	#   2. PC (player/0) KO'd            -> player loses (PC can't act, so combat cannot continue)
 	#   3. All allies KO'd             -> player loses
 
-	# Save the PC scope so we can reference it via scope:combat_pc in set_variable
-	# (using bare `root` there triggers "Event target link 'root' returned unset scope")
+	# The set_variable arms below address the PC as scope:combat_pc: a bare `root`
+	# there errors with "Event target link 'root' returned unset scope".
 	save_scope_as = combat_pc
 
 	# --- Check 1: All enemies knocked out ---
