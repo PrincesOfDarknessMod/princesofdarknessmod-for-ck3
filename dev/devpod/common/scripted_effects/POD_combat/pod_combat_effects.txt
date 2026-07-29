@@ -332,10 +332,14 @@ pod_combat_apply_dot_wound_effect = {
 		name = final_damage
 		value = { value = $COUNT$  multiply = POD_wound_multiplier_from_splat_weaknesses  max = POD_damage_cap_per_death_reason  ceiling = yes }
 	}
-	POD_set_scope_value_from_trigger = { NAME = is_aggravated TRIGGER = "POD_damage_type_is_aggravated = { DEATH_REASON = scope:death_reason }" }
+	# Dedicated exports keep the resolved log independent of PoD's generic
+	# is_aggravated scope-value name and reset immunity between slot iterations.
+	POD_set_scope_value_from_trigger = { NAME = dot_result_agg TRIGGER = "POD_damage_type_is_aggravated = { DEATH_REASON = scope:death_reason }" }
+	save_scope_value_as = { name = dot_result_immune value = no }
 	if = {
 		limit = { POD_has_immunity_to_damage_type = { DEATH_REASON = scope:death_reason } }
 		# Hard immunity blocks the tick entirely; only the soak roll is bypassed.
+		save_scope_value_as = { name = dot_result_immune value = yes }
 		save_scope_value_as = { name = dot_boxes_applied value = 0 }
 	}
 	else_if = {
@@ -344,7 +348,7 @@ pod_combat_apply_dot_wound_effect = {
 		save_scope_value_as = { name = dot_boxes_applied value = 0 }
 	}
 	else = {
-		POD_apply_wound_boxes = { COUNT = scope:final_damage AGGRAVATED = scope:is_aggravated REASON = $REASON$ }
+		POD_apply_wound_boxes = { COUNT = scope:final_damage AGGRAVATED = scope:dot_result_agg REASON = $REASON$ }
 		save_scope_value_as = { name = dot_boxes_applied value = scope:final_damage }
 		POD_vanilla_wound_treatment = { REASON = $REASON$ }
 		if = {
@@ -397,11 +401,10 @@ pod_combat_deal_dot_tick_from_host_effect = {
 # phase B's inline switches). Kept separate from the round decrement so slot_dot_kind survives
 # until the host wound dispatch has read it.
 # DoT tick log, pushed AFTER the wound resolves so it reports the ACTUAL
-# applied amount (scope:dot_boxes_applied) and shows a 'soaks 0' row on a fully
-# immune HP tick. Reads the kind through the saved slot OBJECT (scope:dot_slot,
-# no flag degradation) and runs as a CALL from the tick loop, so it stays
-# reliable after Phase B's inline scope switches. The box icon stays the
-# always-aggravated approximation (kept from the pre-resolution version).
+# applied amount (scope:dot_boxes_applied), hard immunity, and per-victim wound
+# class. A separate blocked row covers Clay Man or any other non-immunity
+# zero-damage protection. Runs as a CALL from the tick loop, so it stays
+# reliable after Phase B's inline scope switches.
 pod_combat_push_dot_tick_resolved_log_effect = {
 	save_scope_value_as = { name = dot_log_amount value = scope:dot_boxes_applied }
 	if = {
@@ -409,18 +412,19 @@ pod_combat_push_dot_tick_resolved_log_effect = {
 		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_morale }
 	}
 	else_if = {
+		limit = { scope:dot_result_immune = yes }
+		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_immune }
+	}
+	else_if = {
 		limit = { scope:dot_boxes_applied = 0 }
-		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_soaked }
+		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_blocked }
+	}
+	else_if = {
+		limit = { scope:dot_result_agg = yes }
+		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg }
 	}
 	else = {
-		switch = {
-			trigger = scope:dot_slot.var:slot_dot_kind
-			flag:aggravated = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:fire       = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:lightning  = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			flag:balefire   = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick_agg } }
-			fallback        = { pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick } }
-		}
+		pod_combat_push_dot_tick_log_effect = { MESSAGE_KEY = dot_tick }
 	}
 }
 
@@ -460,9 +464,9 @@ pod_combat_push_mind_log_effect = {
 
 # DoT-tick log row. Reads scopes saved by pod_combat_tick_dots_effect: combat_host
 # (round), dot_log_victim (entry.actor), dot_log_amount (entry.dot_tick_amount).
-# MESSAGE_KEY = dot_tick / dot_tick_agg (HP burn, box picked by the tick
-# loop's always-aggravated approximation) or dot_tick_morale. The key IS the
-# row type, so no kind var is stamped on the row.
+# MESSAGE_KEY = dot_tick / dot_tick_agg (resolved HP wound class),
+# dot_tick_immune / dot_tick_blocked (distinct zero-damage results), or
+# dot_tick_morale. The key IS the row type, so no kind var is stamped on the row.
 pod_combat_push_dot_tick_log_effect = {
 	hidden_effect_new_object = {
 		character:POD_wraith_01 = {
@@ -488,7 +492,7 @@ pod_combat_push_dot_tick_log_effect = {
 # DoT application log row (one-time, at cast). Reads scopes saved by §13b of
 # POD_execute_combat_move: combat_host (round), dot_applied_victim (entry.actor),
 # dot_applied_amount (entry.dot_tick_amount), dot_applied_rounds (entry.dot_applied_rounds).
-# MESSAGE_KEY = dot_applied / dot_applied_agg (HP) or dot_applied_morale.
+# MESSAGE_KEY = dot_applied (class-neutral HP) or dot_applied_morale.
 pod_combat_push_dot_applied_log_effect = {
 	hidden_effect_new_object = {
 		character:POD_wraith_01 = {
@@ -531,11 +535,10 @@ pod_combat_apply_ap_drain_effect = {
 		}
 		# Floor at 0: the AP pool must never go negative (a negative pool corrupts
 		# every affordability compare). A full drain (>= base AP, authored as
-		# ap_drain_6) IS the stun primitive - it strips the whole pool, so no costed
-		# move is affordable and the combatant loses the turn. A rare 0-AP move (e.g.
-		# garou_rage_surge) can still fire - that is intended, it is a self-accelerator
-		# gated by once_per + stress, not a costed action. Partial drains leave a
-		# partial turn.
+		# ap_drain_6) IS the stun primitive - it strips the whole pool, so no
+		# positive-cost move is affordable. Eligible 0-AP moves can still fire; that
+		# is intentional and symmetric for PC/AI. Partial drains leave a partial
+		# budget.
 		if = {
 			limit = { var:pod_combat_current_ap < 0 }
 			set_variable = { name = pod_combat_current_ap value = 0 }

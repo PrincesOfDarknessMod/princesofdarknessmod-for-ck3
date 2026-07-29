@@ -266,14 +266,42 @@ pod_combat_process_pending_reinforcements_effect = {
 }
 
 ###################
-###### MOVE-DRIVEN SUMMONS (generic; raise_wraith is the first user)
+###### MOVE-DRIVEN SUMMONS
 ###################
+
+pod_combat_spawn_spirit_family_helper = {
+	# Scope = summoner. Suppress PoD's strategic summon toast; combat posts its
+	# own named arrival row. Explicitly disable is_summoned_spirit so combat
+	# summons use the templates' base ranks instead of strategic caster scaling.
+	save_scope_as = spawning_character
+	save_scope_value_as = { name = spirit_spawn_notification value = no }
+	save_scope_value_as = { name = is_summoned_spirit value = no }
+	if = {
+		limit = { $MOVE_STORY$ = { var:summon_recipe = flag:bane } }
+		POD_spawn_bane_spirit_effect = yes
+	}
+	else_if = {
+		limit = { $MOVE_STORY$ = { var:summon_recipe = flag:gaian_spirit } }
+		POD_spawn_gaian_spirit_effect = yes
+	}
+	else_if = {
+		limit = { $MOVE_STORY$ = { var:summon_recipe = flag:elemental } }
+		POD_spawn_elemental_bane_spirit_effect = yes
+	}
+	else = {
+		debug_log = "pod_combat: non-spirit recipe reached spirit-family helper"
+	}
+	if = {
+		limit = { exists = scope:spawned_spirit }
+		scope:spawned_spirit = { save_scope_as = pod_combat_new_summon }
+	}
+}
 
 pod_combat_summon_combatant_glue_effect = {
 	# Fired from section 14b of POD_execute_combat_move on a summons_combatant move;
-	# runs in combat-host scope. Creates a fresh combatant, applies the move's
-	# summon_recipe, and seats it on the caster's team; despawned at combat end via
-	# pod_combat_summoned_chars. The seat self-logs a named "joins the fray" row.
+	# runs in combat-host scope. The selected recipe creates and initializes
+	# scope:pod_combat_new_summon; this glue seats and registers it. summon_hostile
+	# inverts the seating destination from the caster's team.
 	# $MOVE_STORY$ = the executing move story (carries summon_recipe).
 	# WHOLE BODY in hidden_effect: the confirm-tooltip walks the effect tree without
 	# applying state, and a bare create_character / create_story / list-add errors
@@ -281,65 +309,82 @@ pod_combat_summon_combatant_glue_effect = {
 	hidden_effect = {
 		var:pod_combat_actor_char = { save_scope_as = pod_combat_summoner }
 		# Capacity pre-check BEFORE creating anything: create-then-fail-to-seat would
-		# orphan an un-cleaned character. Same threshold add_ally/add_enemy use.
+		# orphan an un-cleaned character. Check the resolved destination, not the
+		# caster's side, because summon_hostile inverts allegiance.
 		if = {
 			limit = {
-				# Unknown recipe = no init dispatch, so reject before create_character
-				# rather than seat an uninitialised shell.
 				pod_combat_summon_recipe_is_known_trigger = { MOVE_STORY = $MOVE_STORY$ }
 				OR = {
 					AND = {
-						var:pod_combat_current_actor_team = flag:player
+						pod_combat_summon_destination_is_player_team_trigger = { MOVE_STORY = $MOVE_STORY$ }
 						var:pod_combat_player_team_size < pod_combat_max_team_size
 					}
 					AND = {
-						var:pod_combat_current_actor_team = flag:enemy
+						pod_combat_summon_destination_is_enemy_team_trigger = { MOVE_STORY = $MOVE_STORY$ }
 						var:pod_combat_enemy_team_size < pod_combat_max_team_size
 					}
 				}
 			}
-			# NO template: avoids template root-scope reads; explicit culture/faith/gender.
-			create_character = {
-				location = scope:pod_combat_summoner.location
-				culture  = scope:pod_combat_summoner.culture
-				faith    = scope:pod_combat_summoner.faith
-				gender_female_chance = 50
-				save_scope_as = pod_combat_new_summon
-			}
-			pod_combat_apply_summon_recipe_effect = { CHARACTER = scope:pod_combat_new_summon  MOVE_STORY = $MOVE_STORY$ }
-			# Team-specific entry points, so branch on the actor's team flag.
+			pod_combat_apply_summon_recipe_effect = { MOVE_STORY = $MOVE_STORY$ }
 			if = {
-				limit = { var:pod_combat_current_actor_team = flag:player }
-				pod_combat_add_ally_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
+				limit = {
+					exists = scope:pod_combat_new_summon
+					scope:pod_combat_new_summon = { is_alive = yes }
+				}
+				# Summons always KO instead of dying even in fatal duels. Keeping them
+				# alive guarantees both cleanup paths can remove the generated character.
+				scope:pod_combat_new_summon = {
+					add_character_flag = pod_combat_nonfatal_active
+					add_character_flag = spirit_pact_block
+				}
+				# Register before seating so an unexpected add failure still leaves a
+				# cleanup handle instead of an orphaned generated character.
+				add_to_variable_list = { name = pod_combat_summoned_chars target = scope:pod_combat_new_summon }
+				if = {
+					limit = { pod_combat_summon_destination_is_player_team_trigger = { MOVE_STORY = $MOVE_STORY$ } }
+					pod_combat_add_ally_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
+				}
+				else_if = {
+					limit = { pod_combat_summon_destination_is_enemy_team_trigger = { MOVE_STORY = $MOVE_STORY$ } }
+					pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
+				}
 			}
 			else = {
-				pod_combat_add_enemy_midfight_effect = { CHARACTER = scope:pod_combat_new_summon }
+				debug_log = "pod_combat: known summon recipe returned no living character"
 			}
-			add_to_variable_list = { name = pod_combat_summoned_chars target = scope:pod_combat_new_summon }
 		}
 	}
 }
 
 pod_combat_apply_summon_recipe_effect = {
-	# Splat-init dispatch for a freshly-created summon shell. $CHARACTER$ = the shell
-	# (saved scope); $MOVE_STORY$ supplies var:summon_recipe (a flag) selecting the
-	# recipe. A new creature type = one more else_if branch here; nothing else changes.
-	$CHARACTER$ = {
-		if = {
-			limit = { $MOVE_STORY$ = { var:summon_recipe = flag:wraith } }
-			# SAFE wraith recipe, NOT POD_wraith_initialization_effect, which relocates
-			# to the Shadowlands (POD_send_to_dark_kingdom_effect) + fires POD_wraith_maintenance.1.
-			# add_trait wraith FIRST so energy init picks the pathos pool.
-			add_trait = wraith
-			POD_initialize_energy_modifier = yes
-			POD_arcanoi_initiation_effect = yes
-			add_character_flag = had_POD_character_initialization
+	# Creation dispatch. Every known recipe must return one initialized, living
+	# character as scope:pod_combat_new_summon.
+	if = {
+		limit = { $MOVE_STORY$ = { var:summon_recipe = flag:wraith } }
+		# The combat template keeps PoD's wraith identity while omitting the
+		# campaign initializer's relocation and persistent maintenance state.
+		create_character = {
+			location = scope:pod_combat_summoner.location
+			template = POD_combat_summoned_wraith_character
+			save_scope_as = pod_combat_new_summon
 		}
-		else = {
-			# Unreachable while the glue effect whitelists first. Kept so a recipe added
-			# to one site and not the other surfaces in the log instead of silently
-			# seating an uninitialised character.
-			debug_log = "pod_combat: unknown summon_recipe, shell left uninitialised"
+	}
+	else_if = {
+		limit = {
+			$MOVE_STORY$ = {
+				OR = {
+					var:summon_recipe = flag:bane
+					var:summon_recipe = flag:gaian_spirit
+					var:summon_recipe = flag:elemental
+				}
+			}
 		}
+		scope:pod_combat_summoner = {
+			pod_combat_spawn_spirit_family_helper = { MOVE_STORY = $MOVE_STORY$ }
+		}
+	}
+	else = {
+		# The known-recipe pre-check makes this unreachable in normal execution.
+		debug_log = "pod_combat: unknown summon_recipe reached creation dispatch"
 	}
 }
