@@ -1,4 +1,4 @@
-﻿# Combat-PoD Duel Builder Guide
+# Combat-PoD Duel Builder Guide
 
 This guide covers how to start a combat-minigame fight from script --
 the create / add / finalize builder.
@@ -20,9 +20,8 @@ PoD's whole duel system (`hold_court`, schemes, activity events, the
 `single_combat.*` chain, etc.) routes through
 `configure_start_single_combat_effect`. The combat minigame overrides that
 effect (in `PoD_override_single_combat_effects.txt`) and builds a **1v1**
-for you -- shell event + create + add the opponent + finalize, with the
-full caller context (follow-up event, your saved scopes, rule flags)
-preserved.
+for you -- create + add the opponent + finalize, with the full caller
+context (follow-up event, your saved scopes, rule flags) preserved.
 
 **Interception is conditional.** The override intercepts only when ALL of
 these hold; otherwise the call falls through to PoD's original duel body
@@ -48,27 +47,27 @@ interactions in `POD_debug_interactions.txt` are the worked reference; the
 
 ### Standard launcher vs raw builder
 
-The two routes are not interchangeable. A direct builder call bypasses the
-duel shell, so it loses caller context and some normal duel bookkeeping:
+The two routes are not interchangeable. Both preserve your caller context --
+`create_duel` opens the duel shell itself, up front -- but a
+direct call skips the interception gates and the normal duel bookkeeping:
 
 | | `configure_start_single_combat_effect` | raw `POD_combat_create_duel_effect` |
 |---|---|---|
 | Roster | 1v1 only (PC vs one opponent) | anything you seat |
 | Interception gates | applied (table above) | none -- you are past them |
 | Falls back to vanilla duel | yes, when a gate fails | no -- nothing runs if your roster is bad |
-| Duel shell (`pod_combat.9995`) | opened before the build | not opened |
-| Your parent saved scopes in the follow-up | preserved intact | **lost** (principals + rule flags only) |
+| Duel shell (`pod_combat.9995`) | opened by the builder | opened by the builder |
+| Your parent saved scopes in the follow-up | preserved intact | preserved intact |
 | `INVALIDATION_EVENT` | fired on a self-match | not a parameter, never fired |
 | `engaged_in_single_combat` set on both principals | yes | no (only released at end) |
 | `remove_single_combat_info_effect`, shirtlessness / signature-weapon setup | yes | no |
 | Terrain background captured at setup | yes | reconstructed at end, degraded |
-| Ends via | the shell card's Conclude option | the combat window's End Combat button |
+| Ends via | the shell card's Conclude option | the shell card's Conclude option |
 
-There is currently **no public launcher that combines a custom starting
-roster with the shell's parent-scope preservation**. If your follow-up
-needs parent scopes, a 1v1 through the standard launcher is the only
-supported route; a custom roster means writing the follow-up against the
-principals alone.
+So a custom roster no longer costs you the parent scopes. What it still
+costs is the single-combat bookkeeping in the middle rows: seat a group
+fight and you own the self-match check, the engaged flags and the duel
+dressing yourself.
 
 ---
 
@@ -87,7 +86,7 @@ Three steps, four effects:
 
 | Effect | When | What it does |
 |---|---|---|
-| `POD_combat_create_duel_effect` | once, first | Tears down any leaked prior fight, scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
+| `POD_combat_create_duel_effect` | once, first | Opens the shell card that carries your scope table to the follow-up, tears down any leaked prior fight, scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
 | `POD_combat_duel_add_ally_effect` | any number | Appends a character at the next free **player** position (1, 2, 3, ...) and bumps `pod_combat_player_team_size` |
 | `POD_combat_duel_add_enemy_effect` | 1+ times | Appends a character at the next free **enemy** position (0, 1, 2, ...) and bumps `pod_combat_enemy_team_size`; the **first** enemy goes to enemy position 0 |
 | `POD_combat_finalize_duel_effect` | once, last | Derives the leader pointers, shapeshifts AI fera, inits every slot, computes hit chances, stamps the death gate / practice snapshots, runs the init-time KO check, opens the combat window (`pod_combat_active`), rolls initiative and **starts round 1** |
@@ -160,7 +159,9 @@ marker, so a partial or repeated build is not self-correcting:
 - **Calling `create_duel` twice before finalizing leaks.** `pod_combat_active`
   is not set yet, so the second call skips the teardown, creates a second
   `POD_combat_sc_context` story and overwrites the pointer var. The first
-  story is orphaned on Charon for the rest of the save.
+  story is orphaned on Charon for the rest of the save, and its card is
+  orphaned too -- concluding through it is a no-op, since the ownership
+  gate compares against the live pointer.
 - **An abandoned pre-finalize build is invisible to cleanup.** Every
   teardown path gates on `pod_combat_active`, which only `finalize` sets.
   Slot stories from a build you never finalized persist until the next
@@ -347,31 +348,29 @@ my_namespace.0001 = {
 
 ### Which scopes survive to the follow-up
 
-This depends entirely on the route, and it is the single biggest reason to
-prefer the standard launcher.
+All of them, on either route. `create_duel` fires `pod_combat.9995` in its
+opening block, so the shell inherits your scope table as it stands at the
+call and holds it open for the fight. Everything you saved before building
+-- `scope:spirit`, `scope:scheme`, `scope:task_contract`, an artifact
+`scope:target`, flag-typed scope values -- arrives intact, and stays intact
+through the rest of your `trigger_event` chain. Write the follow-up exactly
+as for a vanilla duel.
 
-**Shell route** (`configure_start_single_combat_effect`): the launcher
-fires `pod_combat.9995` *before* building, so the shell inherits the
-launching event's whole scope table and holds it open for the fight.
-Everything you saved before launching -- `scope:spirit`, `scope:scheme`,
-`scope:task_contract`, an artifact `scope:target`, flag-typed scope values
--- arrives intact, and stays intact through the rest of your
-`trigger_event` chain. Write the follow-up exactly as for a vanilla duel.
+Two consequences for how you order your own effects:
 
-**Direct route** (raw `create_duel`): no card is opened, the fight ends via
-the combat window's End Combat button, and that click carries no scope
-table. `pod_combat.9999` rebuilds only what the duel story holds:
+- **Save your scopes before `create_duel`, not after.** The card takes one
+  snapshot, at that statement. A scope saved while you are seating the
+  roster is not in it.
+- **The builder seeds the canonical duel names itself**, from its own
+  parameters: `sc_initiator` / `sc_attacker` / `sc_defender` and the rule
+  flags `fatality` / `fixed` / `locale`. Don't hand it an `ATTACKER` that
+  contradicts a `scope:sc_attacker` you rely on later -- the builder's
+  value wins from that point in the chain.
 
-- `sc_initiator`, `sc_attacker`, `sc_defender`
-- the rule flags (`fatality`, `fixed`, `locale`) and the outcome constants
-- a fixed set of stand-in aliases, all pointing at a principal:
-  `attacker` and `challenger` -> the attacker;
-  `victim`, `recipient`, `defender`, `target`, `adversary` -> the defender
-
-**Parent-specific custom scopes are unrecoverable** on this route. Anything
-your follow-up needs beyond the principals has to be re-derived from the
-characters themselves, or stashed in a character variable before launch and
-read back afterwards.
+`pod_combat.9999` still carries a rebuild path for a table that never
+arrived (principals, rule flags, and stand-in aliases pointing at them,
+from the duel story). It is defensive only; nothing routes there while
+every fight goes through the builder.
 
 ---
 
@@ -569,16 +568,16 @@ Behavior worth knowing:
 ## How a fight ends
 
 The normal path: one side is wiped (or the init-time KO check resolves a
-one-sided start), and the player concludes -- from the shell card on the
-standard route, or the combat window's End Combat button on a direct
-launch. That runs `pod_combat_end_combat_effect`, which applies the
+one-sided start), and the player concludes from the shell card, which the
+builder opened at launch and which appears once the fight resolves. That
+runs `pod_combat_end_combat_effect`, which applies the
 non-fatal cap or practice restore, converts morale loss into Mental Strain
 (skipped for a practice spar), runs the `pod_combat_duel_end_effect`
 extension point while slot vars are still intact, and fires
 `pod_combat.9999`, which:
 
 1. rebuilds the principals and rule flags if the scope table is empty
-   (direct route only),
+   (defensive; the card normally brings them),
 2. derives the outcome (`scope:sc_victor` / `scope:sc_loser`, absent on a draw),
 3. releases `engaged_in_single_combat` and bumps the victor's weapon duel count,
 4. applies the death outcome for your FATALITY mode,
