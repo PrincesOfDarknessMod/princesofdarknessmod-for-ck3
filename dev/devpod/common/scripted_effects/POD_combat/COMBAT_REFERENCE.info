@@ -1,4 +1,4 @@
-﻿# POD Combat — System Reference
+# POD Combat — System Reference
 
 Single source of truth for the combat mini-game's runtime model. Code
 comments cite this doc by section (`§N`) instead of restating the
@@ -36,40 +36,48 @@ State is split across a few owners, each with its own job:
   `pod_combat_pc_slot` (player/0) and `pod_combat_enemy_leader_slot`
   (enemy/0). Every other combatant is reached by iterating the host's
   `pod_combat_active_slots` list.
-- **Per-combatant state lives on `POD_combat_slot` stories.** One story
-  per seated combatant, created at combat init and torn down at combat
-  end. This is the canonical home for a combatant's stats, stances,
-  tiers, and morale.
+- **Per-combatant fight state lives on `POD_combat_slot` stories.** One
+  story per seated combatant, created at combat init and torn down at
+  combat end. It is the canonical home for mutable per-fight state such
+  as morale, initiative, hit tiers, stances, reactions, and DoTs. HP,
+  prowess, and soak remain character-side; soak tiers bridge directly
+  onto the character.
 - **Charon (`character:POD_wraith_01`) is the off-map anchor.** He is a
   guaranteed-alive character who holds the shared stories: the move
   catalogue (`POD_combat_move`), the slot stories (`POD_combat_slot`),
   the log rows (`POD_combat_log_entry`), and the caller-context snapshot
   (`POD_combat_sc_context`). Nothing about combat depends on Charon
   being present on the map; he is purely a stable place to hang stories.
-- **A transient action workspace** (`pod_combat_actor_*` /
+- **A current-pair workspace** (`pod_combat_actor_*` /
   `pod_combat_target_*` on the host) holds whichever combatant is acting
-  and whichever one it is hitting. It is loaded from the relevant slot
-  stories at the start of each action and saved back at the end.
-  The shared move code reads and writes only the workspace, so the same
-  code runs for the PC, AI allies, and enemies alike.
+  and whichever one it is targeting. The pair is loaded when a turn is
+  established and whenever the target changes, then saved after each
+  action. A save writes back but does not invalidate or clear the
+  workspace; the same loaded pair normally persists across the acting
+  combatant's turn. The shared move code reads and writes this adapter,
+  so the same code runs for the PC, AI allies, and enemies alike.
 
-**HP is never stored.** A combatant's hit points are derived live from
-that character's PoD wound track, so combat display and PoD's own wound
-state can never desync. See **Where state lives** and **Variable
+**HP has no authoritative combat copy.** A combatant's hit points are
+derived from that character's PoD wound track. Slot stories carry only
+a display mirror of the wound bar, refreshed at HP-change chokepoints;
+gameplay logic never reads it. See **Where state lives** and **Variable
 reference**.
 
-**Hit chance** is computed from prowess. The base is
-`pod_combat_hit_chance_base` (60), adjusted by half the prowess gap
-between attacker and target, then clamped:
+**Hit chance** has a prowess-derived pair base and a tier/stance-derived
+live value. With shipped defaults:
 
 ```
-hit_chance = clamp( 60 + (own_prowess − target_prowess) / 2,  20, 95 )
+pair_base = clamp(60 + (own_prowess − target_prowess) / 2, 20, 95)
+live_hit  = clamp(pair_base + signed_hit_tiers + stealth_bonus, 20, 95)
 ```
 
-For NPC slots the opposing *leader's* prowess stands in for the target
-during the per-round baseline pass; the PC's hit chance is recomputed
-against its actually-selected target on each turn and on every target
-swap.
+The base, clamp, tier magnitudes, and stealth bonus are all exposed
+through script values and may be overridden by the debug tuning
+window. A conditional `bonus_effect = hit` can add one further,
+re-clamped bonus for the current move only. Slot baselines are seeded
+against the opposing leader at initialization; whenever a target is
+loaded, both sides are recalculated against the actual actor-target
+pair.
 
 ---
 
@@ -77,46 +85,49 @@ swap.
 
 ### Where state lives
 
-Every combat variable belongs to exactly one of five owners. The owner
-fixes its scope, its lifetime, and the window in which reading or
-writing it is valid. Use this table to answer "where does this live and
-when is it meaningful?".
+Combat state spans the owner classes below. The owner fixes a field's
+scope, lifetime, and valid read/write rules. Use this table to answer
+"where does this live and when is it meaningful?".
 
 | Owner | Scope it lives on | Lifetime | Representative variables |
 |---|---|---|---|
+| **Global catalogue/tuning** | global variable or global variable list | save-persistent; catalogue rebuilt on version mismatch, tuning overrides persist until reset | `POD_combat_moves`, `POD_combat_version`, `global_var:pod_combat_tune_*` |
+| **Move definition** | a `POD_combat_move` story on Charon | catalogue initialization/reload → next reload | `skill_key`, `targeting`, `ap_cost`, capability flags, payload and rider fields |
 | **Host** | combat host (the PC character) | combat init → combat cleanup | `pod_combat_active`, `pod_combat_round`, `pod_combat_current_ap`, `pod_combat_current_actor_team`/`_position`, `pod_combat_player_team_size`, `pod_combat_enemy_team_size`, `pod_combat_pc_slot`, `pod_combat_enemy_leader_slot`, `pod_combat_active_slots` |
 | **Slot** | a `POD_combat_slot` story (one per combatant, on Charon) | slot creation → combat cleanup | `combat_team`, `team_position`, `slot_char`, `slot_alive`, `slot_morale`, `slot_hit_chance`, stance + hit tier vars |
-| **Workspace (transient)** | combat host | **only between `pod_combat_load_workspace_effect` and `pod_combat_save_workspace_effect`** | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` |
-| **Character (AI)** | the acting AI character | persists per-character across combats until cleared at combat end | `pod_combat_ai_last_move`, `pod_combat_ai_prev_move`, `pod_combat_ai_prev2_move`, `pod_combat_loadout` |
-| **Log entry** | a `POD_combat_log_entry` story (one per row, on Charon) | combat init → combat cleanup | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:damage`, `entry.var:round`, and the move-context fields the log dispatcher reads |
+| **Workspace (current pair)** | combat host | actor/target load → replacement load or combat cleanup; saved after each action without being invalidated | `pod_combat_actor_*`, `pod_combat_target_*`, `pod_combat_current_hit_chance` |
+| **Character** | the participant character | field-dependent: PC configuration persists; AI loadout/history and combat flags are per fight | persistent PC `pod_combat_loadout` / `pod_combat_manual_step_pref`; AI `pod_combat_ai_last_move` / `_prev_move` / `_prev2_move`; character-side `pod_combat_tier_soak_*`; character flag `pod_combat_nonfatal_active` |
+| **Caller context** | a `POD_combat_sc_context` story on Charon | duel launch → combat cleanup or host-death release | principals, duel rule flags, follow-up event ID |
+| **Log entry** | a `POD_combat_log_entry` story (one per row, on Charon) | row push → cap trim or combat cleanup | `entry.var:outcome`, `entry.var:attack_result`, `entry.var:damage`, `entry.var:round`, and the move-context fields the log dispatcher reads |
 
 Two rules are load-bearing across the whole system:
 
-**Character stats are derived live, never cached on the slot.** The slot
-story holds only the `slot_char` pointer. HP, soak and prowess all come
-from script values that read the character every time — HP and max HP off
-the PoD wound track, soak off `POD_soak_chance`, prowess off the attribute
-(via `pod_combat_char_prowess_value`). The
-only slot HP/damage SVs that exist are:
+**Authoritative character stats are not stored on the slot.** HP and
+max HP come from the PoD wound track. Prowess and soak are sampled from
+the character when a workspace side loads; PoD evaluates soak again in
+the actual wound call. The slot-scoped wound accessors are:
 
 | SV | Returns |
 |---|---|
 | `pod_combat_slot_max_hp_value` | wound track length (max HP) |
 | `pod_combat_slot_total_damage_sv` | total wound boxes filled |
 | `pod_combat_slot_agg_damage_sv` | aggravated wound boxes filled |
+| `pod_combat_slot_hp_urgency_value` | AI heal urgency derived from the live damaged fraction |
 
 There is **no** `pod_combat_slot_hp_value`. Current HP is computed live
 as `max_hp − total_damage`. (A display-only mirror of total/agg/max-HP
 exists for GUI perf, refreshed at every HP-change point, but it is never
 a logic source.)
 
-**The workspace is valid only inside its load/save window.**
-`pod_combat_actor_*` / `pod_combat_target_*` mean something only between
-a `pod_combat_load_workspace_effect` call and its matching
-`pod_combat_save_workspace_effect`. Outside that window they hold
-whatever the last action left behind. Canonical per-combatant state
-always lives on the slot story; if you need a value outside the window,
-read the slot, not the workspace.
+**The workspace is a persistent current-pair cache, not durable
+per-combatant storage.** `pod_combat_actor_*` /
+`pod_combat_target_*` become meaningful when the actor/target pair is
+loaded. They remain meaningful after `pod_combat_save_workspace_effect`
+and normally persist across that turn; save writes the mirrors back but
+does not clear them. A target change or new actor load repoints the
+cache. For any non-loaded combatant, read its slot story. Direct slot
+writes to the loaded actor or target must also update the workspace or
+the next save can overwrite them.
 
 ### Variable reference
 
@@ -144,12 +155,14 @@ Lookup tables, grouped by category. Names verified against
 | `pod_combat_pc_slot` | pointer to the player/0 (PC) slot story |
 | `pod_combat_enemy_leader_slot` | pointer to the enemy/0 (primary opponent) slot story |
 | `pod_combat_active_slots` | variable list of every filled slot story; iterated by every dispatch loop |
-| `pod_combat_nonfatal_active` | flag: this duel is non-fatal (gates PoD's death-from-wounds) |
 | `pod_combat_summoned_chars` | variable list of mid-fight summons, disappeared at combat end |
 
 `pod_combat_pc_slot` and `pod_combat_enemy_leader_slot` are the **only**
 literal slot pointers. Any non-leader slot is reached by iterating
 `pod_combat_active_slots` and matching `combat_team` + `team_position`.
+`pod_combat_nonfatal_active` is not host state: it is a character flag
+stamped on every participant protected by the non-fatal/practice death
+gate.
 
 #### Per-slot stats (on each `POD_combat_slot` story)
 
@@ -164,7 +177,7 @@ literal slot pointers. Any non-leader slot is reached by iterating
 | `slot_base_hit_chance` | hit chance before any tier effects |
 | `slot_initiative` | initiative roll this round |
 | `slot_init_bonus` | next-round initiative modifier |
-| `slot_ap_drain` | pending AP drain, consumed at the victim's next turn start; a drain ≥ base AP starts that turn at 0 AP, though eligible 0-AP moves remain usable |
+| `slot_ap_drain` | pending AP drain, consumed after the victim's next-turn AP budget is seeded; subtracts from that budget and floors at 0 |
 | `slot_energy_used` | counter feeding AI energy-attrition weighting |
 | `slot_turn_order` | turn rank within the round (1 = first) |
 | `slot_has_acted` | 1 once the slot has acted this round; reset each round start |
@@ -232,7 +245,16 @@ The workspace mirrors the slot fields for whoever is acting
 | `pod_combat_actor_soak` / `_prowess` (and target twins) | NOT mirrors: live values stashed off the combatant (see below) |
 | `pod_combat_current_hit_chance` | the active attacker's hit chance for this attack |
 
-Both sides load and save through one symmetric pair, `pod_combat_load_side_from_story_helper` / `pod_combat_save_side_to_story_helper` (`SIDE = actor | target`). The four public wrappers (`load_actor` / `load_target` / `save_actor` / `save_target`) just delegate with the side filled in. **To add a mirrored field:** one line in each helper (load + save), a `remove_variable` in the workspace-cleanup list (`pod_combat_cleanup_effect`), and for load-only presence flags a removal in `pod_combat_group_cleanup_effect` (see the spirit mirrors).
+Both sides load and save through one symmetric pair,
+`pod_combat_load_side_from_story_helper` /
+`pod_combat_save_side_to_story_helper` (`SIDE = actor | target`). The
+actor and both save wrappers are thin delegates.
+`pod_combat_load_target_from_story_effect` additionally recalculates
+both sides' hit chance for the newly loaded actor-target pair. **To add
+a mirrored field:** one line in each helper (load + save), a
+`remove_variable` in the workspace-cleanup list
+(`pod_combat_cleanup_effect`), and for load-only presence flags a
+removal in `pod_combat_group_cleanup_effect` (see the spirit mirrors).
 
 **Soak and prowess are not mirrored fields.** `pod_combat_stash_side_live_stats_effect`
 (called at the tail of the load helper, and again after a move writes a soak
@@ -262,11 +284,13 @@ and `pod_combat_actor_max_hp_value` (track length). They gate on
 | `pod_combat_last_damage` | last HP damage dealt |
 | `pod_combat_last_heal_amount` | last HP heal applied |
 | `pod_combat_last_morale_damage_amount` / `_last_morale_heal_amount` | last morale damage / heal |
+| `pod_combat_last_self_damage` | post-soak recoil damage applied to the actor |
+| `pod_combat_last_energy_gain` / `_last_energy_drain` | requested conditional energy bonus amount when that bonus fired; the splat helpers do not export the pool-capped applied delta |
 | `pod_combat_last_retal_damage` | last retaliation damage |
 | `pod_combat_last_retal_agg` / `_last_retal_morale` | actual-result markers for the counter: it landed aggravated (PoD's per-victim classification) / it eroded morale instead of HP |
 | `pod_combat_last_result_agg` | actual-result marker for the main damage line: PoD classified the landed wound as aggravated for this victim (lifted from the route helper's `scope:result_agg`) — see **Result model** |
 | `pod_combat_last_soaked_count` | points absorbed by PoD's per-point soak roll on the last damage write (lifted from the route helper's `scope:soaked_count`); absent = none. Drives the damage line's partial-soak note — see **Result model** |
-| `pod_combat_last_outcome` | top-level outcome flag (`flag:attack` / `heal` / `morale_damage` / `morale_healed` / `utility`) — see **Result model** |
+| `pod_combat_last_outcome` | optional top-level host outcome flag (`flag:attack` / `heal` / `morale_damage` / `morale_healed`); a pure utility move leaves it absent and `push_log` creates `entry.var:outcome = flag:utility` — see **Result model** |
 | `pod_combat_last_attack_result` | inner attack resolution (`flag:hp_damage` / `soaked` / `immune` / `missed` / `dodged` / `stealthed` / `guard_blocked`); only meaningful when outcome = attack |
 | `pod_combat_last_retal_fired` | overlay flag: a retaliation fired on this row |
 | `pod_combat_aoe_any_hp_damage` | AoE latch: any target took HP damage this burst |
@@ -280,10 +304,10 @@ aggravated. The `POD_damage_type_is_aggravated` delta reads it via
 #### AI move-history (on the acting AI character, not the host)
 
 These are **story references** pointing at a `POD_combat_move` scope,
-written directly on the acting AI character after each pick. They live
-per-character and are cleared at combat end alongside that character's
-`pod_combat_loadout`. The AI's anti-repetition penalties compare them by
-scope-equality.
+written directly on the acting AI character after each pick. They are
+per-fight scratch, cleared at AI slot initialization and again at
+combat cleanup alongside that AI character's `pod_combat_loadout`. The
+AI's anti-repetition penalties compare them by scope-equality.
 
 | Variable | Meaning |
 |---|---|
@@ -320,43 +344,48 @@ button) and `pod_combat_ai_select_and_execute_move_effect` (AI turn).
 
 ### Phases
 
-The body is a flat sequence of `if` blocks, each guarded on `$STORY$ = {
-has_variable = ... }`. They run **top to bottom**; a move only triggers
-the phases whose variables it carries. The ordering is load-bearing —
-see **Phase ordering rules** below before moving anything.
+The body is a flat, top-to-bottom sequence. Most payload phases are
+guarded by a move-story field, while setup/reset (§0/§2), the
+result-aware log gate (§16), and teardown (§17) are engine phases with
+their own contracts. The ordering is load-bearing — see **Phase
+ordering rules** below before moving anything.
 
 | Phase | What it does |
 |---|---|
 | §0 | Save the host as `scope:combat_host`. Long-lived; AoE iteration bodies re-enter host scope through it without their own root-save. |
 | §1 | Spend `ap_cost` AP (`pod_combat_spend_ap_effect`). |
+| §1b | If `once_per` is present, append this move story to the actor slot's round- or combat-duration used list. The usability gate rejects later attempts; the round list clears during initiative setup. |
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`), set `pod_combat_last_damage = 0`, and clear the pure-control delivery-failure latch. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
-| §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5d `hit`, §6 `damage`/`change_type`, §7 `morale_damage` (folded into the base deal call), §9/§9b `self_heal`/`heal_target`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13b `dot`, §14 `ap_refund`/`ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.) See `docs/CONDITION_SYSTEM_DESIGN.md`. |
+| §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5d `hit`, §6 `damage`/`change_type`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13b-bonus `dot`, §14 `ap_refund`/`ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.) |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
-| §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`). **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. |
-| §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also subtracts the +30 stealth hit bonus); ordinary `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit. A `requires_control_contact` guard strip waits for §5b2 instead. |
+| §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`) and apply `steal_gold` / `gain_dread`. **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. Practice still pays declared costs but suppresses gold theft and Dread gain. |
+| §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also removes the current stealth hit bonus); ordinary `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit. A `requires_control_contact` guard strip waits for §5b2 instead. |
 | §5b | `team_enemy` only: broadcast tier debuffs and stance-strips to **all** enemy slots before the damage loop, so each per-target hit respects them (`pod_combat_apply_team_enemy_debuffs_effect`). |
 | §5b2 | **Pure-control contact delivery.** An explicitly typed single-enemy move with no HP/morale payload carries `requires_control_contact`; run the unified capability resolver here. On failure, set a latch that suppresses its guard strip, tiers, mind control, AP drain, and initiative debuff. AP/energy/once-per are still spent, actor stealth is consumed, and the log keeps only the miss/block outcome rather than claiming payloads landed. |
-| §5c | **Tier buffs/debuffs** — moved ahead of §6 (was §11) so a buff/debuff + attack lands on this move's own attack. Buffs → actor except `single_ally` → selected target; debuffs → target. Each write is **upgrade-only** (first application or a strictly higher tier), and a failed §5b2 delivery skips all declared tiers. Hit/soak recalc and the PoD soak bridge follow the actual beneficiary. See **Tier system**. |
+| §5c | **Tier buffs/debuffs.** Buffs → actor except `single_ally` → selected target; debuffs → target. Each write is **upgrade-only** (first application or a strictly higher tier), and a failed §5b2 delivery skips all declared tiers. Hit/soak recalc and the PoD soak bridge follow the actual beneficiary. See **Tier system**. |
+| §5d | For a fired `bonus_effect = hit`, add `bonus_value` to `pod_combat_current_hit_chance` for this move and re-cap it at `pod_combat_hit_chance_max`. §17 rebuilds the ordinary tier+stealth value afterward so the bonus cannot leak to a later move. |
 | §6 | **HP damage dispatch.** Routes `single_enemy` vs `team_enemy`. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the host. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or the team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the team_enemy broadcast. |
-| §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel` — superficial, soakable). Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor / single-ally / `team_ally`. Rider-gated by `heal_condition` (drain moves auto-get `on_hp_damage`). Must run **after** §6 so the rider reads the right outcome. |
-| §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor / single-ally / `team_ally`. No rider condition. |
+| §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log. |
+| §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
-| §12b | `team_ally` only: broadcast §5c/§12's actor buffs (tiers + stance flags + soak bridge var) to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). |
-| §13 | Arm retaliation stances on the actor for **next** turn's §15: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte). Amount falls back `retaliate_damage → hp_damage → 1`. Seeds the counter kind with precedence morale > `retaliate_agg` > the move's elemental class > unset (plain). |
-| §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind/source` on the target's slot (single-target). `slot_dot_source` records the caster (`pod_combat_actor_char`) so the round-end tick credits the right killer. Delivery is gated on `NOT(pod_combat_result_code_indicates_miss_trigger)` plus a per-slot `NOT(pod_combat_slot_should_be_marked_ko_trigger)`, so a dodged / stealthed / missed strike — or one that already downed the target — seeds no burn (NOT-miss, not a positive contact predicate, so a landed hp0 *morale* DoT with no `attack_result` still applies). Kind is seeded as literal flags (default `duel`, the move's damage class, morale wins); re-apply refreshes. Pushes the "is afflicted" row with its per-round amount and HP/Morale track; an HP application does not predict the future victim-specific wound class. Ticks fire at round end and log their actual superficial/aggravated result — see **Combat log** / **Turn loop**. |
+| §12b | `team_ally` only: broadcast the move-declared §5c/§12 tiers and stance flags, plus the soak bridge var, to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). A condition-granted `stance_*` bonus is actor-only and is not part of this broadcast. |
+| §13 | Arm retaliation stances on the actor for a later eligible §15 attack: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte). Amount falls back `retaliate_damage → hp_damage → 1`. Arming is take-strongest: only a strictly larger amount replaces the current reaction, and equal amounts never replace its kind. Kind precedence is morale > `retaliate_agg` > the move's elemental class > unset (plain). |
+| §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind/source` on the target's slot (single-target). `slot_dot_source` records the caster (`pod_combat_actor_char`) so the round-end tick credits the right killer. Delivery excludes only a miss-class result and a target already marked KO: dodged / stealthed / missed does not seed, but `guard_blocked`, full `soaked`, and `immune` are not miss codes and currently do seed; a landed hp0 morale DoT with no `attack_result` also applies. Kind is seeded as literal flags (default `duel`, the move's damage class, morale wins); re-apply refreshes. Pushes the "is afflicted" row with its per-round amount and HP/Morale track. HP ticks bypass per-point soak but retain immunity, Clay Man protection, weakness multiplier/cap, and PoD wound classification; the application row does not predict that future victim-specific class. See **Combat log** / **Turn loop**. |
+| §13b-bonus | A fired `bonus_effect = dot` seeds the same target-slot DoT using `bonus_value` as its per-tick amount and `pod_combat_bonus_dot_rounds` (fixed at 2) as its duration. It uses the same miss/KO delivery gate and damage-class kind seeding as §13b. |
 | §13c | Mind control (`mind_control` flag): mark the target slot `slot_controlled` (steals one turn). Players are immune; `POD_has_strong_mental_defenses_trigger` blocks unless the caster passes `can_bypass_mental_defenses_trigger`. A pure control requires successful §5b2 delivery; a morale-bearing control additionally requires proof that morale damage landed, so dodge/stealth never still seizes the target. Blocked casts post a resist row. Single-target only. |
-| §14 | Parametric flags: `ap_gain` (adds to `pod_combat_current_ap`), `ap_drain` (take-max into the target mirror, consumed at the target's next turn start), `initiative_debuff` (negated into `pod_combat_target_init_bonus`, consumed at round end). Target-side drain/debuff is suppressed by a failed §5b2 delivery. |
+| §14 | Parametric flags: `ap_gain` and a fired `ap_refund` bonus add to `pod_combat_current_ap`; base + conditional `ap_drain` are summed, take-max into the target mirror, and consumed at the target's next turn start; `initiative_debuff` stacks negatively into `pod_combat_target_init_bonus` for the next initiative fold. Target-side drain/debuff is suppressed by a failed §5b2 delivery. |
 | §14b | `summons_combatant`: run the move's character-creation recipe, then seat the result on the resolved friendly or `summon_hostile` destination (`pod_combat_summon_combatant_glue_effect`). After the damage phases (a same-cast AoE can't hit the new unit), before §15 (it can't counter on its summon turn); it acts next round. |
-| §15 | **Reaction phase.** Fire any retaliation the target armed on a previous turn (`pod_combat_check_retaliation_effect`). Skipped for `team_enemy` AoE (a reaction can only fire on one workspace target). See **Reactions**. |
+| §15 | **Reaction phase.** Only a non-`team_enemy` move carrying `hp_damage` checks the target's armed retaliation (`pod_combat_check_retaliation_effect`). Pure morale/control and team AoE moves do not trigger reactions. See **Reactions**. |
 | §16 | Push the combat-log row (`pod_combat_push_log_effect`). AoE-aware gate, below. |
-| §17 | Bonus teardown: clear `pod_combat_bonus_active` / `pod_combat_bonus_damage` / `pod_combat_bonus_aggravated` so they never leak into a nested reaction execution or the next move (remove-on-unset is a safe no-op). Also belt-and-braces-removes the actor's transient `pod_combat_force_agg` marker (normally dropped at the dispatch site) for any future early-exit path. |
+| §17 | Bonus teardown: if §5d temporarily changed hit chance, rebuild the actor's ordinary tier+stealth value first; then clear `pod_combat_bonus_active` / `pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`. Also belt-and-braces-removes the actor's transient `pod_combat_force_agg` marker (normally dropped at the dispatch site) for any future early-exit path. |
 
 ### The §16 log gate
 
 Non-AoE moves always push their one summary row. AoE moves are
-different: the AoE iterators in §5b/§6/§9/§10 push **one row per
+different: the AoE iterators in §6/§7/§9/§10 push **one row per
 target** as they go and set the `pod_combat_aoe_phase_pushed_rows`
 tripwire. When that tripwire is set, §16 normally skips its wrap-up row
 — the per-target rows already are the log entry.
@@ -393,9 +422,10 @@ These orderings are required, not stylistic:
   `on_miss` conditions.
 - **§15 after §6.** Retaliation gates on §6's outcome; running it
   earlier reads stale state from the previous move.
-- **§16 last.** The log row captures every prior axis and amount field.
-  Pushed earlier, it records a partial result and misses the rider
-  amounts later phases populate.
+- **§16 after all outcome-producing phases and before §17 teardown.**
+  The log row captures every result axis and amount field. Pushed
+  earlier, it records a partial result and misses the rider amounts
+  later phases populate.
 - **§14b (summon) after the damage/AoE phases and before §15.** Keeps a
   same-cast AoE off the new unit and stops it countering on its summon
   turn.
@@ -411,8 +441,8 @@ directly.
 
 #### Capability tags decide the pipeline shape
 
-Each move carries up to four capability flags on its story, set at
-generation time. The contact resolver
+Each move carries up to four capability flags on its story, authored
+directly in its registry setter block. The contact resolver
 (`pod_combat_resolve_contact_effect`) reads them off
 `scope:current_move` and walks the same decision tree for every move,
 branching only where a flag is present:
@@ -424,29 +454,19 @@ branching only where a flag is present:
 | `checks_guard` | Consume the target's guard and block the blow. Absent = guard does nothing (this is how a move "bypasses guard"). |
 | `checks_stance` | Run stance consumption: stealth then dodge auto-miss the blow. |
 
-An `attack_type` of physical / supernatural / mental is shorthand for a
-preset of these four flags, which a move overrides by setting flags
-directly. There is no `var:attack_type` at
-runtime — only the resolved flags. The three shapes:
+The common physical profile sets all four flags. The common
+supernatural profile sets only `checks_stance`: it auto-hits, ignores
+guard, reaches spirits, but can still be evaded by dodge or stealth.
+These are authoring conventions, not a runtime `attack_type` field.
+Morale damage has its own auto-hit/no-guard/no-soak path and consumes
+the target's stealth/dodge regardless of these capability flags, so
+"mental" is not a contact-resolver capability profile.
 
-| `attack_type` | spirit_gate | hit_roll | guard | stance | Character |
-|---|---|---|---|---|---|
-| **physical** | yes | yes | yes | yes | Real blow: can miss, be guarded, be dodged, and whiffs on spirits. |
-| **supernatural** | no | no | no | yes | Auto-hits, ignores guard, hits spirits; only dodge/stealth evade it. |
-| **mental** | no | no | no | yes | Same evasion profile, but the payload is morale-only (no HP path). |
-
-(A holy physical weapon vs spirits keeps `checks_spirit_gate` but the
-actor carries the spirit-damage capability; a spirit-respecting low-tier
-discipline is supernatural with `override_checks_spirit_gate = yes`; an
-always-hits physical move is physical with `override_requires_hit_roll =
-no`.)
-
-The generator also stamps the metadata flag `requires_control_contact`
-when a `single_enemy` row has an explicit `attack_type` but zero HP and
-morale damage. That flag does not change the resolver's shape; it tells
-the move engine that the row's non-damage control payload must invoke
-this resolver before being applied. A blank `attack_type` keeps pure
-utility/control guaranteed.
+For a `single_enemy` move with zero HP and morale damage, authors set
+`requires_control_contact` explicitly when its control payload must
+invoke this resolver before being applied. The flag does not change the
+resolver's shape; it connects the otherwise payload-free move to it.
+Omitting the flag keeps pure utility/control guaranteed.
 
 #### Contact resolution
 
@@ -471,9 +491,11 @@ result-axis flags):
 
 Every non-hit branch sets the result axes and `pod_combat_last_damage =
 0`. Only result `0` reaches the payload
-(`pod_combat_apply_damage_payload_effect`). Actor stealth is consumed
-after resolution regardless of outcome — committing the action breaks
-stealth even on a miss.
+(`pod_combat_apply_damage_payload_effect`). HP/contact dispatch and
+explicit pure-control delivery consume actor stealth after resolution
+regardless of outcome (once per HP AoE burst). The separate morale-only
+pipeline consumes the target's stealth/dodge but does not break actor
+stealth.
 
 For `requires_control_contact`, result `0` admits the move's hostile
 non-damage payloads. Any other result sets the host failure latch; the
@@ -511,9 +533,10 @@ splat-weakness multipliers and aggravated classification:
 
 An **element** rides its real `death_reason` into PoD core, which
 decides aggravated / superficial / **immune** **per target** from the
-splat-vulnerability matrix (`POD_damage_type_is_aggravated` +
-`POD_has_immunity_to_damage_type`, rebuilt 2026-07-12 — see
-`docs/DAMAGE_MATRIX_REBUILD_PLAN.md` §2.3 for the authoritative table).
+splat-vulnerability matrix in the live
+`POD_damage_type_is_aggravated` and
+`POD_has_immunity_to_damage_type` triggers
+(`common/scripted_triggers/POD_health_track_triggers.txt`).
 Immunities, downgrades (e.g. sun-as-superficial), and splat multipliers
 all apply. **`aggravated`** forces `REASON = duel_aggravated` for every
 target. The elemental mapping is identity in nine of ten cases;
@@ -560,19 +583,17 @@ soak (every point absorbed) is now rare, and a partial soak looks like a
 smaller-than-advertised number unless the log says otherwise.
 
 The route helper returns scope values only (no host-var side effects):
-`scope:damage_dealt` (post-soak amount; 0 only if EVERY point was
-soaked), `scope:attack_result_flag` (`flag:hp_damage` / `soaked`),
-`scope:result_agg` (PoD's aggravated classification for this victim +
-REASON, captured **before** the wound call — a kill wipes the victim
-state the classifier reads), and `scope:soaked_count` (points absorbed;
-always set, and captured before the boxes are written, so it survives a
-kill). Because the
-wound SVs read 0 on a dead character, it
-snapshots superficial and aggravated box counts **separately** before
-the write and takes `max(0, sup_delta) + agg_delta` — a single total-box
-delta would read 0 when PoD's aggravated push-out converts existing
-superficial boxes to aggravated, falsely classifying a real hit as
-soaked. Morale spillover scales off the actual post-soak damage
+`scope:damage_dealt` (the actual wound-box/severity delta; 0 whenever no
+boxes land, with a fatal path capped to the victim's pre-hit empty
+boxes), `scope:attack_result_flag` (`flag:hp_damage` / `soaked` /
+`immune`), `scope:result_agg` (PoD's aggravated classification for this
+victim + REASON, captured **before** the wound call because a kill wipes
+the victim state the classifier reads), and `scope:soaked_count`
+(points absorbed, captured before the boxes are written). For a
+surviving victim it snapshots superficial and aggravated boxes
+separately and takes `max(0, superficial_delta) + max(0,
+aggravated_delta)`, so aggravated push-out is not mistaken for a soak.
+Morale spillover scales off the actual post-soak damage
 (`pod_combat_morale_from_hp_ratio`).
 
 `pod_combat_apply_damage_payload_effect` lifts `scope:soaked_count` into
@@ -587,20 +608,21 @@ outcome, and the two sets are disjoint (the partial branches require
 #### The spirit gate
 
 The spirit gate is the one combat-only protection in the connect step
-(PoD has no concept of it). A physical attack against an incorporeal
-spirit target lands only if the actor carries the spirit-damage
-capability; otherwise it no-ops and the row logs as a miss. The resolver
-applies it for moves with `checks_spirit_gate`. Retaliation skips the
-resolver, so `pod_combat_apply_retaliation_effect` hand-rolls the same
-gate: a physical counter against an incorporeal spirit only lands with
-the capability, else it passes through harmlessly and the main-attack
-log line is preserved.
+(PoD has no concept of it). A move carrying `checks_spirit_gate`
+against an incorporeal spirit target lands only if the actor carries
+the spirit-damage capability; otherwise it no-ops and the row logs as a
+miss. Retaliation skips the resolver, so
+`pod_combat_apply_retaliation_effect` hand-rolls a gate before its kind
+dispatch. In the current implementation **every** counter kind
+(morale, aggravated, elemental, or plain) no-ops when the original
+attacker is incorporeal and the retaliator lacks spirit damage.
 
 #### The actual result — `scope:result_agg`
 
 What the move *sends* (the class) and what the victim *takes* (PoD's
-per-victim classification) can differ — a holy hit lands aggravated on a
-vampire and superficial on a werewolf. The route helper's
+per-victim classification) can differ — a holy hit is aggravated on a
+vampire, superficial on a changeling, and immune on a werewolf or
+mundane target. The route helper's
 `scope:result_agg` export captures what PoD actually decided; the
 payload lift stores it as host `pod_combat_last_result_agg`, `push_log`
 stamps it onto the row as `entry.var:result_agg`, and
@@ -648,12 +670,15 @@ At creation the slot gets:
 | `team_position` | `$POSITION$` | identity, 0 = leader |
 | `slot_alive` | `1` | |
 | `slot_char` | `$CHARACTER$` | the occupant; set before `slot_morale` so the starting-morale hook can read it |
-| `slot_morale` | `pod_combat_max_morale + pod_combat_starting_morale_modifier_value`, floored at 1 | the modifier is a designer hook (0 by default; §11). Defaults to the cap so a fresh slot reads alive before real init; the init-time KO check treats `slot_morale <= 0` as a KO predicate |
+| `slot_morale` | `pod_combat_starting_morale_value` | the cap or debug-tuned starting-morale override, plus `pod_combat_starting_morale_modifier_value`, floored at 1. The hook is 0 by default (§11). A fresh slot must read alive before real init because the init-time KO predicate includes `slot_morale <= 0` |
 | `slot_energy_used` | `0` | |
 | `slot_has_acted` | `0` | |
 
-Soak and prowess are absent entirely: like HP, they are read live off
-`slot_char` wherever they are needed and never stored on the slot.
+Soak and prowess are absent entirely. They are sampled from `slot_char`
+when a workspace side loads and never stored on the slot; the PoD wound
+call remains authoritative for soak. HP gameplay state likewise stays
+on the character, although the slot later receives
+`slot_mirror_total` / `_agg` / `_maxhp` for display only.
 
 The pure-value stats are zero-defaulted so a script_value gate needs
 only a slot-presence check, not a per-field `has_variable`. Gate-style
@@ -718,8 +743,10 @@ effect returns, so the GUI never sees a half-init roster. In order it:
 5. Computes leader-baseline hit chances for all slots.
 6. Seeds the default PC target (enemy/0) and the workspace target
    pointers.
-7. Stamps the non-fatal death gate on every combatant if `fatality = no`
-   (see **Combat end**).
+7. If `pod_combat_uses_death_gate_trigger` passes (`fatality = no` or
+   practice), stamps `pod_combat_nonfatal_active` on every combatant.
+   Practice additionally snapshots every participant's wound track for
+   end-of-fight restoration (see **Combat end**).
 8. Runs an init-time KO correction: init sets `slot_alive = 1`
    unconditionally, but a combatant who walks in already KO'd (filled
    track, torpor, morale-broken, scripted incap) is flipped down here
@@ -748,6 +775,15 @@ button (`POD_can_execute_combat_move_trigger`), the editor pool
 never reads it — it picks from and validates against its own
 `pod_combat_loadout`.
 
+The predicate behind that membership is defined once per move as
+`pod_combat_move_<skill_key>_unlock_trigger`. The hidden presentation decision
+calls it for failed-requirement text, and the runtime dispatcher calls it
+directly on the requested actor. The dispatcher is only the dynamic
+story-to-rule adapter; it does not repeat the trait/faith/perk body.
+`can_execute_decision` is intentionally absent from runtime unlock checks
+because its implicit decision-taker requirements reject generic unlanded
+combatants.
+
 The list is per-character **by construction**, so in multiplayer one
 player opening the editor never rewrites another player's unlock state
 (the editor and a live fight are never simultaneous for one character,
@@ -763,13 +799,15 @@ action bar.)
 
 `pod_combat_init_slot_from_character_effect = { CHARACTER ENEMY_LEADER
 }` runs in the slot-story scope. It applies the ally/enemy discipline
-battle buffs (with the opposing leader as caster), sets `slot_morale` to
-the cap, and captures the
+battle buffs (with the opposing leader as caster), resets `slot_morale`
+through `pod_combat_starting_morale_value`, seeds the display-only HP
+mirror, and captures the
 spirit-capability flags (`incorporeal_spirit`, `can_damage_spirit`). HP,
-soak and prowess are **not** snapshotted — those script_values read live
-off `slot_char` at use time, never cached on the slot (see **Damage
-pipeline** and §7). The discipline buffs are character modifiers held to
-duel end, so a live read still includes them. It also clears per-fight AI scratch (loadout,
+soak and prowess are **not** snapshotted as gameplay state — wound
+accessors read the character, while workspace loads sample prowess and
+soak for the current pair (see **Damage pipeline** and §7). The
+discipline buffs are character modifiers held to duel end, so later
+reads still include them. It also clears per-fight AI scratch (loadout,
 anti-repetition history, focus-fire mark, personality precompute) on AI
 occupants, and stamps the `pod_combat_duel_active` character modifier
 (30-day safety expiry) so other systems can defer mid-duel.
@@ -797,7 +835,12 @@ work (init, hit-chance calc, AI loadout seed). The seated combatant gets
 `slot_has_acted = 1`, so it sits out the current round and joins the
 next round's initiative (where `slot_has_acted` resets to 0). Every
 successful seat auto-posts a named "joins the fray" log row, so callers
-never wire their own arrival message.
+never wire their own arrival message. The hit/discipline baseline uses
+the opposing leader unless that leader is dead, in which case the
+lowest-position living opposing slot is used. A practice fight snapshots
+the arrival's wound track before seating. Unlike finalize's initial
+roster pre-pass, this path does not automatically shift a newly arrived
+AI Fera into warform.
 
 The whole seat is gated on the team-size counter actually advancing: a
 capped add (past 50) leaves the counter put, and that gate skips the
@@ -809,8 +852,11 @@ covered the initial roster.
 Scheduled reinforcements register on the host list
 `pod_combat_pending_reinforcements` (with `pod_combat_join_round` /
 `pod_combat_join_team` on the character) and are seated by the per-round
-sweep `pod_combat_process_pending_reinforcements_effect` at round end. A
-reinforcement killed before its round is dropped, not seated.
+sweep `pod_combat_process_pending_reinforcements_effect` at round end.
+`JOIN_ROUND <= pod_combat_round` seats immediately. A reinforcement
+killed before its round is dropped, not seated. A due reinforcement is
+removed from the pending list before its seat attempt, so a team-cap
+failure drops it rather than retrying next round.
 
 Move-driven summons (`summons_combatant`) go through
 `pod_combat_summon_combatant_glue_effect`. It resolves the friendly or
@@ -818,8 +864,9 @@ Move-driven summons (`summons_combatant`) go through
 selected `summon_recipe` creates one initialized character. Live recipes are
 `wraith`, `bane`, `gaian_spirit`, and `elemental` (the elemental recipe uses
 PoD's Wyrm elemental-bane family). The glue stamps every result
-`pod_combat_nonfatal_active`, so filling its wound track KOs it even in a
-fatal duel, then registers it in `pod_combat_summoned_chars` before seating.
+`pod_combat_nonfatal_active` and `spirit_pact_block`, so filling its
+wound track KOs it even in a fatal duel and pact interactions remain
+blocked, then registers it in `pod_combat_summoned_chars` before seating.
 Both cleanup paths remove every still-living registered summon with
 `death_disappearance`; no combat summon persists. The whole body runs in a
 `hidden_effect` so the confirm-tooltip walk doesn't error on character/story
@@ -831,10 +878,11 @@ creation or list mutation.
 `end_story`s every entry in `pod_combat_active_slots`, clears that list
 and `pod_combat_turn_order_list`, and removes the two leader pointer
 vars (no-ops if a fight never set them). It runs from
-`pod_combat_group_cleanup_effect`, which first clears AI per-fight
-scratch and despawns summoned characters (before the slot teardown,
-while `slot_char` still resolves). See **Combat end** for the full
-teardown order.
+`pod_combat_group_cleanup_effect`, whose order is: strip pending
+reinforcement state; clear AI per-fight scratch; despawn summons while
+their slot references still resolve; tear down slot stories; clear
+spirit workspace flags; then clear remaining group vars. See **Combat
+end** for the full teardown order.
 
 ### Turn loop
 
@@ -843,8 +891,6 @@ always drives the loop: AI turns before the PC resolve when the round is
 set up, the PC acts on player input, then AI turns after the PC resolve
 when the PC ends its turn. A 1v1 is just a degenerate NvN (player/0 +
 enemy/0), so there is one code path for every roster.
-
-> **AI selector — 2026-07-23 update.** A large AI pass changed several contracts in this section and below. Current behavior: the AI turn ceiling is the effective AP cap + 2 headroom (not a fixed 6), with a no-pick alternate-target retry and a `pod_combat_ai_turn_stalled` guard; controlled (dominated) turns admit only adverse `single_enemy` moves; initiative debuffs **stack** (accumulate) within a round rather than take-max; the shared redundancy gate rejects a move only when its **entire** payload is a redundant rider (hybrids stay usable), and retaliation arming is take-strongest; a per-action `pod_combat_ai_precompute_action_summary_effect` feeds the selector pending drain/control/DoT/initiative state plus recipient-aware heal urgency. **Refinement pass (2026-07-24):** the redundancy gate is now team/ally-aware (a pure team or `single_ally` utility move is admitted when any eligible slot benefits and disabled with a `pod_combat_move_redundant_tt` tooltip only when every target is already covered); the finish scan also fires on a morale kill (`pod_combat_ai_morale_finish_threshold`, actor must hold a morale-damage move, both capability scans AP-gated) and recomputes per action; a candidate whose entire payload is a non-improving ap-drain / mind-control / DoT is hard-excluded from the roll (hybrids keep the soft penalty, plus `@ai_partial_waste` for an already-active stance/retal rider); both AI tuning knobs (finish threshold, kill-priority boxes) are live in the debug tuning window; and the +12 tempo bonus is re-gated to the <= 3 AP band (B10). Full list: [`docs/COMBAT_AI_BEHAVIOR_REVIEW_AND_IMPLEMENTATION_PLAN_2026-07-23-validated.md`](docs/COMBAT_AI_BEHAVIOR_REVIEW_AND_IMPLEMENTATION_PLAN_2026-07-23-validated.md) ("Implementation status") and the `AI_LOGIC_GUIDE.md` banner.
 
 #### Initiative
 
@@ -866,9 +912,17 @@ flat baseline (via `pod_combat_initiative_base_value`); and
 in the Celerity (Vampire) *or* Black Wind (Kuei-jin) speed tree, folded
 through `pod_combat_initiative_modifier_value`.
 `slot_init_bonus` can be negative (stacked initiative debuffs). The
-effect also clears `slot_has_acted` on every alive slot, then stamps
-each slot's display rank (`slot_turn_order`, rank 1 = highest) and
-rebuilds the GUI initiative track list `pod_combat_turn_order_list`.
+effect also clears `slot_has_acted` and the round-duration once-per list
+`slot_moves_used_round` on every alive slot, then stamps each slot's
+display rank (`slot_turn_order`, rank 1 = highest) and rebuilds the GUI
+initiative track list `pod_combat_turn_order_list`.
+
+When the debug override
+`global_var:pod_combat_tune_init_no_reroll` is set, an existing
+`slot_initiative` is retained instead of rerolled; a fresh mid-fight
+seat still receives its first roll. The `slot_init_bonus` fold and all
+round resets still run. Under that mode, a folded initiative bonus or
+debuff becomes a rest-of-fight shift rather than a one-round shift.
 
 Ties break by `(is_enemy ascending, team_position ascending)` — player
 team before enemy team, lower positions first. This is a direct
@@ -910,8 +964,15 @@ Two drains body this step:
   `current_actor` on the PC (then runs
   `pod_combat_setup_pc_turn_effect`), or cleared if the round exhausts.
   It primes its own single `find_next` so the `while` limit can read
-  `current_actor` on the first pass; callers must not pre-call
-  `find_next` before it.
+  `current_actor` on the first pass. A caller's earlier `find_next` is
+  a harmless, idempotent re-selection; finalize and round end both use
+  that pattern.
+
+Both drains are additionally bounded by
+`pod_combat_ai_outer_turn_cap_value` (shipped default 200). Normal
+termination comes from marking each slot acted; if the cap is reached
+with an alive unacted slot, the loop emits a debug diagnostic instead
+of hanging.
 
 #### One AI turn
 
@@ -919,7 +980,12 @@ Two drains body this step:
 mind-controlled (stolen) turn, run the per-AI personality precompute
 once, select a target (controlled-aware), load the workspace, record the
 focus-fire mark, set AP, then run the moves via
-`pod_combat_ai_take_turn_effect`.
+`pod_combat_ai_take_turn_effect`. Round buffs clear before workspace
+load. Each action attempt saves immediately after execution, after an
+unrestricted fallback, and after an alternate-target retry, so KO and
+victory state is committed before another action can begin. The final
+save is followed by round-debuff expiry, leftover-AP storage,
+single-turn control consumption, the acted marker, and a victory check.
 
 The target roll (`pod_combat_ai_select_target_core_effect`) weights base
 1, +50, a **x3 kill priority**, +40 cross-turn focus-fire and the
@@ -943,13 +1009,17 @@ in three steps - ADMIT, SCORE, ROLL.
    snap recomputes the finishable summary at its own site (the previous
    action's copy is stale, and on a turn's first attempt belongs to the
    previous ACTOR), restricts the selector's pool to finishable slots for
-   exactly one call, and is bounded per turn by
-   `pod_combat_ai_snap_blocked`. Both run BEFORE the intent chooser, so
-   the whole move pipeline sees the final target.
+   exactly one call. `pod_combat_ai_snap_blocked` does not generally
+   limit snapping to once per turn; it prevents the pathological
+   snap/retry oscillation after an alternate-target retry. Both run
+   BEFORE the intent chooser, so the whole move pipeline sees the final
+   target.
 
 1. **Intent.** `pod_combat_ai_choose_intent_effect` picks one tactical
-   intent (pressure / break / setup / stabilize) and writes the host vars
-   `pod_combat_ai_intent` / `_intent_n` / `_intent_emg` / `_intent_locked`.
+   intent (pressure / break / setup / stabilize), `steal` for a
+   controlled turn, or `none` for the unrestricted lock/fallback, and
+   writes the host vars `pod_combat_ai_intent` / `_intent_n` /
+   `_intent_emg` / `_intent_locked`.
 2. **Admit + score.** `pod_combat_ai_score_loadout_effect` walks the
    actor's loadout once. Per candidate it evaluates
    `pod_combat_ai_move_admissible_trigger` (`pod_combat_triggers.txt`) -
@@ -965,12 +1035,10 @@ Admission and the band both sit at the LIMIT layer, evaluated BEFORE any
 weight, so either overrides anything expressed as a score bonus.
 `@ai_intent_finish_focus` exists because finish priority was one of those.
 
-The score is the old weight block computed one step earlier - base, all
-its modifier arms and its floor - which is what makes a band possible at
-all: a weight cannot be compared against the pool's best while it is
-still being computed. Full treatment in
-`scripts/python/POD-Combat/AI_LOGIC_GUIDE.md`, "Tactical Intent Layer"
-and "Move Selection".
+The score is the candidate weight formula computed one step earlier -
+base, all modifier arms, and its floor - which is what makes a band
+possible at all: a weight cannot be compared against the pool's best
+while it is still being computed.
 
 `pod_combat_ai_take_turn_effect` is a `while` with
 `count = pod_combat_ai_turn_action_cap_value` and a `limit` that stops
@@ -1019,8 +1087,13 @@ campaign-global `pod_combat_auto_advance` is retired.)
 
 - **AUTO** drains every pending AI turn in one click, then ends the
   round.
-- **STEP** resolves exactly one AI turn per click and hands control back
-  to the GUI between turns. The settle helpers
+- **STEP** normally resolves one AI turn per click and hands control
+  back to the GUI between turns. Two boundary cases are deliberate:
+  when round 1 opens with an AI first, finalize resolves none and leaves
+  that actor for the first Advance click; at a later round rollover, the
+  click that resolves the old round's last AI can also let
+  `group_end_round` execute the new round's first pre-PC AI before the
+  GUI settles. The settle helpers
   (`pod_combat_after_step_settle_effect` for the post-PC phase,
   `pod_combat_after_pre_pc_step_settle_effect` for the pre-PC phase)
   always re-run `find_next` first so `current_actor` reflects the next
@@ -1060,15 +1133,16 @@ turn or begins stepping/draining the next round's pre-PC AI per mode.
 
 ## §4 Result model & combat log
 
-Every resolved move records its outcome in **three orthogonal axes** on
-the combat host. They are independent: an attack that missed but
+Move resolution can write up to **three orthogonal axes** on the combat
+host. They are optional and independent: an attack that missed but
 triggered a counter sets the attack axis to `missed` and the retal axis
-to fired, both true at once. The combat log reads all three to render
-the row.
+to fired, both true at once; a pure utility move leaves the host outcome
+absent. The combat log normalizes and reads the axes when it creates the
+row.
 
 | Host var | Entry mirror | Values | Meaning |
 |---|---|---|---|
-| `pod_combat_last_outcome` | `entry.var:outcome` | `flag:attack` / `heal` / `morale_damage` / `morale_healed` / `utility` | What kind of action the row was. |
+| `pod_combat_last_outcome` | `entry.var:outcome` | Host: `flag:attack` / `heal` / `morale_damage` / `morale_healed`, or absent. Entry: the same plus `utility` | What kind of action the row was; `push_log` supplies `utility` only on the entry when the host outcome is absent. |
 | `pod_combat_last_attack_result` | `entry.var:attack_result` | `flag:hp_damage` / `soaked` / `immune` / `missed` / `dodged` / `stealthed` / `guard_blocked` | How the attack resolved. **Meaningful only when `outcome = flag:attack`** — readers gate on the outcome axis first. |
 | `pod_combat_last_retal_fired` | `entry.var:retal_fired` | `1` or absent | Overlay: a counter-strike resolved. Independent of the other two. |
 
@@ -1087,7 +1161,9 @@ per-victim classification rather than the move's damage class (see
 `entry.var:result_agg` splits the main damage line's wound-box icon, and
 `pod_combat_last_retal_agg` / `_last_retal_morale` →
 `entry.var:retal_agg` / `retal_morale` split the retal rider's. Absent =
-superficial.
+superficial only after a positive HP/counter branch has already won;
+miss, immunity, full soak, and zero-damage retaliation dispatch through
+their own branches.
 
 `pod_combat_last_soaked_count` → `entry.var:soaked_count` is the same
 shape: on an `hp_damage` row it selects a partial-soak variant of the
@@ -1098,10 +1174,14 @@ magnitudes, and its number is already post-soak.
 
 ### How helpers write the axes
 
-- **Attack outcomes** use `pod_combat_set_attack_result_effect = { CODE
-  = ... }`, which writes `outcome = flag:attack` **and** `attack_result
-  = flag:$CODE$` together. Writing them in lockstep is why readers can
-  trust that `attack_result` is meaningful whenever `outcome = attack`.
+- **Contact-failure attack outcomes** (miss / dodge / stealth / guard)
+  use `pod_combat_set_attack_result_effect = { CODE = ... }`, which
+  writes `outcome = flag:attack` and `attack_result = flag:$CODE$`
+  together. Landed damage lifts the route helper's
+  `scope:attack_result_flag` (`hp_damage` / `soaked` / `immune`) in
+  `pod_combat_apply_damage_payload_effect` and writes the same two axes
+  directly. Readers can therefore trust that `attack_result` is
+  meaningful whenever `outcome = attack`.
 - **Secondary outcomes** (HP heal, morale damage, morale heal) use
   `pod_combat_set_outcome_if_unset_effect = { CODE = ... }`, which
   writes the outcome only if none is set yet. A damage+heal move keeps
@@ -1177,9 +1257,11 @@ Two callers create the entries:
 - **`pod_combat_push_log_effect`** — the per-action row. Snapshots one
   resolved move: a live `move` story reference (the GUI reads the damage
   class, targeting, and the primitive flags off it), `actor` /
-  `target` char refs, the amount fields (`damage`, `heal_amount`,
+  `target` char refs, `actor_side`, optional `aoe_burst_index`, the
+  amount fields (`damage`, `heal_amount`,
   `morale_damage_amount`, `morale_heal_amount`, `self_damage`,
-  `retal_damage`), the three result-axis vars (`outcome` /
+  `retal_damage`, `energy_gain`, `energy_drain`, `soaked_count`), the
+  three result-axis vars (`outcome` /
   `attack_result` / `retal_fired`, see **Result model**), the
   actual-result markers (`result_agg` / `retal_agg` / `retal_morale`),
   and the segment-visibility bake described below.
@@ -1213,18 +1295,19 @@ segments**, each separated by a ` · ` divider:
 | `PODCombatLogSegRemoveGuard` | `remove_guard` |
 | `PODCombatLogSegRetalArmed` | `retaliate_if_hit` / `retaliate_if_missed` |
 | `PODCombatLogSegApGain` | `ap_gain` |
-| `PODCombatLogSegApDrain` | `ap_drain` (full drain renders as Stun) |
+| `PODCombatLogSegApDrain` | `ap_drain` (full drain renders as 0 AP next turn) |
 | `PODCombatLogSegInitDebuff` | `initiative_debuff` |
-| `PODCombatLogSegEnergyGain` | a fired `energy_gain` bonus (`energy_gain` > 0 on the entry) |
-| `PODCombatLogSegEnergyDrain` | a fired `energy_drain` bonus (`energy_drain` > 0 on the entry) |
+| `PODCombatLogSegEnergyGain` | backend exists for a fired `energy_gain` bonus (`energy_gain` > 0), but the combat window currently mounts no widget pair for it, so it does not render |
+| `PODCombatLogSegEnergyDrain` | backend exists for a fired `energy_drain` bonus (`energy_drain` > 0), but the combat window currently mounts no widget pair for it, so it does not render |
 
 Separate **amount riders** (`PODCombatLogHealRider`,
 `PODCombatLogMoraleDamageRider`, `PODCombatLogMoraleHealRider`,
 `PODCombatLogRetalRider`) append the actual numbers for heal / morale /
 counter effects that ride alongside the primary line. The retal rider
-splits on the counter's actual result (morale / aggravated / superficial
-/ soaked, off the entry's `retal_morale` / `retal_agg` markers),
-matching the firing order in **Reactions**.
+splits positive damage on the entry's `retal_morale` / `retal_agg`
+markers (morale / aggravated / superficial) and renders a zero-damage
+fired counter as soaked. It displays the post-soak counter magnitude;
+there is no separate absorbed-count split.
 
 #### Visibility is baked once at push time
 
@@ -1264,7 +1347,9 @@ The bake conditions:
   (`energy_gain` / `energy_drain`, lifted at §9b only when the bonus
   actually applied — the drain lift sits inside the practice gate), not
   burst-gated, and cleared per push so at most one row per move carries
-  them.
+  them. Their bake/SV/custom-loc backend is live, but
+  `pod_combat_window.gui` currently has no Energy Gain/Drain widget
+  pairs, so those two segments remain invisible in the current UI.
 
 Rows that skip the bake (system / DoT / mind / daze rows) carry no
 `seg_*` vars and read as all-invisible.
@@ -1317,21 +1402,25 @@ they always push exactly one row.
 ## §5 Tier system
 
 Buffs and debuffs to a combatant's **soak** and **hit chance** come in
-three sizes. The whole system is built from one idea: a combatant's live
-stat is always its **stored base re-combined with its currently-active
-tiers** — recomputed from scratch, never patched incrementally.
+three sizes. Hit chance is rebuilt from a stored pair base plus its
+active tiers. Soak has no combat-side base or recalc; PoD's live
+`POD_soak_chance` formula folds the character-side tier variables
+directly.
 
 ### The three tiers
 
-| Tier | Size | Magnitude | Script value |
+| Tier | Size | Shipped default | Script value |
 |------|------|-----------|--------------|
 | 1 | small | ±10 | `pod_combat_tier_small_mag` |
 | 2 | medium | ±20 | `pod_combat_tier_medium_mag` |
 | 3 | large | ±30 | `pod_combat_tier_large_mag` |
 
-The magnitudes are single-sourced as those three constants in
-`pod_combat_values.txt`. Every place that needs a tier's value reads the
-constant by name, so retuning one number changes the whole system.
+The runtime magnitudes are single-sourced as those three script values
+in `pod_combat_values.txt`; the debug tuning window can override each
+with `global_var:pod_combat_tune_tier_*`. Every runtime consumer reads
+the script value by name. Player-facing tutorial text and this reference
+still spell out the shipped defaults and must be updated if those
+defaults are promoted.
 
 ### The eight slots
 
@@ -1361,12 +1450,15 @@ Live hit chance is rebuilt by the recalc effects in
 **base** (`slot_base_hit_chance`, or the workspace
 `pod_combat_<side>_base_hit_chance`), then walk the four hit tier
 variables and clamp the result. Every tier is a flat percentage point,
-**added** for a buff and **subtracted** for a debuff; clamps to `[20, 95]`.
+**added** for a buff and **subtracted** for a debuff; it clamps to the
+live `pod_combat_hit_chance_min` / `_max` values (shipped defaults
+`[20, 95]`, debug-tunable).
 
 The output is written back to `slot_hit_chance` (and the workspace
-`pod_combat_<side>_hit_chance`). Stealth's `+30` hit
-bonus (`pod_combat_stealth_hit_bonus`) folds into the same recalc, keyed
-off the `*_is_stealthed` flag, so it survives every rebuild.
+`pod_combat_<side>_hit_chance`). Stealth's hit bonus
+(`pod_combat_stealth_hit_bonus`, shipped default +30 and debug-tunable)
+folds into the same recalc, keyed off the `*_is_stealthed` flag, so it
+survives every rebuild.
 
 Recalc-from-base is the load-bearing rule: live hit chance is **never**
 adjusted by deltas. Removing a tier means dropping its variable and
@@ -1397,10 +1489,13 @@ OR = {
 ```
 
 So a tier-1 move can never silently downgrade a stacked tier-3 effect.
-Move selection already rejects downgrades; the guard exists to also
-cover bypass paths (console, test actions). Recalc (hit) and the stash
-refresh (soak) fire whenever the move *declared* a tier, not whether the
-write happened, so a blocked write simply leaves the higher tier in place.
+The shared redundancy gate rejects a move for this reason only when the
+move has no independent useful payload and its entire rider set is
+redundant; useful hybrids remain selectable and the inferior tier write
+simply no-ops. The write guard also covers bypass paths (console, test
+actions). Recalc (hit) and the stash refresh (soak) fire whenever the
+move *declared* a tier, not whether the write happened, so a blocked
+write leaves the higher tier in place.
 
 The selection-time redundancy gates come in matched pairs, one reading
 each store: `pod_combat_tier_upgrade_only_trigger` /
@@ -1499,15 +1594,17 @@ wound rolls).
 ## §6 Reaction system
 
 A **reaction** is a counter-strike a combatant arms on its own turn and
-that fires automatically the next time it is attacked. Two flavours
-exist:
+that fires automatically on the next matching eligible incoming
+single-target HP-damage attack. Pure morale/control/utility moves and
+`team_enemy` attacks do not check reactions. Two flavours exist:
 
 - **Thorns** — fires when an attack makes **contact** (lands, is soaked,
   or is guard-blocked).
 - **Riposte** — fires when an attack **misses** (whiffs, is dodged, or
   hits stealth).
 
-The lifecycle has two halves: arm now, fire on the next incoming attack.
+The lifecycle has two halves: arm now, fire on the next matching
+eligible attack.
 
 ### Arming (during the arming combatant's own move)
 
@@ -1521,11 +1618,12 @@ workspace, which is mirrored onto its slot story:
 | `retaliate_if_hit` | `pod_combat_actor_retaliate_hit` | contact |
 | `retaliate_if_missed` | `pod_combat_actor_retaliate_miss` | evasion |
 
-The armed value is the counter damage, chosen as `retaliate_damage` →
-`hp_damage` → `1` (the final `1` only matters when a move arms a counter
-with neither field; otherwise the var stays unset and the firing gate
-silently swallows it). Two companion vars describe the counter, each
-with a `_hit` / `_miss` form:
+The candidate counter damage is chosen as `retaliate_damage` →
+`hp_damage` → `1`; an arming move therefore always supplies an amount.
+Arming is take-strongest: the candidate replaces an existing reaction
+only when its amount is strictly larger. An equal or smaller candidate
+leaves both the amount and its current kind unchanged. Two companion
+vars describe the counter, each with a `_hit` / `_miss` form:
 
 | Companion var | Meaning |
 |---------------|---------|
@@ -1546,10 +1644,10 @@ which drive the per-slot retaliation status icon
 
 ### Firing (during the next attacker's move)
 
-When a combatant is attacked, the reaction phase of move execution calls
-`pod_combat_check_retaliation_effect` with `TARGET_SIDE` = the side
-holding the stance (usually `target`) and `ACTOR_SIDE` = the attacker
-who will take the counter. It checks both armed slots:
+For a non-`team_enemy` move carrying `hp_damage`, the reaction phase
+calls `pod_combat_check_retaliation_effect` with `TARGET_SIDE` = the
+side holding the stance (usually `target`) and `ACTOR_SIDE` = the
+attacker who will take the counter. It checks both armed slots:
 
 | Armed var | Gated by | Fires on |
 |-----------|----------|----------|
@@ -1562,7 +1660,9 @@ Those two **result-code partition triggers** read the just-resolved
 helper `pod_combat_apply_reaction_if_triggered_effect` runs the
 limit-then-fire-then-clear pattern once per slot, then removes the armed
 var and both companions in lockstep (so a stale companion can't
-mislabel a later counter).
+mislabel a later counter). A matching contact/evasion consumes the
+reaction even if the counter's later spirit gate makes its payload
+no-op.
 
 ### How the counter resolves
 
@@ -1570,9 +1670,9 @@ mislabel a later counter).
 is a **reflex**, not a deliberate attack, so it skips the contact
 resolver and the hit roll entirely, and uses the bypass-guard damage
 path (guard protects against incoming attacks, not counters). It only
-hand-rolls the **spirit gate**: a physical counter against an
-incorporeal spirit no-ops unless the retaliator can damage spirits,
-which preserves the main attack's log line.
+hand-rolls the **spirit gate** before kind dispatch: every counter kind
+against an incorporeal spirit no-ops unless the retaliator can damage
+spirits, which preserves the main attack's log line.
 
 It dispatches on the counter kind in priority order **morale > typed >
 plain**:
@@ -1614,27 +1714,30 @@ scratch clear, the pending-reinforcement strips, the host-death
 release). KO'd is not dead: a KO'd-but-living combatant still gets its
 per-fight vars cleared.
 
-### The action workspace is valid only between load and save
+### The action workspace is a persistent current-pair cache
 
 The workspace alias pair (`pod_combat_actor_*` / `pod_combat_target_*`
-on the combat host) is a per-action execution adapter, not a persistence
-layer. It holds whichever combatant is acting and whichever is the
-current target, and it is meaningful **only** inside the window:
+on the combat host) is an execution adapter, not the durable home for
+every combatant. It holds the currently loaded actor and target. A full
+load establishes the pair at turn setup; target-only loads repoint it
+for swaps and AoE iterations. A typical turn looks like:
 
 ```
-pod_combat_load_workspace_effect   ← workspace becomes valid
-    (the action runs: POD_execute_combat_move, the AI selector body,
-     an SGUI is_valid check, the reaction phase)
-pod_combat_save_workspace_effect   ← workspace becomes invalid
+pod_combat_load_workspace_effect       ← establish actor + target
+    (one or more actions; target may be reloaded between them)
+pod_combat_save_workspace_effect       ← write mirrors back
+    (workspace remains loaded and may serve the next action)
 ```
 
-Any code that reads `pod_combat_actor_morale` (etc.) outside that window
-is reading stale data left over from the previous action. To answer
-"what is slot N's current morale / soak / stance / tier" after an action
-returns, read `slot_morale` etc. on the slot story directly. The
-load/save effects are the only authorized translators between the slot
-story and the workspace mirror. See **Where state lives** for the full
-owner model.
+`pod_combat_save_workspace_effect` does **not** clear or invalidate the
+workspace. PC move buttons can execute and save repeatedly without a
+new load, and AI target changes reload the pair only when needed. The
+cache becomes stale only when code changes its underlying slot directly,
+changes the selected pair without loading it, or moves to a new turn.
+To answer "what is some non-loaded slot's current morale / stance /
+tier", read that slot story directly. The load/save effects are the
+authorized translators between slot state and its current workspace
+mirror. See **Where state lives** for the full owner model.
 
 **A direct slot-field write that reaches a live actor/target must mirror
 back.** Writing a `slot_*` field straight on a slot story (e.g. the
@@ -1723,7 +1826,7 @@ are deliberately absence-as-signal (`slot_init_bonus`, `slot_ap_drain`,
 `slot_dot_*`, the tier vars, stance flags) — see **Slot lifecycle** for
 the full list.
 
-### Character stats are derived live, never cached
+### Character stats stay authoritative; current-pair reads may be hoisted
 
 Current HP, max HP, and aggravated/total wound counts are read live from
 each slot character's PoD wound vars (`POD_empty_damage_boxes` /
@@ -1735,14 +1838,14 @@ turns, so HP stays derived on every read. See **Variable reference** for
 the slot HP SVs and **Damage pipeline** for the single write path
 (`POD_increase_wounds_*`).
 
-**Soak and prowess follow the same rule.** Soak is read off
-`POD_soak_chance` — the value PoD's wound roll actually rolls, so the card
-cannot disagree with the fight — and prowess off the character, so the
-wound track's prowess penalties reach initiative, hit chance, auto-resolve
-and the AI's threat read as the fight wears on. The per-action workspace
-stash (`pod_combat_stash_side_live_stats_effect`) is a read hoist for the
-AI's per-candidate weighting, not a cache: it is rewritten from the
-character every load and every soak-tier write.
+**Soak and prowess remain character-authoritative but are hoisted for
+the loaded pair.** `pod_combat_stash_side_live_stats_effect` samples
+`POD_soak_chance` and prowess when a side loads, then AI scoring and
+workspace consumers reuse those values until the next refresh. Soak is
+also refreshed after a move writes a soak tier, and the actual PoD wound
+call evaluates its own authoritative soak path. This keeps wound-track
+prowess penalties and live soak changes feeding the fight without
+re-walking expensive script values for every candidate move.
 
 The one sanctioned exception is the **wound-bar display mirror**
 (`slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp`): the
@@ -1880,7 +1983,12 @@ the shared dead-safe sub-effects (`pod_combat_clear_combat_tiers_effect`,
 `pod_combat_group_cleanup_effect` also calls, so the two paths cannot
 drift. The dead host's own combat vars are left inert in save data
 (mutating them would error; the heir is a different character). The
-same release backs `.9999`'s phase 6 via an `is_alive` branch: when
+release is teardown-only: it ends the `POD_combat_sc_context` story and
+does not derive a duel outcome or fire the original follow-up event. If
+the held shell card survives, its no-outcome branch simply closes.
+Recovering the parent duel chain after a live host death is therefore a
+current limitation, not an implemented handoff.
+The same release backs `.9999`'s phase 6 via an `is_alive` branch: when
 phase 4's death outcome kills the losing host, phase 6 routes to the
 dead-safe release instead of the full host-var `pod_combat_cleanup_effect`
 (which would error on the corpse).
@@ -1896,13 +2004,16 @@ match wins:
 | # | Condition | Result |
 |---|---|---|
 | 1 | No alive enemy slot | player wins; loser = enemy leader (enemy/0) |
-| 2 | PC slot (player/0) KO'd | player loses; the PC can't act, so combat can't continue |
-| 3 | No alive player-team slot | player loses (covers a bypassed PC death check) |
+| 2 | PC slot (player/0) KO'd | player loses; winner = lowest-position living enemy (enemy leader only as fallback) |
+| 3 | No alive player-team slot | player loses; winner = lowest-position living enemy (covers a bypassed PC death check) |
 
 A match sets `pod_combat_winner`, `pod_combat_loser`,
-`pod_combat_is_over`, saves the enemy leader as
-`scope:pod_combat_target`, and pushes the victory/defeat log row. The
-combat window stays open; the player clicks End Combat to dismiss.
+`pod_combat_is_over`, saves the victorious principal as
+`scope:pod_combat_target`, and pushes the victory/defeat log row. On a
+player win that scope is the defeated enemy leader; on a player loss it
+is the lowest-position living enemy selected by
+`pod_combat_save_enemy_victor_effect`. The combat window stays open; the
+player clicks End Combat to dismiss.
 
 ### Auto-resolve
 
@@ -2014,8 +2125,11 @@ clear it.
    dispatcher was reached from a GUI execution rather than the shell, so
    the principals and rule flags are rebuilt from the context story
    (`POD_combat_restore_sc_context_effect` +
-   `POD_combat_restore_sc_rule_flags_effect`). Parent aliases are
-   unrecoverable on this route and the follow-up runs degraded. In
+   `POD_combat_restore_sc_rule_flags_effect`). It also fabricates the
+   vanilla-compatible attacker aliases `attacker` / `challenger` and
+   defender aliases `victim` / `recipient` / `defender` / `target` /
+   `adversary`. Parent-specific aliases are unrecoverable on this route,
+   so the follow-up still runs degraded. In
    practice only the debug builder launchers arrive here — they open no
    card and have no parent chain to lose, so it is simply their normal
    route, and it keeps the fallback exercised. A shell fight reaching it
@@ -2026,13 +2140,16 @@ clear it.
    / `sc_loser` plus the victor snap, and the `sc_finished` /
    `victory_type` constants. It runs after the fallback, whose principals
    the snap compares against.
-4. **Apply death by fatality mode.** Wounds were written live and PoD
-   death-checked inline as they landed, so a lethal hit already killed
-   the loser; this phase only forces `pod_death` for guaranteed-kill
-   modes (`fatality = always`, and `default` on tribal governments) when
-   the live damage fell short, each guarded by `is_alive` so it never
-   re-kills a corpse. `practice` and `no` apply no death; `possible`
-   trusts the live damage.
+4. **Apply duel finalization side effects**
+   (`POD_combat_apply_duel_finalization_effect`): release both
+   principals' `engaged_in_single_combat` state; increment one equipped
+   primary weapon's `artifact_duel_var` for the victor; grant the victor
+   Fera ferocity renown outside practice; then apply fatality-mode death
+   handling. Wounds were written live and PoD death-checked inline, so
+   the death branch only forces `pod_death` for guaranteed-kill modes
+   (`fatality = always`, and `default` on tribal governments) when live
+   damage fell short, guarded by `is_alive`. `practice` and `no` apply
+   no death; `possible` trusts the live damage.
 5. Fire the follow-up event (`OUTPUT_EVENT`), with an initiator →
    defender → attacker fallback chain matching vanilla.
 6. **Cleanup** (`pod_combat_cleanup_effect`): clears combat tiers,
@@ -2068,16 +2185,20 @@ Code-side entry points and where they live.
 
 | File | Purpose |
 |---|---|
-| `pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. Also home to the loadout copy effects and the move-sheet scratch-list machinery (`pod_combat_sheet_rebuild_effect` / `_set_sort_effect` / `_reset_effect`). |
-| `pod_combat_move_list_effects.txt` | The move catalogue: one `POD_init_combat_move` block per move (validator suppressions live in `pod_combat_error_suppression_effects.txt`, not here). Generated from the CSV by `generate_combat_files.py` (the file header says do not hand-edit). |
+| `pod_combat_move_init_effects.txt` | Setter effects — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. Also home to the loadout copy effects and the move-sheet scratch-list machinery (`pod_combat_sheet_rebuild_effect` / `_set_sort_effect` / `_reset_effect`). |
+| `pod_combat_move_list_effects.txt` | The manually maintained move registry: one `POD_init_combat_move` constructor followed immediately by its setter block for every move (validator suppressions live in `pod_combat_error_suppression_effects.txt`, not here). |
 | `pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§17 phase contract above. |
 | `pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
 | `pod_combat_group_effects.txt` | Duel builder (`POD_combat_create_duel_effect` / `_duel_add_ally_effect` / `_duel_add_enemy_effect` / `_finalize_duel_effect` + the `pod_combat_init_all_slots_effect` dispatcher), workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
 | `pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
-| `pod_combat_tier_effects.txt` | Tier recalc-from-base for soak / hit. |
-| `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file — see `scripts/python/POD-Combat/AI_LOGIC_GUIDE.md` for the per-modifier rationale. |
-| `PoD_override_single_combat_effects.txt` | Same-key redeclaration that swaps PoD's `configure_start_single_combat_effect` for the combat-minigame launcher when the relevant duel types fire. Renamed from `z_Combat-PoD_override_single_combat_effects.txt` (z_ prefix dropped). Also holds the retired alias stash. |
+| `pod_combat_tier_effects.txt` | Hit recalc-from-base for workspace and slot scopes, including actor-target pair recalculation. Soak has no combat recalc; its character-side tiers are consumed by PoD's `POD_soak_chance`. |
+| `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file. |
+| `pod_combat_summon_effects.txt` | Immediate mid-fight seating, scheduled reinforcements, summon destination/capacity gates, the four summon recipes, and summon cleanup registration. |
+| `pod_combat_tuning_effects.txt` | Debug tuning-window steppers, bounds, defaults, trace toggles, and Reset All for `global_var:pod_combat_tune_*`. |
+| `pod_combat_error_suppression_effects.txt` | Consolidated never-executed validator set/use bridges for optional move vars, log-entry vars, literal flags, and scope aliases. Called once at game start. |
+| `PoD_override_single_combat_effects.txt` | Same-key redeclaration that routes eligible PC-involved `configure_start_single_combat_effect` calls through `pod_combat_sc_launch_minigame_effect`; ineligible or fixed-result duels retain the PoD body. |
 | `pod_combat_sc_context_effects.txt` | Hand-off helpers for `pod_combat.9999`: outcome derivation (both routes), the fallback principal/rule-flag restore, duel-end finalization, follow-up fire. §10. |
+| `POD_health_track_effects.txt` (PoD file, delta) | Three registered combat deltas: per-point soak (`pod_soak_hits`), practice-spar guards that suppress persistent wound side effects (`pod_combat_practice_active`), and the aggravated-overflow push-out correction in `POD_apply_wound_boxes` (`subtract = POD_empty_damage_boxes`). `verify_deltas.py` tracks all three code markers. |
 
 There is no `pod_combat_debug_effects.txt` in `devpod/` - the
 workspace-sync assert layer was not ported (see §7 (enforcement is
@@ -2089,11 +2210,12 @@ the devpod-old copy is the porting reference).
 | File | Purpose |
 |---|---|
 | `pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
-| `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` - a switch on the move's `cond_param` supplying the literal trait / secret_type key CK3 demands (a variable will not do). A predicate no CSV row uses is emitted as a fail-closed stub instead of a switch; `pod_combat_cond_known_secret_trigger` is one today. Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. Generated from the CSV by `generate_combat_files.py`. |
+| `pod_combat_move_unlock_triggers.txt` | Unlock authority: one manually maintained character-scoped rule per move, plus `pod_combat_actor_unlocks_move_trigger`, the `config_section`/`skill_key` story adapter used by editor, preset, PC-bake, and AI-seeding paths. Every move, including universal moves, needs an explicit dispatcher leaf. The permissive fallbacks are safety guards, not authoring shortcuts. |
+| `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` - manually maintained literal-key switches for the move's `cond_param`, because CK3 requires a literal trait or secret-type key. Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. `target_known_secret` is currently a fail-closed stub. |
 | `pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. Also home to the damage-class partition triggers (`pod_combat_move_class_is_elemental_trigger` / `pod_combat_class_always_aggravated_trigger`) and to `pod_combat_ai_move_admissible_trigger` - the AI's entire move-admission gate set, which the move roll calls as its `limit`. |
-| `pod_combat_damage_source_weakness_triggers.txt` | Single source of truth for splat weakness → damage class mapping. Per-class triggers (`pod_combat_target_is_weak_to_{silver,gold,sun,fire,holy}_trigger`) + the bridge trigger consumed by the AI selector's weakness-exploitation bias (reads `var:damage_type` off the candidate move). |
-| `POD_health_track_triggers.txt` (PoD file, delta) | Two direct deltas in PoD's `POD_damage_type_is_aggravated`: the holy/true_faith aggravated promotion (vampires, demons, kuei-jin, wraiths) and the `pod_combat_force_agg` attacker-marker branch for the `change_type` bonus on elemental moves. Replaces the old `pod_combat_damage_type_overrides.txt`. |
-| `POD_disciplines_triggers.txt` (PoD file, delta) | The `pod_combat_nonfatal_active` flag check in `POD_can_die_from_wounds`'s NOR list (so non-fatal duels can't kill / torpor mid-combat) is a direct delta in PoD's file. Replaces the old `pod_combat_death_gate_overrides.txt`. |
+| `pod_combat_damage_source_weakness_triggers.txt` | AI weakness-exploitation mapping, not the authoritative wound matrix. It defines helpers for silver, gold, sun, fire, holy, poison, and cold iron. The current `pod_combat_move_exploits_target_weakness_trigger` bridge dispatches only silver/gold/sun/fire/holy; poison and cold-iron helpers exist but are not currently connected to the AI score arm. Actual aggravated/immunity/multiplier behavior lives in the PoD health-track trigger/value files. |
+| `POD_health_track_triggers.txt` (PoD file, delta) | Current combat damage matrix: per-splat aggravated classification and default immunities for the elemental death reasons, poison/cold-iron weakness helpers, holy/true-faith classification (including vampires/abominations, demons, kuei-jin, wraiths, and true Fae), and the `pod_combat_force_agg` change-type bridge. |
+| `POD_disciplines_triggers.txt` (PoD file, delta) | Adds the participant-side `pod_combat_nonfatal_active` death gate to `POD_can_die_from_wounds`, protecting both non-fatal and practice fights from inline death/torpor. |
 
 ### Story cycles
 
@@ -2105,9 +2227,8 @@ the devpod-old copy is the porting reference).
 
 | File | Purpose |
 |---|---|
-| `pod_combat_values.txt` | Constants (`pod_combat_base_ap`, `pod_combat_max_morale`, etc.), slot-state script values (`pod_combat_slot_max_hp_value`, `pod_combat_slot_total_damage_sv`, `pod_combat_slot_morale_pct`, etc.), and category-cap helpers (`pod_combat_atk_count` etc.) for the loadout editor. All consumed by the GUI and combat effects. |
-| `pod_combat_values.txt` (version + caps) | Also holds `POD_current_combat_version` (hand-bumped when the move set changes; the configure-skills decision reloads the catalogue on version mismatch) and the loadout caps. Many constants in this file carry a `global_var:pod_combat_tune_*` override branch for the debug tuning window (`pod_combat_tuning_window.gui` + `pod_combat_tuning_guis.txt` + `pod_combat_tuning_effects.txt`): unset global = the shipped default; the window's Reset All clears every override. |
-| `POD_health_track_values.txt` (PoD file, delta) | PoD's health-track SV file carrying direct deltas (integrated fork, not a submod override): holy-damage SVs, the multiplicative `POD_soak_chance` rewrite, and the combat-tier-buff soak bridge. |
+| `pod_combat_values.txt` | Runtime defaults and tunable script values (`pod_combat_base_ap`, morale, hit clamps, initiative, AI thresholds, tiers), slot/workspace/log display values, loadout category caps, and `POD_current_combat_version`. The configure-skills decision and combat builder reload the catalogue on version mismatch. `global_var:pod_combat_tune_*` overrides feed the debug tuning window; Reset All removes them. |
+| `POD_health_track_values.txt` (PoD file, delta) | Integrated PoD health-track file carrying combat-relevant holy/elemental wound routing, weakness multipliers/caps, the multiplicative `POD_soak_chance` rewrite, per-point-soak support values, and the character-side combat-tier soak bridge. |
 
 ### Decisions
 
@@ -2118,13 +2239,26 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `pod_combat_decisions.txt` | Player-facing decisions (`pod_combat_configure_skills`). |
-| `pod_combat_move_decisions.txt` | One hidden decision per move - holds the card art and the unlock requirement *shown* in the editor, not the gate itself. The actual gate (editor and combat alike) is the `pod_combat_move_unlock_triggers.txt` dispatcher; decisions implicitly require ruler status, which unlanded combatants fail. Generated from the CSV by `generate_combat_files.py`. |
+| `pod_combat_move_decisions.txt` | One manually maintained hidden presentation decision per move. It supplies card art and calls the move's shared character-scoped unlock rule from `is_valid_showing_failures_only`, allowing `GetCommandDescForPlayer` to render failed requirements without duplicating the predicate. Runtime does not call `can_execute_decision`. |
 
 ### Character interactions
 
 | File | Purpose |
 |---|---|
-| `POD_debug_interactions.txt` (PoD file, delta) | The debug-only combat launchers (`pod_combat_debug_*` for 1v1 / 1vN / Nv1 / NvN, reinforce, practice, nonfatal) are direct deltas in PoD's debug-interactions file; `debug_only = yes` gates them out of release. Replaces the old `pod_combat_debug_interaction.txt`. |
+| `POD_debug_interactions.txt` (PoD file, delta) | Debug-only combat launchers for tuning, 1v1 / 1vN / Nv1 / NvN, reinforcement, practice, and nonfatal scenarios. `debug_only = yes` gates them out of release. |
+| `00_character_interaction_categories.txt` (PoD file, delta) | Defines `interaction_debug_combat`, the category used by the combat debug interactions. |
+
+### Events
+
+| File | Purpose |
+|---|---|
+| `events/POD_combat_events.txt` | Combat help hub/topics, debug follow-up/invalidation events, dedicated lethal-duel aftermath `pod_combat.9990`, held-open shell `pod_combat.9995`, and post-combat dispatcher `pod_combat.9999`. |
+
+### Scripted character templates
+
+| File | Purpose |
+|---|---|
+| `POD_combat_summoned_character_templates.txt` | Temporary wraith template used by the move summon recipe; the other live recipes create spirit characters directly from PoD templates/families. |
 
 ### Decision group types
 
@@ -2136,7 +2270,17 @@ write splits the directory).
 
 | File | Purpose |
 |---|---|
-| `POD_vanilla_game_start.txt` (PoD file, delta) | The `on_game_start` hook calling `POD_initialize_combat_moves` is a direct delta in PoD's game-start on_action file. Replaces the old `pod_combat_on_actions.txt`. No save-migration on_action - instead, lazy version-check reload: both `pod_combat_configure_skills` (loadout editor decision) and `POD_combat_create_duel_effect` (combat init) compare the save's stored `POD_combat_version` against the script-side constant and call `POD_reload_combat_moves` on mismatch, rebuilding the global catalogue + AI loadouts before the player opens the editor or combat begins. Old saves never see broken story refs. |
+| `POD_vanilla_game_start.txt` (PoD file, delta) | `on_game_start` calls `POD_initialize_combat_moves` and `POD_combat_suppress_validator_warnings`. Save migration is lazy instead: both `pod_combat_configure_skills` and `POD_combat_create_duel_effect` compare the stored `POD_combat_version` against `POD_current_combat_version` and call `POD_reload_combat_moves` before editor/combat use. |
+| `POD_vanilla_death.txt` (PoD file, delta) | The death on-action calls `pod_combat_host_died_release_effect` when a character dies while holding `pod_combat_active`, providing the dead-safe abnormal teardown described in §8. |
+
+### Game rule and runtime markers
+
+| File | Purpose |
+|---|---|
+| `00_POD_game_rules.txt` (PoD file, delta) | Defines the `pod_combat` game rule and enabled/disabled settings; the single-combat override consults `pod_combat_enabled`. |
+| `00_POD_misc_modifiers.txt` (PoD file, delta) | Defines `pod_combat_duel_active`, the 30-day safety-net marker placed on active participants and normally removed at duel end. |
+| `00_POD_single_combat_modifiers.txt` | Move-specific `prowess_from_pain` wound-state modifiers used by the combat move set. |
+| `00_PoD_deaths.txt` (PoD file, delta) | Defines `death_cold_iron`, used by the cold-iron damage class. |
 
 ### GUI
 
@@ -2145,29 +2289,40 @@ write splits the directory).
 | `POD_windows/pod_combat_window.gui` | The mid-combat window — move buttons, log, slot panels. |
 | `event_windows/pod_combat_shell.gui` | The duel card for `pod_combat.9995`. Minimal (no dimmer, no portraits, no theme art); the window is hidden while the fight runs and appears centred once it resolves, and its option button carries the live readiness gate plus deliberately no shift+N accelerator. §10. |
 | `POD_windows/pod_combat_skills_window.gui` | The loadout editor (Configure Skills decision). Three pool views - detailed / compact / sheet. The sheet is a sortable, filterable table over the per-character `pod_combat_sheet_rows` scratch list: GUI datamodels cannot sort or filter, so `pod_combat_sheet_rebuild_effect` (move_init_effects) copies the catalogue with `limit` filters and `ordered_in_global_list` ordering, and the list's insertion order IS the display order. Column headers are the sort controls (`pod_combat_sheet_sort_*` SGUIs; re-click flips direction); a filter popup shares the editor's category flags and adds sheet-only presence filters (`pod_combat_sheet_f_*`). The scratch list is cleared at editor close and by `POD_reload_combat_moves`. Numeric columns read 0-defaulting `pod_combat_sheet_*_cell_value` SVs; the icon/marker columns (damage class, usage limit, AP swing, rider effects) route through `PODCombatSheet*` custom-loc dispatchers instead, so every optional-var read stays guarded inside a `has_variable` branch. `apswing` is a signed sort key (`ap_gain` positive, `ap_drain` negative). Adding a column means editing the `pod_combat_sheet_row` type AND the header instance together — the header overrides every cell block, which is what keeps its `Scope.Story` bindings from evaluating outside a datamodel item. |
-| (no scripted-widgets file) | Reusable widget templates (move buttons, log rows, stat tiles) live in the `PODCombatTypes` types blocks inside the two window files above, not in a separate `gui/scripted_widgets/` file. |
-| `pod_texticons_combat.gui` | Inline `@<name>!` icons for stances, the elemental damage classes, and the DoT / counter rider marks. |
+| `POD_windows/pod_combat_tuning_window.gui` | Debug tuning and AI-trace window for runtime `pod_combat_tune_*` overrides. |
+| `scripted_widgets/POD_scripted_widgets.txt` | Registers the combat, skills, and tuning window files with the scripted-widget loader. Reusable move/log/stat type definitions themselves live in each window's `PODCombatTypes` block. |
+| `POD_shared/pod_texticons_combat.gui` | Inline `@<name>!` icons for stances, elemental damage classes, and DoT/counter rider marks. |
+| `POD_shared/pod_texticons_combat_disciplines.gui` | Inline discipline/power icons used by combat move presentation. |
 | `window_decisions.gui` | Vanilla override that hides the `hidden` decision group from the Decisions panel. |
+
+### Scripted GUIs
+
+| File | Purpose |
+|---|---|
+| `pod_combat_control_guis.txt` | Live combat controls: execute move, target changes, turn advance/end, auto-resolve, mode toggle, and help/close gates. |
+| `pod_combat_skill_guis.txt` | Loadout editor actions plus move-card, compact-row, sheet-cell, damage-class, rider, and susceptibility presentation bindings. |
+| `pod_combat_tuning_guis.txt` | Debug tuning-window buttons, steppers, toggles, resets, and AI trace controls. |
 
 ### Localization
 
 | File | Purpose |
 |---|---|
 | `gui/POD_combat_static_l_english.yml` | Hand-authored loc — desc keys, log loc, capability callouts, etc. |
-| `gui/POD_combat_l_english.yml` | Three keys per move: `pod_combat_move_<key>` (bare display name), `_desc` (PODCombatMoveDesc stat-card target), `_tooltip` (flavor sentence). Generated from the CSV by `generate_combat_files.py`, alongside the hand-authored static loc file. |
+| `gui/POD_combat_moves_l_english.yml` | Three manually maintained keys per move: `POD_combat_move_<key>` (bare display name), `_desc` (`PODCombatMoveDesc` stat-card target), and `_tooltip` (flavor sentence). |
+| `effects_POD_l_english.yml` (PoD file, delta) | Per-point-soak feedback: partial-soak count in `POD_damage_soaked_tt` plus the wound-preview tooltip variants used by the health-track delta. Translation counterparts must port the same scope-value contract. |
 
 ### Customizable localization
 
 | File | Purpose |
 |---|---|
-| `00_POD_misc_custom_loc.txt` (PoD file, delta) | `PODEnergySplatWord`, `PODCombatXxxCostInline`, `PODCombatMoveInlineTooltip` are direct additions in PoD's misc custom-loc file. Replaces the old `00_POD_combat_custom_loc.txt`. |
-| `pod_combat_log_custom_loc.txt` | `PODCombatLogResultText` and the rider customizable_locs the log GUI invokes. |
+| `00_POD_misc_custom_loc.txt` (PoD file, delta) | Combat additions `PODEnergySplatWord` and `PODCombatMoveInlineTooltip`. (`PODEnergySplatIcon` is existing PoD infrastructure.) |
+| `POD_combat_log_custom_loc.txt` | Combat log result/segment/rider renderers; all five `PODCombat*CostInline` dispatchers; status, DoT type, compact/sheet cell, damage source, and susceptibility text dispatchers. |
 
 ### Data binding
 
 | File | Purpose |
 |---|---|
-| `pod_combat_macros.txt` | `PODCombatMoveEffect`, `PODCombatMoveDesc`, `PODCombatMoveFlavor`, `PODGetCombatMoveFromKey`. |
+| `pod_combat_macros.txt` | Move binding macros (`PODCombatMoveEffect`, `PODCombatMoveDesc`, `PODCombatMoveFlavor`, `PODGetCombatMoveFromKey`) and the log widget contract (`PODSegVisible`, `PODSegSepVisible`, `PODSegText`). |
 
 ### Game concepts
 
@@ -2177,24 +2332,28 @@ write splits the directory).
 
 ### Move-authoring pipeline
 
-The Python CSV generator is the live build step for the move catalogue:
-it reads `pod_combat_skills_master.csv` (the source of truth for every
-move) and emits five files - the move list, the per-move decisions, the
-unlock dispatcher, the condition sub-dispatch, and the generated loc.
-All five are generator output; a hand edit to any of them survives only
-until the next run. The version constant is NOT generated: add or
-change a move by editing the CSV, running `generate_combat_files.py`,
-and hand-bumping `POD_current_combat_version` in
-`pod_combat_values.txt`, per the Skill Authoring Guide. Hand-authoring
-a move outside the CSV is the exception, covered by the Manual Move
-Authoring Guide.
+Moves are maintained directly in five synchronized game-data locations:
+the move registry, the shared unlock-rule file and runtime dispatcher,
+the hidden decision file, per-move localization, and the combat-version
+constant. The condition sub-dispatch is a conditional sixth edit for a
+new literal `has_trait` condition key.
+
+The stable `skill_key` connects every record. Eligibility is authored
+exactly once in `pod_combat_move_<key>_unlock_trigger`; the hidden
+decision and runtime dispatcher only delegate to it. Every move needs an
+explicit dispatcher leaf because the unknown-key fallbacks are permissive.
+After a gameplay change, increment `POD_current_combat_version` so
+existing saves rebuild their move stories.
 
 | File | Purpose |
 |---|---|
-| `scripts/python/POD-Combat/MANUAL_MOVE_AUTHORING_GUIDE.md` | How to hand-author a move outside the CSV - the exception (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`). |
-| `scripts/python/POD-Combat/generate_combat_files.py` | The CSV-to-game-files generator: reads the CSV and emits the move list, per-move decisions, unlock dispatcher, condition sub-dispatch (`pod_combat_condition_dispatch_triggers.txt`), and generated loc (the version constant is hand-bumped in `pod_combat_values.txt`). |
-| `scripts/python/POD-Combat/pod_combat_skills_master.csv` | **Source of truth** for every combat move - the generator's input dataset. |
-| `scripts/python/POD-Combat/SKILL_AUTHORING_GUIDE.md` | **The authoring guide** - CSV column reference (each column maps to the move-story variable it sets) + design guidance. |
+| `scripts/python/POD-Combat/COMBAT_MOVE_AUTHORING_GUIDE.info` | Self-contained direct-file workflow, setter reference, balance rubric, verification checklist, and test plan (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`). |
+| `devpod/common/scripted_effects/POD_combat/pod_combat_move_list_effects.txt` | Manually maintained constructor and setter blocks. |
+| `devpod/common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt` | Manually maintained shared rules and dispatcher leaves. |
+| `devpod/common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | Conditional edit when a move introduces a new literal condition parameter (currently trait/known-secret dispatch); unknown values fail closed. |
+| `devpod/common/decisions/POD_Combat/pod_combat_move_decisions.txt` | Manually maintained hidden decisions. |
+| `devpod/localization/english/gui/POD_combat_moves_l_english.yml` | Manually maintained per-move localization. |
+| `devpod/common/script_values/pod_combat_values.txt` | Hand-increment `POD_current_combat_version` after a gameplay-relevant registry change so existing saves rebuild the catalogue. |
 
 ---
 
@@ -2257,18 +2416,21 @@ gated on `pod_combat_shell_owns_live_fight_trigger` rather than on
 
 `pod_combat.9999` detects a missing `scope:sc_attacker` and rebuilds the
 principals and rule flags from the `POD_combat_sc_context` story. Parent
-aliases cannot be recovered — nothing copies them any more — so the
-follow-up runs on principals alone. Two things arrive this way:
+aliases cannot be recovered. The restore therefore also fabricates the
+standard defender aliases (`victim`, `recipient`, `defender`, `target`,
+`adversary`) and attacker aliases (`attacker`, `challenger`) from the
+principals. A follow-up needing a parent-specific alias still runs
+degraded. Two things arrive this way:
 
 | Route | Treatment |
 |---|---|
 | Debug builder launchers (`POD_combat_create_duel_effect` called directly) | Normal. They open no card and have no parent chain to lose, and they keep this route exercised. |
 | A shell fight | Should be unreachable — the card is the only conclude path. `error_log`s if it ever happens. |
 
-The story therefore still carries the principals, the rule flags and the
-follow-up id. It is also what the planned multiplayer dead-host bridge
-reads, since `trigger_event` no-ops on a dead root and a corpse can
-never click a card.
+The story therefore still carries the principals, the rule flags and
+the follow-up id. Live host death currently ends that story during the
+dead-safe release without firing the follow-up; no dead-host bridge is
+implemented.
 
 ### Victor snapping
 
@@ -2303,7 +2465,8 @@ below.
 
 Pick a numeric position in `POD_execute_combat_move`
 (`pod_combat_move_effects.txt`), respecting the ordering invariants in
-**Move execution** (damage before its rider gates, log push last).
+**Move execution** (damage before its rider gates; log push after every
+outcome-producing phase and before teardown).
 Document the new phase's dependencies in the phase table. If the phase
 produces a new `pod_combat_last_*` flag or amount, add it to the result
 reset block (§2) and to `pod_combat_clear_last_result_vars_effect` so it
@@ -2328,18 +2491,27 @@ damage call, the retal-damage lift, and the
 of declaration. The recipe also lives in the reaction-phase header of
 `pod_combat_effects.txt`.
 
-### Add a tier
+### Retune tier magnitudes or add a tier stat category
 
 Edit `pod_combat_tier_effects.txt` directly only when the **stat
-categories** change (currently `soak` and `hit`) or the **magnitudes**
-change. The ±10/20/30 magnitudes are single-sourced as the
+categories** change (currently `soak` and `hit`). The shipped
+±10/20/30 runtime magnitudes are single-sourced as the
 `pod_combat_tier_small_mag` / `pod_combat_tier_medium_mag` /
 `pod_combat_tier_large_mag` script values in `pod_combat_values.txt`, read
 by name everywhere they apply (the tier recalc, the GUI display SVs, and
-`POD_soak_chance` in PoD's `POD_health_track_values.txt`). Retune by
-editing those three SV definitions only — there is no lockstep to
-maintain, because the move-side tier setters carry the tier ordinal
-(1/2/3), not the magnitude. See **Tier system**.
+`POD_soak_chance` in PoD's `POD_health_track_values.txt`). Retuning
+runtime behavior therefore starts with those three SV defaults (or the
+debug overrides), because move setters carry ordinal 1/2/3 rather than
+the magnitude. Also update the hard-coded 10/20/30 tutorial
+localization, the tier tables in this reference/authoring guide, and AI
+comments that describe the shipped curve.
+
+This is not a fourth-tier checklist. Adding a new ordinal would require
+new magnitude and dispatch branches across the hit recalc, soak bridge,
+move/slot display values, GUI/custom-loc presentation, setters,
+validation, AI scoring, and documentation. Treat it as a cross-system
+feature rather than editing only the three existing SVs. See **Tier
+system**.
 
 ### Add a workspace-mirror field
 
@@ -2354,6 +2526,11 @@ Any combatant field that must be readable across both the actor and target phase
    `pod_combat_save_side_to_story_helper` (same file).
 4. Add a `remove_variable` for the actor and target vars to the
    workspace cleanup.
+5. Audit direct slot writes. If the new `slot_*` field can be written
+   while that slot is the loaded actor or target, mirror the write into
+   the matching workspace field immediately; otherwise the next save
+   can overwrite it with the stale cached value. See
+   `pod_combat_apply_ally_down_shock_to_slot_effect` for the pattern.
 
 The load and save field lists must stay in lockstep — a field added to
 one but not the other desyncs at every action boundary. If the var is
@@ -2362,7 +2539,16 @@ matching error-suppression entry.
 
 ### Add a per-character initiative or starting-morale modifier
 
-Two pre-wired designer hooks let a developer hand any character a flat bonus or penalty to combat initiative, or to the morale they start a fight with, without touching the engine. Both are script_values in `pod_combat_values.txt` (`pod_combat_initiative_modifier_value` / `pod_combat_starting_morale_modifier_value`); both return `0` by default, and both are already summed into the one formula that matters - the per-round roll in `pod_combat_calculate_initiative_effect`, and the starting `slot_morale` in `pod_combat_set_slot_char_effect`. To use one, just fill in its body; nothing else needs wiring.
+Two pre-wired designer hooks let a developer hand any character a flat
+bonus or penalty to combat initiative, or to the morale they start a
+fight with, without touching the engine. Both are script values in
+`pod_combat_values.txt`
+(`pod_combat_initiative_modifier_value` /
+`pod_combat_starting_morale_modifier_value`); both return `0` by
+default, and both are already summed into their canonical value:
+the per-round roll in `pod_combat_calculate_initiative_effect`, and
+`pod_combat_starting_morale_value`, which both slot-seeding sites read.
+To use one, fill in its body; nothing else needs wiring.
 
 Each is evaluated on the combatant's **slot** story (`this` = the slot), with the occupant at `var:slot_char`. Branch on the character through it - `var:slot_char` scope-switches are valid inside a script_value (engine precedent: `04_ep2_accolade_values.txt`):
 
@@ -2374,16 +2560,26 @@ pod_combat_initiative_modifier_value = {
 ```
 
 - Keep the body a **pure read** - conditions plus `add`/`subtract`, no effects.
-- **Initiative** is re-evaluated every round, so it may read live fight state. **Starting morale** is evaluated once at slot creation, which is why `slot_char` is written before `slot_morale` in the constructor.
-- Morale is per-combatant. A positive modifier may push starting morale above the 20 cap (intended head-room); it is floored at 1, so an over-negative value can never start a fighter already KO'd.
+- **Initiative** is re-evaluated every round, so it may read live fight
+  state. **Starting morale** is evaluated once for the constructor's
+  provisional alive seed and again during per-slot fight initialization;
+  the second seed is the combatant's actual starting morale. Both sites
+  call `pod_combat_starting_morale_value`, and both run after `slot_char`
+  is written.
+- Morale is per-combatant. Its baseline is
+  `pod_combat_max_morale` (or the debug-tuned starting-morale override),
+  plus this hook. A positive modifier may push the seed above that
+  baseline (intended head-room); it is floored at 1, so an over-negative
+  value can never start a fighter already KO'd.
 
 ### Add a move
 
-Adding a combat move is not covered here. Moves are generated from
-`pod_combat_skills_master.csv` by `generate_combat_files.py` - see the
-Skill Authoring Guide for the CSV columns, or the Manual Move Authoring
-Guide (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`) for hand-authoring
-a move outside the CSV.
+Add the constructor and setter block, shared unlock rule and dispatcher
+leaf, hidden decision, three localization keys, and version increment
+directly in their live files. See the Combat Move Authoring Guide
+(in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`) for copyable
+templates, the complete setter contract, balance rubric, verification
+checklist, and test plan.
 
 ### Cross-file change checklists
 
@@ -2401,14 +2597,12 @@ E.g. acid, void. The single-axis classification (`var:damage_type`, see
 integration, AI weakness selection, tooltip rendering, and the
 combat-log dispatcher.
 
-1. **Enum + moves**: add the class to `DAMAGE_ELEMENTS` in
-   `generate_combat_files.py` — the CSV `damage_type` column is
-   enum-validated against it (`sunlight` aliases to `sun`), and the
-   generator skips the emit when no primitive consumes the class (the
-   `dead_class` gap report). A hand-authored move calls
-   `POD_combat_move_set_damage_class = { VALUE = X }` — always **after**
-   `POD_combat_move_set_hp_damage`, whose default `superficial` stamp
-   would clobber an earlier class write.
+1. **Move authoring**: once engine support exists, a move calls
+   `POD_combat_move_set_damage_class = { VALUE = X }` directly, always
+   **after** `POD_combat_move_set_hp_damage`, whose default
+   `superficial` stamp would clobber an earlier class write. Add the
+   literal class flag to validator suppression with the rest of the
+   engine change.
 2. **The three kind switches** — add one `flag:X` → `REASON` arm to
    each, kept in step:
    `pod_combat_apply_single_hp_damage_effect` (direct hits, "HP DAMAGE
@@ -2421,43 +2615,57 @@ combat-log dispatcher.
    counters and DoTs can carry the class.
 4. **Class partition triggers**: `pod_combat_triggers.txt` — add the
    class to `pod_combat_move_class_is_elemental_trigger`, and to
-   `pod_combat_class_always_aggravated_trigger` if PoD classifies it
-   aggravated against every target (the AI's agg-vs-soak and savage
-   biases read it).
-5. **PoD aggravated classification**: the
-   `POD_damage_type_is_aggravated`
-   delta in PoD's
-   `common/scripted_triggers/POD_health_track_triggers.txt`
-   — if the new class promotes to aggravated for specific splats,
-   add the branch there.
-6. **Splat-weakness triggers**:
+   `pod_combat_class_always_aggravated_trigger` only if it belongs in
+   that **typical-target AI/log heuristic**. That trigger is not
+   universal truth: it includes fire and balefire despite incorporeal
+   exceptions. Per-victim truth stays in PoD's classifier.
+5. **PoD classification and immunity**:
+   `common/scripted_triggers/POD_health_track_triggers.txt` — add the
+   class's per-splat branches to `POD_damage_type_is_aggravated` and
+   `POD_has_immunity_to_damage_type`, including any new authoritative
+   weakness trigger.
+6. **PoD multiplier and cap**:
+   `common/script_values/POD_health_track_values.txt` — add any
+   `POD_wound_multiplier_from_splat_weaknesses` branch and audit the
+   damage-cap routing. A class can classify correctly yet still miss its
+   intended doubled/capped box behavior.
+7. **AI weakness mapping**:
    `pod_combat_damage_source_weakness_triggers.txt`
    — if the class is a target-specific weakness, add a per-class
    trigger + an arm in the bridge trigger. The AI uses these
    for weakness-bias move selection.
-7. **Move-description SGUI**: `pod_combat_move_desc` in
-   `pod_combat_skill_guis.txt` dispatches every elemental move to its
-   per-element loc key. Add 2 branches per class (drain / no-drain
-   variants).
-8. **Static loc**: `pod_combat_static_l_english.yml` — add 2 new
+8. **Death reason definition**: if step 2 introduces a new
+   `death_<reason>` instead of reusing an existing one, define it in
+   `common/deathreasons/00_PoD_deaths.txt` and add the matching
+   localization in every maintained language.
+9. **Move-card and combat presentation**:
+   `pod_combat_skill_guis.txt` — extend `pod_combat_move_desc` (drain /
+   no-drain branches) and the retaliation/damage-class presentation
+   switches. In `POD_combat_log_custom_loc.txt`, audit
+   `PODCombatLogSegRetalArmed`, `PODCombatMoveDoTType`,
+   `PODCombatSheetType`, `PODCombatCLSource`, and the
+   `PODCombatSuscMark_*` dispatchers. These surfaces are independent; a
+   class can deal correct wounds while showing blank or misleading
+   compact/sheet/status text.
+10. **Static loc**: `pod_combat_static_l_english.yml` — add 2 new
    loc keys: `pod_combat_desc_hp_damage_X` and
    `pod_combat_desc_hp_damage_X_drain`, inlining the element's colored
    label. Do **not** add a bare flag-name key (`fire`, `silver`, …
    collide with vanilla loc keys) — only `superficial`/`aggravated` ever
    reach `GetFlagName` (the `_basic` keys), because the SGUI dispatch
    sends every elemental move to its per-element key.
-9. **Game concept**: the combat concept deltas in PoD's
+11. **Game concept**: the combat concept deltas in PoD's
    `00_POD_game_concepts.txt` — add a concept entry so the class
    name is hover-able as a concept tooltip.
-10. **Error suppression**: `pod_combat_error_suppression_effects.txt`
+12. **Error suppression**: `pod_combat_error_suppression_effects.txt`
     — add `pod_combat_suppress_flag = { FLAG = X }`. Required because
     the flag is set via macro substitution and read via customizable
     localization (both validator-invisible).
-11. **Damage icon**: optionally add
+13. **Damage icon**: optionally add
     `gfx/interface/icons/combat/X_damage.dds` plus the matching
-    texticon in `pod_texticons_combat.gui`
+    texticon in `POD_shared/pod_texticons_combat.gui`
     if visual styling is desired.
-12. **DoT path** (if the class can appear on a `dot_amount` move): the
+14. **DoT path** (if the class can appear on a `dot_amount` move): the
     tick's kind → REASON switch is already covered by step 2. Add the
     class to the move-description and active-status type dispatchers so
     players can see the authored source class. The application row stays
@@ -2466,8 +2674,7 @@ combat-log dispatcher.
 
 #### Adding a combat-log segment
 
-The append-only recipe (segment contract:
-`docs/COMBAT_LOG_REFACTOR_DESIGN.md`):
+The append-only recipe:
 
 1. **Bake block** in `pod_combat_push_log_effect`
    (`pod_combat_effects.txt`): copy an existing segment block into
@@ -2513,7 +2720,7 @@ covers the cross-file impact of expanding the outcome axis.
 4. **Partition triggers**: `pod_combat_move_execution_triggers.txt` —
    any partition trigger that should include / exclude the new
    outcome (e.g. `pod_combat_result_code_indicates_contact_trigger`,
-   `pod_combat_result_code_indicates_damage_trigger`). Audit each.
+   `pod_combat_result_code_indicates_hp_damage_trigger`). Audit each.
 5. **Rider gate**: `pod_combat_rider_condition_passes_trigger` in
    `pod_combat_move_execution_triggers.txt` — if the outcome is
    rider-eligible (carries chained damage / heal / morale riders),
@@ -2543,15 +2750,20 @@ gate behavior in the contact resolver and related pipelines.
 3. **Error suppression**:
    `pod_combat_suppress_optional_move_var = { VAR = X }` in
    `pod_combat_error_suppression_effects.txt`.
-4. **Authoring**: the generator emits `POD_combat_move_set_flag = { NAME
-   = X }` from the flag's CSV column; hand-authored moves call that setter
-   directly. Document the new flag in the Skill Authoring Guide's
-   capability/presence-flag table.
-5. **Documentation**: `SKILL_AUTHORING_GUIDE.md` is the CSV-column
-   reference; the Manual Move Authoring Guide covers hand-authoring a
-   move outside the CSV.
-6. **Capability default**: if the flag has an attack-type default,
-   update `CAPABILITY_DEFAULTS` (and the `override_*` handling) in
-   `generate_combat_files.py` — the generator resolves `attack_type`
-   defaults into explicit `POD_combat_move_set_flag` lines at emit
-   time; nothing applies defaults at runtime.
+4. **Presentation**: if the flag changes what players need to know,
+   update the detailed move-card callouts in
+   `pod_combat_skill_guis.txt` and their keys in
+   `POD_combat_static_l_english.yml`. Audit the independent compact and
+   sheet surfaces too: their text dispatchers live in
+   `POD_combat_log_custom_loc.txt`, while some icon cells bind directly
+   in `pod_combat_skills_window.gui`. Existing `requires_hit_roll`
+   demonstrates all three paths.
+5. **Authoring**: move blocks call
+   `POD_combat_move_set_flag = { NAME = X }` directly. Document the new
+   flag in the Combat Move Authoring Guide's presence-flag table.
+6. **Documentation**: `COMBAT_MOVE_AUTHORING_GUIDE.info` is the
+   designer-facing manual contract. Explain which delivery or behavior
+   combinations require the flag.
+7. **Capability composition**: no attack-type defaults are applied at
+   runtime. Every move that needs the capability must set the flag
+   explicitly in its setter block.
