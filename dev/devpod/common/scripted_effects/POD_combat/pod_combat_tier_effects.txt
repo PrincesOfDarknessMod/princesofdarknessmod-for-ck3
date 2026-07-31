@@ -1,0 +1,265 @@
+﻿######################################################
+######   POD COMBAT TIER EFFECTS
+######################################################
+# Tiered buff/debuff system on soak and hit_chance. Tier magnitudes are
+# single-sourced via the pod_combat_tier_{small,medium,large}_mag script_values in
+# pod_combat_values.txt; this file reads them by name.
+# Data model + recalc-from-base apply/revert flow: COMBAT_REFERENCE.info §5.
+#
+# Only HIT tiers are recalculated here. Soak tiers live on the combatant as the
+# pod_combat_tier_soak_* bridge vars and are folded into PoD's POD_soak_chance
+# directly, so combat never re-implements the soak formula - the slot card, the
+# AI and the wound roll all read the one number. Hit chance has no character-side
+# analogue, so its recalc-from-base machinery stays.
+
+############################################################
+###### WORKSPACE RECALC CORE - HIT (parametric over SIDE)
+############################################################
+
+# Param: SIDE = actor|target. Hit tiers are plain percentage points both ways.
+pod_combat_recalc_hit_core_effect = {
+	if = {
+		limit = { has_variable = pod_combat_$SIDE$_base_hit_chance }
+		save_scope_value_as = {
+			name = new_hit_$SIDE$
+			value = {
+				value = var:pod_combat_$SIDE$_base_hit_chance
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_round_tier var:pod_combat_$SIDE$_hit_buff_round_tier = 1 } add = pod_combat_tier_small_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_round_tier var:pod_combat_$SIDE$_hit_buff_round_tier = 2 } add = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_round_tier var:pod_combat_$SIDE$_hit_buff_round_tier = 3 } add = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_combat_tier var:pod_combat_$SIDE$_hit_buff_combat_tier = 1 } add = pod_combat_tier_small_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_combat_tier var:pod_combat_$SIDE$_hit_buff_combat_tier = 2 } add = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_buff_combat_tier var:pod_combat_$SIDE$_hit_buff_combat_tier = 3 } add = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_round_tier var:pod_combat_$SIDE$_hit_debuff_round_tier = 1 } subtract = pod_combat_tier_small_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_round_tier var:pod_combat_$SIDE$_hit_debuff_round_tier = 2 } subtract = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_round_tier var:pod_combat_$SIDE$_hit_debuff_round_tier = 3 } subtract = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_combat_tier var:pod_combat_$SIDE$_hit_debuff_combat_tier = 1 } subtract = pod_combat_tier_small_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_combat_tier var:pod_combat_$SIDE$_hit_debuff_combat_tier = 2 } subtract = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = pod_combat_$SIDE$_hit_debuff_combat_tier var:pod_combat_$SIDE$_hit_debuff_combat_tier = 3 } subtract = pod_combat_tier_large_mag }
+				# Stealth folds into the recalc so the bonus survives workspace
+				# loads and pair rebuilds; apply/break only toggle the flag.
+				if = { limit = { has_variable = pod_combat_$SIDE$_is_stealthed } add = pod_combat_stealth_hit_bonus }
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
+			}
+		}
+		set_variable = { name = pod_combat_$SIDE$_hit_chance value = scope:new_hit_$SIDE$ }
+	}
+}
+
+############################################################
+###### WORKSPACE RECALC (ACTOR)
+############################################################
+
+pod_combat_recalc_hit_actor_effect = {
+	pod_combat_recalc_hit_core_effect = { SIDE = actor }
+	# Actor-only extra: sync the live-roll mirror, gated like the core so a
+	# missing base leaves it untouched.
+	if = {
+		limit = { has_variable = pod_combat_actor_base_hit_chance }
+		set_variable = { name = pod_combat_current_hit_chance value = scope:new_hit_actor }
+	}
+}
+
+############################################################
+###### PAIR RECALC (actor vs target)
+############################################################
+# Rebuild both base_hit_chance values from the current actor/target prowess
+# pair, then re-layer hit tiers. Hit chances are baked at init against the
+# primary leader, so without this an AI back-ranker or the AoE iterator carries
+# the leader-vs-leader baseline into the damage roll. Called from
+# pod_combat_load_target_from_story_effect.
+#
+# Slot writeback omitted on purpose: AoE would pin the actor's slot to the last
+# iteration, and the slot value is what the UI reads, so the leader baseline
+# keeps the per-slot display consistent. The PC retargeting path does write back
+# (PC's selected_target is persistent).
+pod_combat_recalc_pair_hit_chance_effect = {
+	if = {
+		limit = {
+			has_variable = pod_combat_actor_prowess
+			has_variable = pod_combat_target_prowess
+		}
+		save_scope_value_as = {
+			name = recalc_pair_actor_base_hit
+			value = {
+				value = pod_combat_hit_chance_base
+				add = {
+					value = var:pod_combat_actor_prowess
+					subtract = var:pod_combat_target_prowess
+					divide = 2
+				}
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
+			}
+		}
+		set_variable = { name = pod_combat_actor_base_hit_chance value = scope:recalc_pair_actor_base_hit }
+		pod_combat_recalc_hit_actor_effect = yes
+
+		# Target side mirrored: keeps the target current against this pair for
+		# its own turn and the slot-card Hit display, not its stored baseline.
+		save_scope_value_as = {
+			name = recalc_pair_target_base_hit
+			value = {
+				value = pod_combat_hit_chance_base
+				add = {
+					value = var:pod_combat_target_prowess
+					subtract = var:pod_combat_actor_prowess
+					divide = 2
+				}
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
+			}
+		}
+		set_variable = { name = pod_combat_target_base_hit_chance value = scope:recalc_pair_target_base_hit }
+		pod_combat_recalc_hit_target_effect = yes
+	}
+}
+
+
+pod_combat_recalc_hit_target_effect = {
+	# Target stealth hit bonus feeds own-turn rolls + slot display only;
+	# retaliation skips the hit roll entirely.
+	pod_combat_recalc_hit_core_effect = { SIDE = target }
+}
+
+############################################################
+###### PER-SLOT RECALC (parametric)
+############################################################
+
+# Caller scope = slot story: reads slot_base_hit_chance and the four hit tier
+# vars directly (no host pointer deref), writes back slot_hit_chance. Used by
+# the thin slot-scope alias below, the slot stealth helpers in
+# pod_combat_effects.txt, and every_in_list iterations over
+# pod_combat_active_slots (where current scope is already the slot story).
+pod_combat_recalc_slot_hit_via_story_effect = {
+	if = {
+		limit = { has_variable = slot_base_hit_chance }
+		save_scope_value_as = {
+			name = new_hit
+			value = {
+				value = var:slot_base_hit_chance
+				if = { limit = { has_variable = slot_hit_buff_round_tier    var:slot_hit_buff_round_tier    = 1 } add      = pod_combat_tier_small_mag  }
+				if = { limit = { has_variable = slot_hit_buff_round_tier    var:slot_hit_buff_round_tier    = 2 } add      = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = slot_hit_buff_round_tier    var:slot_hit_buff_round_tier    = 3 } add      = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = slot_hit_buff_combat_tier   var:slot_hit_buff_combat_tier   = 1 } add      = pod_combat_tier_small_mag  }
+				if = { limit = { has_variable = slot_hit_buff_combat_tier   var:slot_hit_buff_combat_tier   = 2 } add      = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = slot_hit_buff_combat_tier   var:slot_hit_buff_combat_tier   = 3 } add      = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = slot_hit_debuff_round_tier  var:slot_hit_debuff_round_tier  = 1 } subtract = pod_combat_tier_small_mag  }
+				if = { limit = { has_variable = slot_hit_debuff_round_tier  var:slot_hit_debuff_round_tier  = 2 } subtract = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = slot_hit_debuff_round_tier  var:slot_hit_debuff_round_tier  = 3 } subtract = pod_combat_tier_large_mag }
+				if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 1 } subtract = pod_combat_tier_small_mag  }
+				if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 2 } subtract = pod_combat_tier_medium_mag }
+				if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } subtract = pod_combat_tier_large_mag }
+				# Stealth hit bonus, slot-scope mirror (see actor branch). Round-end
+				# revert calls this per slot, so the bonus must follow
+				# slot_is_stealthed across the round transition.
+				if = { limit = { has_variable = slot_is_stealthed } add = pod_combat_stealth_hit_bonus }
+				min = pod_combat_hit_chance_min
+				max = pod_combat_hit_chance_max
+			}
+		}
+		set_variable = { name = slot_hit_chance value = scope:new_hit }
+	}
+}
+
+# Thin alias running on the current slot story (callers already in a
+# slot-iteration body or scope-switched into a leader pointer).
+pod_combat_recalc_slot_hit_effect = {
+	pod_combat_recalc_slot_hit_via_story_effect = yes
+}
+
+############################################################
+###### ROUND-END REVERT
+############################################################
+
+# Clears round-duration tier vars on the acting combatant's slot, then
+# recalcs that slot from base + remaining tiers. Rebuilding from scratch
+# means clamping losses don't accumulate across rounds.
+#
+# Iterates pod_combat_active_slots (filled-only), so per-slot scope is the
+# slot story; var:slot_char switches into the participant character.
+# Round-duration tiers expire at the HOLDER's own turn boundary, not at round end:
+# buffs clear at the start of the holder's turn (a self soak buff guards the whole
+# enemy phase, then lapses when the holder regains initiative); debuffs clear at the
+# end of the holder's turn (a debuff afflicts its victim through their own turn).
+# Combat-duration tiers persist to combat-end cleanup. Both run in host scope with
+# the current-actor pointers set and operate on the single acting slot (team +
+# position match, as pod_combat_load_workspace_effect does): strip the slot tier
+# var(s) + the char-scope soak bridge var read by POD_soak_chance, then recalc that
+# slot from base + remaining tiers. Called from the turn-setup / turn-end sites in
+# pod_combat_group_effects.txt.
+pod_combat_clear_actor_round_buffs_effect = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_current_actor_trigger = yes
+		}
+		remove_variable = slot_hit_buff_round_tier
+		# is_alive: the holder can have died during its own turn (retaliation,
+		# self-damage), and var mutation on a dead scope errors. A dead holder's
+		# leftovers are neutralised at the reader instead (POD_soak_chance).
+		var:slot_char = {
+			if = {
+				limit = { is_alive = yes }
+				remove_variable = pod_combat_tier_soak_buff_round
+			}
+		}
+		pod_combat_recalc_slot_hit_via_story_effect = yes
+	}
+}
+
+pod_combat_clear_actor_round_debuffs_effect = {
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_current_actor_trigger = yes
+		}
+		remove_variable = slot_hit_debuff_round_tier
+		# is_alive - see the buff twin above. This one runs at the holder's turn
+		# END, so a holder killed by retaliation during its own turn reaches here.
+		var:slot_char = {
+			if = {
+				limit = { is_alive = yes }
+				remove_variable = pod_combat_tier_soak_debuff_round
+			}
+		}
+		pod_combat_recalc_slot_hit_via_story_effect = yes
+	}
+}
+
+############################################################
+###### COMBAT-END TIER CLEAR
+############################################################
+
+# Strips all tier vars from every slot; the underlying stat vars are
+# removed separately by pod_combat_group_cleanup_effect.
+#
+# Must run BEFORE pod_combat_clear_slot_stories_effect so the slot stories
+# are still alive while we strip their vars. Iterates the filled-only
+# pod_combat_active_slots in slot-story scope.
+pod_combat_clear_combat_tiers_effect = {
+	every_in_list = {
+		variable = pod_combat_active_slots
+		remove_variable = slot_hit_buff_round_tier
+		remove_variable = slot_hit_buff_combat_tier
+		remove_variable = slot_hit_debuff_round_tier
+		remove_variable = slot_hit_debuff_combat_tier
+		# Char-scope soak bridge vars (read by POD_soak_chance); both round and
+		# combat tiers, since this runs at combat end. Skip a combatant that died
+		# this duel: var mutation on a dead/removed participant errors ("scope does
+		# not have variables") and the bridge vars die with them. is_alive is a safe
+		# read on the still-enterable dead scope (unlike remove_variable).
+		var:slot_char = {
+			if = {
+				limit = { is_alive = yes }
+				remove_variable = pod_combat_tier_soak_buff_round
+				remove_variable = pod_combat_tier_soak_buff_combat
+				remove_variable = pod_combat_tier_soak_debuff_round
+				remove_variable = pod_combat_tier_soak_debuff_combat
+			}
+		}
+	}
+}

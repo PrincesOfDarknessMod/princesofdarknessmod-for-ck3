@@ -1,0 +1,667 @@
+# Combat-PoD Duel Builder Guide
+
+This guide covers how to start a combat-minigame fight from script --
+the create / add / finalize builder.
+
+For the system internals (variable namespace, slot lifecycle, execution
+phases, result codes), see `COMBAT_REFERENCE.info`. This guide focuses on
+the authoring workflow: how to assemble a roster and kick off a fight.
+
+The builder effects live in
+`devpod/common/scripted_effects/POD_combat/pod_combat_group_effects.txt`.
+
+---
+
+## Do you even need the builder?
+
+Most duels should NOT call the builder directly.
+
+PoD's whole duel system (`hold_court`, schemes, activity events, the
+`single_combat.*` chain, etc.) routes through
+`configure_start_single_combat_effect`. The combat minigame overrides that
+effect (in `PoD_override_single_combat_effects.txt`) and builds a **1v1**
+for you -- create + add the opponent + finalize, with the full caller
+context (follow-up event, your saved scopes, rule flags) preserved.
+
+**Interception is conditional.** The override intercepts only when ALL of
+these hold; otherwise the call falls through to PoD's original duel body
+(Part 4 of the override) and no minigame runs:
+
+| Gate | Falls through when |
+|---|---|
+| `has_game_rule = pod_combat_enabled` | the player turned the combat rule off |
+| Exactly one of `SC_ATTACKER` / `SC_DEFENDER` is `is_ai = no` | PC-vs-PC (the UI is single-perspective) or NPC-vs-NPC |
+| `SC_ATTACKER != SC_DEFENDER` | a self-match -- Part 2 fires `INVALIDATION_EVENT` instead, and it never reaches either body |
+| `FIXED` is neither `sc_attacker` nor `sc_defender` | the story predetermines a winner, which vanilla honors correctly and the minigame does not implement |
+| Neither principal has `pod_combat_active` | one of them is already hosting a live fight |
+
+So if you're writing a normal story duel, just call
+`configure_start_single_combat_effect` the way PoD always has, and accept
+that an NPC-vs-NPC or rule-disabled instance resolves through vanilla.
+
+**Call the builder directly only when you want a custom roster** the
+single-combat path can't express -- group fights, hand-picked combatants,
+ally/enemy line-ups that aren't "PC vs one opponent." The debug
+interactions in `POD_debug_interactions.txt` are the worked reference; the
+1vN / Nv1 / NvN ones build their rosters by hand.
+
+### Standard launcher vs raw builder
+
+The two routes are not interchangeable. Both preserve your caller context --
+`create_duel` opens the duel shell itself, up front -- but a
+direct call skips the interception gates and the normal duel bookkeeping:
+
+| | `configure_start_single_combat_effect` | raw `POD_combat_create_duel_effect` |
+|---|---|---|
+| Roster | 1v1 only (PC vs one opponent) | anything you seat |
+| Interception gates | applied (table above) | none -- you are past them |
+| Falls back to vanilla duel | yes, when a gate fails | no -- nothing runs if your roster is bad |
+| Duel shell (`pod_combat.9995`) | opened by the builder | opened by the builder |
+| Your parent saved scopes in the follow-up | preserved intact | preserved intact |
+| `INVALIDATION_EVENT` | fired on a self-match | not a parameter, never fired |
+| `engaged_in_single_combat` set on both principals | yes | no (only released at end) |
+| `remove_single_combat_info_effect`, shirtlessness / signature-weapon setup | yes | no |
+| Terrain background captured at setup | yes | reconstructed at end, degraded |
+| Ends via | the shell card's Conclude option | the shell card's Conclude option |
+
+So a custom roster no longer costs you the parent scopes. What it still
+costs is the single-combat bookkeeping in the middle rows: seat a group
+fight and you own the self-match check, the engaged flags and the duel
+dressing yourself.
+
+---
+
+## The builder at a glance
+
+Three steps, four effects:
+
+```
+<PC scope> = {
+    POD_combat_create_duel_effect    = { ...config... }   # 1. once
+    POD_combat_duel_add_ally_effect  = { CHARACTER = X }  # 2. any number
+    POD_combat_duel_add_enemy_effect = { CHARACTER = X }  # 2. 1+ (>=1 enemy)
+    POD_combat_finalize_duel_effect  = yes                # 3. once
+}
+```
+
+| Effect | When | What it does |
+|---|---|---|
+| `POD_combat_create_duel_effect` | once, first | Opens the shell card that carries your scope table to the follow-up, tears down any leaked prior fight, scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
+| `POD_combat_duel_add_ally_effect` | any number | Appends a character at the next free **player** position (1, 2, 3, ...) and bumps `pod_combat_player_team_size` |
+| `POD_combat_duel_add_enemy_effect` | 1+ times | Appends a character at the next free **enemy** position (0, 1, 2, ...) and bumps `pod_combat_enemy_team_size`; the **first** enemy goes to enemy position 0 |
+| `POD_combat_finalize_duel_effect` | once, last | Derives the leader pointers, shapeshifts AI fera, inits every slot, computes hit chances, stamps the death gate / practice snapshots, runs the init-time KO check, opens the combat window (`pod_combat_active`), rolls initiative and **starts round 1** |
+
+`finalize` starts round 1; it does not run the fight. From there the fight
+advances on player clicks (End Turn / Advance) until one side is wiped.
+
+The roster shape: **PC = player/0**, allies = player/1, player/2, ...;
+primary opponent = enemy/0, then enemy/1, enemy/2, .... Every seat carries
+an explicit `combat_team` flag (`flag:player` / `flag:enemy`) and a
+`team_position` (an int 0+, position 0 = the team leader) -- team is not
+inferred from a single slot index, and there is no "mode" variable.
+Everything seated before `finalize` fights from round 1; these are the
+starting roster, not reinforcements (for those see *Adding combatants
+mid-fight* below).
+
+---
+
+## The golden rules
+
+1. **Run everything in the PC's scope.** The PC is the combat host --
+   all the state hangs off them, and they are player/0. If your `on_accept`
+   has `scope:actor = <the PC>`, wrap the builder in `scope:actor = { ... }`.
+
+2. **Never add the PC.** `create_duel` already seats them at player/0.
+   Adding them again would burn an ally slot on a duplicate.
+
+3. **The first enemy you add is the "primary opponent" (enemy/0).** It's
+   the hit-chance baseline for the whole player team, the PC's default
+   target, and the enemy-side principal that end-of-combat attribution
+   snaps to. Add the headline enemy first.
+
+4. **Pass SAVED SCOPES for every character-valued parameter** --
+   `CHARACTER`, and `INITIATOR` / `ATTACKER` / `DEFENDER` too. Never a
+   `var:` chain. The `add_*` effects (and the init pass behind finalize)
+   re-scope onto the character, and the `INITIATOR` / `ATTACKER` /
+   `DEFENDER` writes happen after a flip into the duel story's own scope,
+   so a scope-relative `var:foo.var:bar` resolves against the wrong scope
+   and throws. Use `save_scope_as` (or an already-saved scope like
+   `scope:recipient`) and pass that.
+
+5. **Teams cap at `pod_combat_max_team_size` (50), PC included.** That is
+   PC + 49 allies, and up to 50 enemies. An `add_*` past the cap is
+   **silently discarded** -- no slot, no counter bump, no error. The cap
+   exists because the turn-order pass is O(N^2), so a runaway
+   add-loop would hang the game. Every gate site reads the constant by
+   name, so raising it is a one-line change in
+   `pod_combat_values.txt`, but the quadratic cost and the visual strain of
+   very large rosters are real; treat a raise as a perf decision, not a
+   free knob.
+
+6. **`finalize` is what opens the window.** Until you call it,
+   `pod_combat_active` is not set and the GUI stays hidden. Build the
+   whole roster first, finalize last.
+
+7. **Build atomically, exactly once.** create / add / finalize must run in
+   one synchronous effect path. See the next section.
+
+---
+
+## Atomicity and reentrancy
+
+The builder keeps its half-built state on the host with no in-progress
+marker, so a partial or repeated build is not self-correcting:
+
+- **Calling `create_duel` during a live fight tears the live fight down.**
+  Its defensive teardown fires on `has_variable = pod_combat_active`,
+  clearing the death gate, the duel marker and every slot story. That is
+  correct recovery from a crashed prior fight and destructive to a real one.
+- **Calling `create_duel` twice before finalizing leaks.** `pod_combat_active`
+  is not set yet, so the second call skips the teardown, creates a second
+  `POD_combat_sc_context` story and overwrites the pointer var. The first
+  story is orphaned on Charon for the rest of the save, and its card is
+  orphaned too -- concluding through it is a no-op, since the ownership
+  gate compares against the live pointer.
+- **An abandoned pre-finalize build is invisible to cleanup.** Every
+  teardown path gates on `pod_combat_active`, which only `finalize` sets.
+  Slot stories from a build you never finalized persist until the next
+  `create_duel` sweeps them.
+- **Never call `add_*` after `finalize`.** The builder adds record occupancy
+  and rely on finalize's init pass. Use the mid-fight effects instead.
+- **Do not start a new fight inside your `OUTPUT_EVENT`.** `pod_combat.9999`
+  fires the follow-up and only *then* runs cleanup, so a fight created from
+  inside the follow-up is torn down the moment the dispatcher continues.
+  Delay it (`trigger_event` with `days = 1`) and re-validate the roster when
+  it fires.
+
+---
+
+## Roster validation is YOUR job
+
+The slot constructor (`pod_combat_set_slot_char_effect`) always creates a
+slot. It does not check, deduplicate or reject anything -- the builder
+assumes the caller vetted the roster. Nothing below is enforced; a
+violation surfaces as an error-log burst, a phantom combatant, or a fight
+that cannot end.
+
+Before `create_duel`, confirm:
+
+- The host is a **living human player** and occupies player/0 (that is what
+  `create_duel` seats, so just run in the right scope).
+- **Every other occupant is AI.** A second human in the roster gets no UI.
+- Every character **exists, is alive, and is unique across both teams**.
+- No prospective combatant is **already in another fight**
+  (`NOT = { has_variable = pod_combat_active }`, and not already seated in
+  someone else's roster).
+- **At least one enemy actually seated.** A roster with no live enemy
+  resolves at the init-time KO check, which is a legitimate outcome only if
+  you meant it.
+- Characters you expect to act are **not incapacitated** (`has_trait =
+  incapable`, torpor, a full wound track). They are seated and immediately
+  marked KO by the init-time check.
+- Participants have **valid PoD initialization** -- a splat, its energy
+  resource, and a move loadout they can actually draw from. AI loadouts are
+  auto-seeded at finalize; a character with no unlockable moves stands there.
+
+And for the duel principals:
+
+- **The other principal occupies enemy/0.** End-of-combat attribution snaps
+  a non-principal victor (an ally, a summon) to "whichever principal the
+  loser isn't," which only lands correctly if the enemy leader is a principal.
+- If the PC is `ATTACKER`, enemy/0 must be `DEFENDER`, and vice versa.
+- `INITIATOR` may be a noncombatant (an instigator who does not fight), but
+  `ATTACKER` and `DEFENDER` cannot be arbitrary narrative characters -- they
+  are the two characters win/loss is attributed to.
+
+---
+
+## Gathering a roster from a loop
+
+When you pull combatants from `every_relation` / `every_knight` / etc.,
+the iterator's scope is the candidate, but `add_*` must run in the PC
+(host) scope. So: save the candidate, then re-enter the PC scope to add.
+
+```
+scope:actor = {                          # PC / host scope
+    every_relation = {
+        type = coterie_member
+        limit = { is_alive = yes is_adult = yes NOT = { has_trait = incapable } }
+        save_scope_as = duel_ally        # iterator scope = the ally
+        scope:actor = {                  # back into host scope
+            POD_combat_duel_add_ally_effect = { CHARACTER = scope:duel_ally }
+        }
+    }
+}
+```
+
+`scope:actor` is still resolvable inside the loop because saved scopes
+stay visible in nested blocks. Put the eligibility checks in the `limit`
+-- the builder will not apply them for you.
+
+---
+
+## `create_duel` parameters
+
+```
+POD_combat_create_duel_effect = {
+    INITIATOR    = scope:actor       # who started the duel
+    ATTACKER     = scope:actor       # the attacking party (PoD sc_attacker)
+    DEFENDER     = scope:recipient   # the defending party (PoD sc_defender)
+    FATALITY     = possible          # flag -- see table below
+    FIXED        = no                # flag -- no for the minigame
+    LOCALE       = terrain_scope     # flag -- background scene
+    OUTPUT_EVENT = my_namespace.0001 # event fired at combat end
+}
+```
+
+`INITIATOR` / `ATTACKER` / `DEFENDER` are the PoD duel parties, in the
+`sc_*` sense -- they are **independent of slot layout**. The PC can be the
+defender (seated at player/0) while the attacker sits at enemy/0. The
+post-combat event (`pod_combat.9999`) restores these so win/loss
+attribution and any `scope:sc_victor` logic in your follow-up stay correct.
+For a fight the PC instigates, all three are usually the PC / the PC / the
+opponent. All three take **saved scopes** (rule 4).
+
+`FIXED` is stored on the duel story and round-tripped for consistency, but
+the minigame **does not implement a predetermined winner**. The standard
+launcher routes `FIXED` duels to vanilla precisely because vanilla honors
+them; a raw builder call with `FIXED = sc_attacker` fights normally and the
+flag has no effect on the outcome. Pass `no`.
+
+### FATALITY modes
+
+| Value | Meaning |
+|---|---|
+| `no` | Non-fatal, but **not damage-free**. Real wounds land live and a track can fill, so a combatant can be KO'd mid-fight; `pod_combat_nonfatal_active` blocks PoD's inline death check, and at normal combat end each combatant's track is capped by peeling one wound (superficial first) so one empty box remains. Nobody dies. |
+| `practice` | Sparring: real wounds land live, the fight is unkillable, and each combatant's wound track is snapshot at start and restored at the end. The wound-pipeline side effects (infection / treatment / epilepsy events, balefire stacks, Clay-Man charge) are suppressed via `pod_combat_practice_active`, and no lasting Mental Strain is applied. **Not a full rollback**: energy and other move costs, and gains that are not part of the wound track, persist. |
+| `possible` | Real fight. Wounds land live and a filled track can kill during the fight. |
+| `default` | PoD's default. Resolves to a forced kill only if `pod_combat_fatality_default_will_die_trigger` holds (the attacker's government is tribal -- or, for a landless, courtless, hostless attacker, the defender's). Otherwise it behaves like `possible`. |
+| `always` | After a **decisive** outcome, the principal **loser** is force-killed at the end (`is_alive`-guarded, so a live wound death is not re-applied), with kinslayer / cranial-trophies handling. It does not execute KO'd allies or summons, and a **draw has no forced victim** -- the whole death block is gated on `exists = scope:sc_victor`. |
+
+`possible`, `default` and `always` all allow a **live wound death** during
+the fight, before any end-of-combat handling. If the character who dies is
+the PC host, see *Abnormal ending: host death* below.
+
+### LOCALE
+
+A background-scene flag (`battlefield`, `terrain_scope`, `throne_room`,
+`alley_night`, ...). `terrain_scope` uses the defender's location. It only
+affects presentation; pick whatever matches the fiction.
+
+On a **direct** builder launch the locale is reconstructed at combat end
+from an explicit enum of recognized flags. An unlisted value falls through
+to `battlefield` and loses its visual context, so stick to the flags PoD's
+`single_combat_events.txt` backgrounds actually define.
+
+### OUTPUT_EVENT
+
+The follow-up event, fired at combat end via `pod_combat.9999`.
+
+**It is not necessarily fired on `INITIATOR`.** `pod_combat.9999` walks the
+same fallback chain vanilla does -- the first living character among
+initiator, then defender, then attacker -- because `trigger_event` silently
+no-ops on a dead host and combatants may have died. Write the follow-up
+against **named scopes, never `root`**.
+
+What the follow-up can rely on, both routes:
+
+| Scope | Contract |
+|---|---|
+| `scope:sc_finished` | always `yes` |
+| `scope:victory_type` | always `flag:skill` |
+| `scope:sc_victor` / `scope:sc_loser` | **absent on a draw or mutual KO** -- guard with `exists` |
+| `scope:sc_initiator` / `sc_attacker` / `sc_defender` | always present |
+| `scope:fatality` / `fixed` / `locale` | always present, flag-typed |
+
+`sc_victor` is normalized to a duel **principal**: if an ally or a summon
+delivered the win, the victor is set to whichever principal the loser is
+not -- and that principal **may already be dead** (it fell before its
+summon finished the fight). Follow-ups must tolerate a dead victor.
+
+A complete follow-up:
+
+```
+my_namespace.0001 = {
+    type = character_event
+    hidden = yes
+    content_source = dlc_POD
+
+    immediate = {
+        # Draws and mutual KOs leave both outcome scopes unset.
+        if = {
+            limit = {
+                exists = scope:sc_victor
+                scope:sc_victor = scope:sc_attacker
+            }
+            # the challenger won (possibly via an ally, and possibly dead)
+        }
+        else_if = {
+            limit = { exists = scope:sc_victor }
+            # the defender won
+        }
+        else = {
+            # draw / mutual KO -- nobody to reward or punish
+        }
+    }
+}
+```
+
+### Which scopes survive to the follow-up
+
+All of them, on either route. `create_duel` fires `pod_combat.9995` in its
+opening block, so the shell inherits your scope table as it stands at the
+call and holds it open for the fight. Everything you saved before building
+-- `scope:spirit`, `scope:scheme`, `scope:task_contract`, an artifact
+`scope:target`, flag-typed scope values -- arrives intact, and stays intact
+through the rest of your `trigger_event` chain. Write the follow-up exactly
+as for a vanilla duel.
+
+Two consequences for how you order your own effects:
+
+- **Save your scopes before `create_duel`, not after.** The card takes one
+  snapshot, at that statement. A scope saved while you are seating the
+  roster is not in it.
+- **The builder seeds the canonical duel names itself**, from its own
+  parameters: `sc_initiator` / `sc_attacker` / `sc_defender` and the rule
+  flags `fatality` / `fixed` / `locale`. Don't hand it an `ATTACKER` that
+  contradicts a `scope:sc_attacker` you rely on later -- the builder's
+  value wins from that point in the chain.
+
+`pod_combat.9999` still carries a rebuild path for a table that never
+arrived (principals, rule flags, and stand-in aliases pointing at them,
+from the duel story). It is defensive only; nothing routes there while
+every fight goes through the builder.
+
+---
+
+## Worked example 1 -- the standard launcher (do this when you can)
+
+A 1v1 story duel, via PoD's own entry point. The minigame intercepts it if
+the gates pass and vanilla resolves it if they don't. Note
+`INVALIDATION_EVENT`, which the raw builder has no equivalent for: it fires
+if attacker and defender turn out to be the same character.
+
+```
+configure_start_single_combat_effect = {
+    SC_INITIATOR       = scope:actor
+    SC_ATTACKER        = scope:actor
+    SC_DEFENDER        = scope:recipient
+    FATALITY           = no
+    FIXED              = no
+    LOCALE             = terrain_scope
+    OUTPUT_EVENT       = my_namespace.0001
+    INVALIDATION_EVENT = my_namespace.0002
+}
+```
+
+---
+
+## Worked example 2 -- minimal 1v1 through the builder
+
+The simplest possible builder call, for reference. In production, prefer
+example 1: this route loses your saved scopes.
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:recipient
+        FATALITY     = possible
+        FIXED        = no
+        LOCALE       = terrain_scope
+        OUTPUT_EVENT = my_namespace.0001
+    }
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:recipient }
+    POD_combat_finalize_duel_effect  = yes
+}
+```
+
+---
+
+## Worked example 3 -- PC + coterie vs opponent + their knights (NvN)
+
+The headline opponent goes at enemy/0; their knights fill enemy/1, 2, ...;
+the PC's coterie fills player/1, 2, .... This is the NvN debug interaction,
+trimmed. Both loops carry their eligibility checks in the `limit`, and both
+sides stop seating at 50.
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:recipient
+        FATALITY     = possible
+        FIXED        = no
+        LOCALE       = terrain_scope
+        OUTPUT_EVENT = my_namespace.0001
+    }
+
+    # Allies -> player/1, 2, 3, ... (PC + 49 max; further adds are dropped)
+    every_relation = {
+        type = coterie_member
+        limit = { is_alive = yes is_adult = yes NOT = { has_trait = incapable } }
+        save_scope_as = duel_ally
+        scope:actor = { POD_combat_duel_add_ally_effect = { CHARACTER = scope:duel_ally } }
+    }
+
+    # Primary opponent -> enemy/0 (add FIRST so it lands at position 0)
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:recipient }
+
+    # The rest of the enemy side -> enemy/1, 2, 3, ... (50 max)
+    scope:recipient = {
+        every_knight = {
+            limit = {
+                is_alive = yes
+                NOT = { has_trait = incapable }
+                opinion = { target = scope:recipient value >= 0 }
+            }
+            save_scope_as = duel_enemy
+            scope:actor = { POD_combat_duel_add_enemy_effect = { CHARACTER = scope:duel_enemy } }
+        }
+    }
+
+    POD_combat_finalize_duel_effect = yes
+}
+```
+
+For **1vN** drop the ally loop (PC fights alone). For **Nv1** drop the
+knight loop (the opponent stands alone). That's the whole difference
+between the shapes -- who you add, not a mode number.
+
+---
+
+## Worked example 4 -- a hand-picked roster
+
+Nothing forces you to gather from relations. Save whoever you want and
+add them. Here: PC + two named allies vs three named enemies.
+
+```
+scope:actor = {
+    POD_combat_create_duel_effect = {
+        INITIATOR    = scope:actor
+        ATTACKER     = scope:actor
+        DEFENDER     = scope:the_villain   # the enemy/0 headliner
+        FATALITY     = always
+        FIXED        = no
+        LOCALE       = throne_room
+        OUTPUT_EVENT = my_namespace.0001
+    }
+
+    POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_champion }
+    POD_combat_duel_add_ally_effect  = { CHARACTER = scope:my_sorcerer }
+
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:the_villain }   # -> enemy/0
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_a }    # -> enemy/1
+    POD_combat_duel_add_enemy_effect = { CHARACTER = scope:henchman_b }    # -> enemy/2
+
+    POD_combat_finalize_duel_effect = yes
+}
+```
+
+`DEFENDER` is `scope:the_villain`, the character at enemy/0 -- keep the
+principal and the enemy leader the same character (see the roster
+invariants).
+
+---
+
+## What `create_duel` sets up for you
+
+- **The duel story** -- a `POD_combat_sc_context` story_cycle on Charon
+  (`POD_wraith_01`), saved as `scope:pod_combat_duel`. It holds your
+  INITIATOR / ATTACKER / DEFENDER / rule flags / OUTPUT_EVENT. The PC
+  carries one pointer var (`pod_combat_sc_context`) to it; cleanup at
+  combat end is a single `end_story`.
+- **A version check** -- if the move catalogue on the save is stale
+  (older `POD_combat_version`), it rebuilds before the fight so you never
+  run with broken move-story references. The rebuild is **skipped if any
+  player already has a live fight** (it would end the stories that fight
+  references); it then happens at the next combat start or loadout-editor
+  open with no fight running.
+- **A default loadout** for a PC with nothing equipped.
+- **A defensive cleanup** -- if a previous fight leaked state (see
+  *Atomicity*), it's torn down before the new roster is built.
+- **The PC seated at player/0.**
+
+---
+
+## Adding combatants mid-fight
+
+After `finalize`, the builder's `add_*` effects are off-limits. Use the
+live effects in `pod_combat_summon_effects.txt`:
+
+| Effect | Parameters | Behavior |
+|---|---|---|
+| `pod_combat_add_ally_midfight_effect` | `CHARACTER` | Seats on the player team immediately |
+| `pod_combat_add_enemy_midfight_effect` | `CHARACTER` | Seats on the enemy team immediately |
+| `pod_combat_schedule_ally_reinforcement_effect` | `CHARACTER`, `JOIN_ROUND` | Player team, at the start of round `JOIN_ROUND` |
+| `pod_combat_schedule_enemy_reinforcement_effect` | `CHARACTER`, `JOIN_ROUND` | Enemy team, at the start of round `JOIN_ROUND` |
+
+All four run in the **combat host (PC) scope** and take `CHARACTER` as a
+**saved scope** (the seat re-scopes onto the character, same reason as rule 4).
+
+Behavior worth knowing:
+
+- **`JOIN_ROUND` is absolute**, not an offset. A value **<= the current
+  round seats immediately**; a future round is deferred to the per-round
+  sweep in `pod_combat_group_end_round_effect`.
+- **Immediate seats do not act on the round they join** -- the seat sets
+  `slot_has_acted = 1`. A deferred reinforcement seated by the per-round
+  sweep *does* act in the round it joins (the sweep runs after the round
+  increment and before initiative, which resets the flag).
+- **A cap failure is silent but clean.** If the team is already at
+  `pod_combat_max_team_size`, no slot is created and the wrapper skips the
+  init, the "joins the fray" log row and the death-gate flag, so nothing
+  phantom-joins. A deferred reinforcement that hits the cap is consumed.
+- **A pending reinforcement who dies before its round is dropped**, not
+  seated.
+- **Seating is fully automatic** -- slot init, hit chance against the
+  opposing leader (re-baselined to the senior-most *living* opponent if the
+  original leader is dead), AI loadout seed, the death-gate flag for
+  non-fatal / practice duels, a practice wound snapshot, and a named
+  "<who> joins the fray" log row. Callers never wire their own arrival
+  message.
+
+---
+
+## How a fight ends
+
+The normal path: one side is wiped (or the init-time KO check resolves a
+one-sided start), and the player concludes from the shell card, which the
+builder opened at launch and which appears once the fight resolves. That
+runs `pod_combat_end_combat_effect`, which applies the
+non-fatal cap or practice restore, converts morale loss into Mental Strain
+(skipped for a practice spar), runs the `pod_combat_duel_end_effect`
+extension point while slot vars are still intact, and fires
+`pod_combat.9999`, which:
+
+1. rebuilds the principals and rule flags if the scope table is empty
+   (defensive; the card normally brings them),
+2. derives the outcome (`scope:sc_victor` / `scope:sc_loser`, absent on a draw),
+3. releases `engaged_in_single_combat` and bumps the victor's weapon duel count,
+4. applies the death outcome for your FATALITY mode,
+5. fires your `OUTPUT_EVENT` on the first living principal
+   (initiator -> defender -> attacker),
+6. ends the duel story and clears all combat state.
+
+Note the order: **cleanup runs after your follow-up fires**, which is why
+you cannot start a new fight from inside it.
+
+### Abnormal ending: host death
+
+If the **PC host dies while combat is live** -- a fatal live wound in a
+`possible` / `default` / `always` duel, or any external death -- PoD's
+`POD_on_death` hook runs `pod_combat_host_died_release_effect` instead.
+That is **teardown only**:
+
+- **no outcome derivation, no `pod_combat.9999`, and your `OUTPUT_EVENT`
+  never fires.**
+- It releases the living combatants (discipline modifiers, the duel marker,
+  the death-gate and practice flags, `engaged_in_single_combat`), clears
+  combat soak-tier bridge vars and AI scratch, despawns summons, and ends
+  the Charon-owned stories.
+- The dead host's own combat vars (`pod_combat_active`,
+  `pod_combat_active_slots`, the log, the context pointer) are **left
+  behind** -- var mutation on a dead character errors, so they cannot be
+  cleared. The combat window's `GetPlayer.IsAlive` gate is what keeps those
+  dangling refs unread.
+
+So do not assume your follow-up always runs. If a fatal-mode duel must
+have a consequence even when the PC loses their life, put it in PoD's
+death handling, not in `OUTPUT_EVENT`.
+
+---
+
+## Validation checklist
+
+Before shipping a builder-launched fight, test in game:
+
+- [ ] **PC as attacker** and **PC as defender** (principals independent of
+      slot layout; check win/loss attribution both ways).
+- [ ] **A draw / mutual KO** -- the follow-up must not deref an unset
+      `scope:sc_victor`.
+- [ ] **Every FATALITY mode you ship**: `no` (nobody dies, one empty box
+      left), `practice` (wound track restored, no lasting strain), `possible`
+      (a live wound death resolves cleanly), `default` (tribal and
+      non-tribal attacker), `always` (decisive kill; and a draw, which must
+      kill nobody).
+- [ ] **Cap behavior** -- a roster that overruns 50 per side seats exactly
+      50 and drops the rest without an error burst.
+- [ ] **A malformed roster** -- a dead or duplicate character, an
+      incapacitated combatant, zero live enemies.
+- [ ] **Scope loss** -- on a direct launch, confirm the follow-up works with
+      principals and aliases only.
+- [ ] **Reinforcements** -- immediate add, a future `JOIN_ROUND`, a
+      `JOIN_ROUND` already past, and a reinforcement who dies before joining.
+- [ ] **Host death mid-fight** -- combat state is released, opponents are
+      free to duel again, and the missing follow-up does not break the
+      calling chain.
+- [ ] Check `error.log` after each run.
+
+---
+
+## Cheat sheet
+
+```
+# 1. create (once, in PC scope) -- config + PC into player/0
+POD_combat_create_duel_effect = {
+    INITIATOR = .. ATTACKER = .. DEFENDER = ..   # saved scopes
+    FATALITY = no|practice|possible|default|always
+    FIXED = no  LOCALE = ..  OUTPUT_EVENT = ..
+}
+
+# 2. add combatants (saved scopes only!)
+POD_combat_duel_add_ally_effect  = { CHARACTER = scope:.. }   # player/1..49
+POD_combat_duel_add_enemy_effect = { CHARACTER = scope:.. }   # enemy/0..49, first -> enemy/0
+
+# 3. go live (once, last) -- opens the window, starts round 1
+POD_combat_finalize_duel_effect = yes
+```
+
+Rules: PC scope | don't re-add the PC | first enemy = enemy/0 and must be
+the other principal | saved scopes for all character params, not var-chains
+| 50 per team incl. the PC, silent drop past it | build atomically, once |
+finalize opens the window | direct launches lose your saved scopes | the
+follow-up's `root` is not guaranteed to be the initiator | a mid-fight host
+death fires no follow-up at all.
