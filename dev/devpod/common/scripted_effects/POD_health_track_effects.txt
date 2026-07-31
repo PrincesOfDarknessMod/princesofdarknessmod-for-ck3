@@ -24,6 +24,12 @@ POD_increase_wounds_effect = {
 			ceiling = yes
 		}
 	}
+	# Unconditional soak-count export for the combat log's partial-soak
+	# note. Every invocation starts at 0 (the immunity / clay-man /
+	# unsoakable paths never touch it); the per-point roll below overwrites it.
+	# Without this, an AoE loop's later immune target would read the PREVIOUS
+	# target's count - saved scopes persist for the whole effect chain.
+	save_scope_value_as = { name = soaked_count value = 0 }
 	POD_set_scope_value_from_trigger = {
 		NAME = is_soakable
 		TRIGGER = "POD_damage_type_is_soakable = { DEATH_REASON = scope:death_reason }"
@@ -51,28 +57,76 @@ POD_increase_wounds_effect = {
 		POD_trigger_clay_man_protection = yes
 	}
 	else = {
-		random_list = {
-			0 = {
-				trigger = { scope:is_soakable = yes }
-				modifier = { add = POD_soak_chance }
-				send_interface_message = {
-					type  = POD_damage_avoided
-					title = POD_damage_soaked_title
-					custom_tooltip = POD_damage_soaked_tt
-					right_icon = this
-					POD_soak_aftereffects = yes
-				}
+		# Snapshot the soak chance once; the loop below rolls it per point of final_damage.
+		save_scope_value_as = { name = soak_pct value = POD_soak_chance }
+
+		# Visible damage preview for caller tooltips (event options, interaction accept buttons).
+		if = {
+			limit = {
+				scope:is_soakable = yes
+				scope:soak_pct > 0
 			}
-			100 = {
-				modifier = {
+			if = {
+				limit = { scope:is_aggravated = yes }
+				custom_tooltip = pod_wound_preview_aggravated_tt
+			}
+			else = {
+				custom_tooltip = pod_wound_preview_superficial_tt
+			}
+		}
+		else_if = {
+			limit = { scope:is_soakable = yes }
+			if = {
+				limit = { scope:is_aggravated = yes }
+				custom_tooltip = pod_wound_preview_aggravated_nosoak_tt
+			}
+			else = {
+				custom_tooltip = pod_wound_preview_superficial_nosoak_tt
+			}
+		}
+		else = {
+			if = {
+				limit = { scope:is_aggravated = yes }
+				custom_tooltip = pod_wound_preview_aggravated_unsoakable_tt
+			}
+			else = {
+				custom_tooltip = pod_wound_preview_superficial_unsoakable_tt
+			}
+		}
+
+		hidden_effect = {
+			if = {
+				limit = {
 					scope:is_soakable = yes
-					add = {
-						value = POD_soak_chance
-						multiply = -1
+					scope:soak_pct > 0
+				}
+				set_variable = { name = pod_soak_hits value = 0 }
+				while = {
+					count = scope:final_damage
+					random = {
+						chance = scope:soak_pct
+						change_variable = { name = pod_soak_hits add = 1 }
 					}
 				}
+				# Derive results and drop the counter BEFORE applying wounds, so the death
+				# check inside POD_apply_wound_boxes can't leave a var-mutation on a dead ref.
+				save_scope_value_as = { name = soaked_count  value = pod_soak_hits_value }
+				save_scope_value_as = {
+					name  = landed_damage
+					value = { value = scope:final_damage subtract = pod_soak_hits_value min = 0 }
+				}
+				remove_variable = pod_soak_hits
+			}
+			else = {
+				save_scope_value_as = { name = landed_damage value = scope:final_damage }
+			}
+
+			# Apply the landed points once (equivalent box / aggravated / death-check math
+			# to base PoD's single application, just with the post-soak count).
+			if = {
+				limit = { scope:landed_damage > 0 }
 				POD_apply_wound_boxes = {
-					COUNT = scope:final_damage
+					COUNT = scope:landed_damage
 					AGGRAVATED = scope:is_aggravated
 					REASON = $REASON$
 				}
@@ -80,14 +134,30 @@ POD_increase_wounds_effect = {
 					REASON = $REASON$
 				}
 				if = {
-					limit = { scope:death_reason = flag:death_balefire }
+					# Combat Mini-game practice-spar addition: no lasting balefire stacks in practice.
+					limit = {
+						scope:death_reason = flag:death_balefire
+						NOT = { has_character_flag = pod_combat_practice_active }
+					}
 					while = {
-						count = scope:final_damage
+						count = scope:landed_damage
 						POD_add_modifier_and_track_stacks = {
 							TYPE = character
 							MODIFIER = balefire_health_modifier
 						}
 					}
+				}
+			}
+
+			# One "soaked" notification when any point was avoided (loc shows "X of N").
+			if = {
+				limit = { scope:soaked_count > 0 }
+				send_interface_message = {
+					type  = POD_damage_avoided
+					title = POD_damage_soaked_title
+					custom_tooltip = POD_damage_soaked_tt
+					right_icon = this
+					POD_soak_aftereffects = yes
 				}
 			}
 		}
@@ -343,7 +413,10 @@ POD_apply_wound_boxes = {
 			name = superficial_damage_added
 			value = {
 				value = scope:superficial_damage_added
-				subtract = scope:aggravated_damage_added
+				subtract = {
+					value = $COUNT$
+					subtract = POD_empty_damage_boxes
+				}
 			}
 		}
 	}
@@ -577,7 +650,12 @@ POD_refresh_health_track = {
 # e.g. increase_wounds_no_death_effect
 POD_vanilla_wound_treatment = {
 	if = { #Wounds from treatments give no infection and no additional treatment
-		limit = { NOT = { flag:death_$REASON$ = flag:death_treatment } }
+		# Combat Mini-game practice-spar addition: a practice spar schedules no
+		# infection / treatment (health.0102/0104) / epilepsy - no lasting harm.
+		limit = {
+			NOT = { flag:death_$REASON$ = flag:death_treatment }
+			NOT = { has_character_flag = pod_combat_practice_active }
+		}
 
 		#CHANCE OF INFECTION
 		hidden_effect = {
@@ -640,23 +718,32 @@ POD_vanilla_wound_treatment = {
 ###################################################
 
 POD_trigger_clay_man_protection = {
+	# Combat Mini-game practice-spar addition: save the wearer so the practice
+	# guard inside random_equipped (where `this` becomes the artifact) can read it.
+	save_temporary_scope_as = clay_wearer
 	send_interface_toast = {
 		title = clay_man_amulet_soaked_damage
 		left_icon = this
 		custom_tooltip = clay_man_amulet_soaked_damage_ct
-		random_equipped_character_artifact = { 
+		random_equipped_character_artifact = {
 			limit = { has_variable = clay_man_protection }
-			change_variable = {
-				name = clay_man_protection
-				add = -1
-			}
+			# Combat Mini-game practice-spar addition: in practice the soak + toast
+			# still fire (protection preserved), but no charge is spent and the
+			# artifact is never destroyed.
 			if = {
-				limit = { var:clay_man_protection <= 0 }
-				POD_destroy_artifact = { ARTIFACT = this }
-			}
-			else = {
-				save_temporary_scope_as = clay_man
-				set_artifact_name = artifact_clay_man_amulet_name
+				limit = { NOT = { scope:clay_wearer = { has_character_flag = pod_combat_practice_active } } }
+				change_variable = {
+					name = clay_man_protection
+					add = -1
+				}
+				if = {
+					limit = { var:clay_man_protection <= 0 }
+					POD_destroy_artifact = { ARTIFACT = this }
+				}
+				else = {
+					save_temporary_scope_as = clay_man
+					set_artifact_name = artifact_clay_man_amulet_name
+				}
 			}
 		}
 	}
