@@ -764,10 +764,11 @@ pod_combat_save_workspace_effect = {
 # loadout list, the anti-repetition history ring, the cross-turn focus-fire
 # mark, the personality-bias precompute + its done-guard, and the derived
 # target-pref flag.
-# Char scope. Two callers own the guards: slot init (is_ai; a fresh fight
-# starts clean) and group cleanup (is_ai + is_alive; nothing leaks into save
-# data or the NPC's next fight). Adding a new per-fight AI char var = one
-# line here.
+# Char scope. Two callers own the guards, both is_ai + is_alive: slot init
+# (a fresh fight starts clean; the liveness half matters because the discipline
+# battery that opens slot init can kill the occupant) and group cleanup
+# (nothing leaks into save data or the NPC's next fight). Adding a new
+# per-fight AI char var = one line here.
 pod_combat_clear_ai_scratch_effect = {
 	clear_variable_list = pod_combat_loadout
 	remove_variable = pod_combat_ai_last_move
@@ -801,17 +802,39 @@ pod_combat_init_slot_from_character_effect = {
 	$CHARACTER$ = {
 		# Discipline combat buffs. Named scopes (not root) to match PoD's duel
 		# pattern and dodge text-substitution issues in nested parametric effects.
+		#
+		# Both battery halves also deal real wounds off caster-perk branches with no
+		# victim filter. That damage is INTENTIONAL and stays: the perk descriptions
+		# promise it explicitly for duels ("or to your foe during [duels]" in
+		# LIONS_BITE_PERK_EFFECT / WHITE_FIRE_PERK_EFFECT / BS_HEAT_WAVE_PERK_EFFECT /
+		# MADDENING_HOWL_PERK_EFFECT and friends), so suppressing it inside the
+		# minigame would silently break the advertised contract of every one of them.
+		# The fatality = no writeback is what keeps it survivable - see
+		# pod_combat_apply_nonfatal_effect.
 		POD_enemy_knight_set_discipline_battle_effect = { CASTER = $ENEMY_LEADER$ }
-		POD_ally_knight_set_discipline_battle_effect = { CASTER = $CHARACTER$ }
-		force_character_skill_recalculation = yes
-		# Clear any soak tier left over from an earlier fight. The combat-end
-		# clear cannot reach a combatant who died during that fight, so this is
-		# what stops a resurrected character starting a new fight still buffed.
-		# Safe here: entering a fight proves the character is alive.
-		remove_variable = pod_combat_tier_soak_buff_round
-		remove_variable = pod_combat_tier_soak_buff_combat
-		remove_variable = pod_combat_tier_soak_debuff_round
-		remove_variable = pod_combat_tier_soak_debuff_combat
+		# The battery can KILL outright in a FATAL duel, where no death gate is
+		# stamped (fatality = no / practice are gated in POD_combat_finalize_duel_effect,
+		# ahead of this). Everything below therefore re-checks: var and flag mutation
+		# ERRORS on a dead reference (it silently no-ops only on a live character that
+		# lacks the var), so an unguarded tail here is error spam, not a harmless miss.
+		if = {
+			limit = { is_alive = yes }
+			POD_ally_knight_set_discipline_battle_effect = { CASTER = $CHARACTER$ }
+			force_character_skill_recalculation = yes
+			# Clear any soak tier left over from an earlier fight. The combat-end
+			# clear cannot reach a combatant who died during that fight, so this is
+			# what stops a resurrected character starting a new fight still buffed.
+			remove_variable = pod_combat_tier_soak_buff_round
+			remove_variable = pod_combat_tier_soak_buff_combat
+			remove_variable = pod_combat_tier_soak_debuff_round
+			remove_variable = pod_combat_tier_soak_debuff_combat
+			# Clear per-fight AI scratch so a fresh fight starts clean.
+			# PC slot skipped (persistent loadout, no AI history vars).
+			if = {
+				limit = { is_ai = yes }
+				pod_combat_clear_ai_scratch_effect = yes
+			}
+		}
 	}
 	# Soak and prowess are NOT snapshotted here: both are read live off
 	# var:slot_char wherever they are needed, like HP. The discipline buffs above
@@ -848,13 +871,6 @@ pod_combat_init_slot_from_character_effect = {
 	}
 	pod_combat_remove_slot_var_effect = { NAME = is_guarding }
 	pod_combat_remove_slot_var_effect = { NAME = is_dodging }
-	# ── AI per-fight transient state ─────────────────────────────
-	# Clear per-fight AI scratch on slot init so a fresh fight starts clean.
-	# PC slot skipped (persistent loadout, no AI history vars).
-	if = {
-		limit = { $CHARACTER$ = { is_ai = yes } }
-		$CHARACTER$ = { pod_combat_clear_ai_scratch_effect = yes }
-	}
 	# ── State marker modifier ────────────────────────────────────
 	# pod_combat_duel_active lets other systems (feeding, schemes, travel,
 	# other-mod activity events) gate on has_character_modifier and defer mid-duel.
@@ -1187,6 +1203,33 @@ POD_combat_finalize_duel_effect = {
 		var:slot_char = { POD_shapeshift_fera_warform_effect = yes }
 	}
 
+	# -- Non-fatal / practice duel: gate PoD's inline death check --
+	# fatality = no OR practice: stamp pod_combat_nonfatal_active on every combatant.
+	# POD_can_die_from_wounds (delta in POD_disciplines_triggers.txt) reads it
+	# and returns no, so the death check never reaches pod_death. Stripped post-combat
+	# (fatality = no caps the track; practice restores its snapshot). Fatal duels don't gate.
+	#
+	# MUST precede init_all_slots: slot init opens with PoD's discipline battery
+	# (POD_enemy_knight_set_discipline_battle_effect), which applies real wounds off
+	# caster-perk branches that carry no victim filter - enough to kill a low-track
+	# mortal before round 1. Gating after that pass let a fatality = no duel end at
+	# setup. Both gates only need pod_combat_active_slots, populated by add_ally /
+	# add_enemy, which is why init_all_slots can iterate it here too.
+	if = {
+		limit = { pod_combat_uses_death_gate_trigger = yes }
+		pod_combat_apply_nonfatal_flag_effect = yes
+	}
+	# Practice spar: snapshot every combatant's wound track now so it can be
+	# restored at combat end (pod_combat_apply_nonfatal_effect practice branch).
+	# Also ahead of init for the same reason: the snapshot is the restore baseline,
+	# so taking it after the discipline battery would bake that damage in permanently,
+	# and pod_combat_practice_active must exist before the wounds land or PoD's
+	# practice guards (balefire / infection / treatment / Clay-Man) fail open.
+	if = {
+		limit = { pod_combat_is_practice_trigger = yes }
+		pod_combat_snapshot_practice_wounds_effect = yes
+	}
+
 	# -- Per-slot stat / discipline init for every occupied slot --
 	# Deferred from add_* (see Section 5 header for why).
 	pod_combat_init_all_slots_effect = yes
@@ -1222,21 +1265,13 @@ POD_combat_finalize_duel_effect = {
 	# AI anti-repetition history lives on the AI char, not the host, so no
 	# PC-side init here (cleanup: slot init + group cleanup).
 
-	# -- Non-fatal / practice duel: gate PoD's inline death check --
-	# fatality = no OR practice: stamp pod_combat_nonfatal_active on every combatant.
-	# POD_can_die_from_wounds (delta in POD_disciplines_triggers.txt) reads it
-	# and returns no, so the death check never reaches pod_death. Stripped post-combat
-	# (fatality = no caps the track; practice restores its snapshot). Fatal duels don't gate.
-	if = {
-		limit = { pod_combat_uses_death_gate_trigger = yes }
-		pod_combat_apply_nonfatal_flag_effect = yes
-	}
-	# Practice spar: snapshot every combatant's wound track now so it can be
-	# restored at combat end (pod_combat_apply_nonfatal_effect practice branch).
-	if = {
-		limit = { pod_combat_is_practice_trigger = yes }
-		pod_combat_snapshot_practice_wounds_effect = yes
-	}
+	# System log: combat begins. Must precede the KO/victory check below, not just
+	# the turn-order block: the log list is appended oldest-first and rendered
+	# bottomtotop, so pushing after the victory row would stack "combat begins"
+	# ABOVE it. Unconditional on purpose - a fight decided by the init-time KO
+	# check still gets a start row, so a one-sided open reads as a real (if
+	# instant) fight instead of a bare "victory" with no context.
+	pod_combat_push_system_log_effect = { MESSAGE_KEY = combat_started }
 
 	# -- Init-time KO check --
 	# init sets slot_alive = 1 unconditionally, but HP / morale / state read
@@ -1287,10 +1322,6 @@ POD_combat_finalize_duel_effect = {
 	# reads the fighting form.
 	pod_combat_bake_pc_loadout_unlocks_effect = yes
 
-	# System log: combat begins. Pushed BEFORE turn order so it lands at the
-	# BOTTOM of the newest-first log. Skipped if combat already aborted.
-	pod_combat_push_system_log_effect = { MESSAGE_KEY = combat_started }
-
 	pod_combat_calculate_initiative_effect = yes
 	pod_combat_find_next_actor_effect = yes
 
@@ -1315,7 +1346,13 @@ POD_combat_finalize_duel_effect = {
 		# find_next, so no pre-call here (idempotent re-select).
 		if = {
 			limit = { NOT = { has_variable = pod_combat_step_mode } }
-			pod_combat_run_pre_pc_ai_turns_effect = yes
+			# Hidden for the tooltip builder, not the game: the drain's
+			# hang-safe `while count` (pod_combat_ai_outer_turn_cap_value = 200)
+			# makes CK3 render the loop body once per allowed iteration when it
+			# describes whatever launched the duel. Callers that reach finalize
+			# outside the single-combat launcher (the debug interactions) rely
+			# on this guard.
+			hidden_effect = { pod_combat_run_pre_pc_ai_turns_effect = yes }
 		}
 	}
 	}  # end of NOT pod_combat_is_over guard (init-time KO check)
