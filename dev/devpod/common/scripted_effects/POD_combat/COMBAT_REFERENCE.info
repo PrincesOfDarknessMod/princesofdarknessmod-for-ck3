@@ -195,9 +195,9 @@ All persist across rounds; cleared only when consumed or at combat end.
 | `slot_is_guarding` | Guard stance active |
 | `slot_is_dodging` | Dodge stance active |
 | `slot_is_stealthed` | Stealth active (adds `pod_combat_stealth_hit_bonus`, default +30, to hit chance) |
-| `slot_retaliate_hit` / `slot_retaliate_miss` | retaliation damage if hit / if missed |
-| `slot_retaliate_{hit,miss}_kind` | flag typing the counter: `flag:morale`, `flag:aggravated`, or an elemental class; unset = plain |
-| `slot_retaliate_{hit,miss}_morale` | presence companion to a `morale` kind (drives the slot-card status tooltip) |
+| `slot_retaliate_hit` / `slot_retaliate_miss` / `slot_retaliate_any` | retaliation damage if hit / if missed / on any resolved attack |
+| `slot_retaliate_{hit,miss,any}_kind` | flag typing the counter: `flag:morale`, `flag:aggravated`, or an elemental class; unset = plain |
+| `slot_retaliate_{hit,miss,any}_morale` | presence companion to a `morale` kind (drives the slot-card status tooltip) |
 
 #### Per-slot spirit-damage capability (on the slot story)
 
@@ -286,6 +286,7 @@ and `pod_combat_actor_max_hp_value` (track length). They gate on
 | `pod_combat_last_morale_damage_amount` / `_last_morale_heal_amount` | last morale damage / heal |
 | `pod_combat_last_self_damage` | post-soak recoil damage applied to the actor |
 | `pod_combat_last_energy_gain` / `_last_energy_drain` | requested conditional energy bonus amount when that bonus fired; the splat helpers do not export the pool-capped applied delta |
+| `pod_combat_last_ap_refund` | AP given back by a fired `ap_refund` bonus (§14). Exists so the log can render the refund only when the condition actually held, rather than off the move's declared `bonus_effect` |
 | `pod_combat_last_retal_damage` | last retaliation damage |
 | `pod_combat_last_retal_agg` / `_last_retal_morale` | actual-result markers for the counter: it landed aggravated (PoD's per-victim classification) / it eroded morale instead of HP |
 | `pod_combat_last_result_agg` | actual-result marker for the main damage line: PoD classified the landed wound as aggravated for this victim (lifted from the route helper's `scope:result_agg`) — see **Result model** |
@@ -356,29 +357,30 @@ ordering rules** below before moving anything.
 | §1 | Spend `ap_cost` AP (`pod_combat_spend_ap_effect`). |
 | §1b | If `once_per` is present, append this move story to the actor slot's round- or combat-duration used list. The usability gate rejects later attempts; the round list clears during initiative setup. |
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`), set `pod_combat_last_damage = 0`, and clear the pure-control delivery-failure latch. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
-| §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5d `hit`, §6 `damage`/`change_type`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13b-bonus `dot`, §14 `ap_refund`/`ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.) |
+| §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5d `hit`, §6 `damage`/`change_type`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13b-bonus `dot`, §14 `ap_refund` (which also stamps the transient `pod_combat_last_ap_refund` so the refund can be logged) / `ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.) |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
 | §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`) and apply `steal_gold` / `gain_dread`. **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. Practice still pays declared costs but suppresses gold theft and Dread gain. |
 | §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also removes the current stealth hit bonus); ordinary `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit. A `requires_control_contact` guard strip waits for §5b2 instead. |
-| §5b | `team_enemy` only: broadcast tier debuffs and stance-strips to **all** enemy slots before the damage loop, so each per-target hit respects them (`pod_combat_apply_team_enemy_debuffs_effect`). |
+| §5b | `team_enemy` / `team_all`: broadcast tier debuffs and stance-strips to **all** swept slots before the damage loop, so each per-target hit respects them (`pod_combat_apply_team_enemy_debuffs_effect` / `pod_combat_apply_team_all_debuffs_effect`). `team_all` additionally applies the caster's own tier share actor-side (`pod_combat_apply_team_all_self_debuffs_effect`). |
 | §5b2 | **Pure-control contact delivery.** An explicitly typed single-enemy move with no HP/morale payload carries `requires_control_contact`; run the unified capability resolver here. On failure, set a latch that suppresses its guard strip, tiers, mind control, AP drain, and initiative debuff. AP/energy/once-per are still spent, actor stealth is consumed, and the log keeps only the miss/block outcome rather than claiming payloads landed. |
 | §5c | **Tier buffs/debuffs.** Buffs → actor except `single_ally` → selected target; debuffs → target. Each write is **upgrade-only** (first application or a strictly higher tier), and a failed §5b2 delivery skips all declared tiers. Hit/soak recalc and the PoD soak bridge follow the actual beneficiary. See **Tier system**. |
 | §5d | For a fired `bonus_effect = hit`, add `bonus_value` to `pod_combat_current_hit_chance` for this move and re-cap it at `pod_combat_hit_chance_max`. §17 rebuilds the ordinary tier+stealth value afterward so the bonus cannot leak to a later move. |
-| §6 | **HP damage dispatch.** Routes `single_enemy` vs `team_enemy`. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the host. See **Damage pipeline**. |
-| §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or the team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the team_enemy broadcast. |
+| §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the host. See **Damage pipeline**. |
+| §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, and the generator's `team_all_support` lint rejects the combination. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
 | §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
 | §12b | `team_ally` only: broadcast the move-declared §5c/§12 tiers and stance flags, plus the soak bridge var, to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). A condition-granted `stance_*` bonus is actor-only and is not part of this broadcast. |
-| §13 | Arm retaliation stances on the actor for a later eligible §15 attack: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte). Amount falls back `retaliate_damage → hp_damage → 1`. Arming is take-strongest: only a strictly larger amount replaces the current reaction, and equal amounts never replace its kind. Kind precedence is morale > `retaliate_agg` > the move's elemental class > unset (plain). |
+| §12c | `marker_modifier`: add the named CK3 character modifier to the actor (`add_character_modifier`, `days = 30`). A literal switch on the move's `marker_modifier` flag, because `add_character_modifier` needs a literal key. The marker carries no numeric effects; it exists so a **later** move's `has_modifier` condition can read it. Runs after §2b, so a move can never satisfy its own `has_modifier` condition, and the payoff is always cross-move. See §11 **Adding a marker character modifier**. |
+| §13 | Arm retaliation stances on the actor for a later eligible §15 attack: `retaliate_if_hit` (counters on contact — thorns) / `retaliate_if_missed` (counters on evasion — riposte) / `retaliate_if_attacked` (counters any resolved attack — always). Amount falls back `retaliate_damage → hp_damage → 1`. Arming is take-strongest **within one charge family**: only a strictly larger amount replaces that family's current reaction, and equal amounts never replace its kind. Kind precedence is morale > `retaliate_agg` > the move's elemental class > unset (plain). |
 | §13b | Damage-over-time: seed `slot_dot_amount/rounds/kind/source` on the target's slot (single-target). `slot_dot_source` records the caster (`pod_combat_actor_char`) so the round-end tick credits the right killer. Delivery excludes only a miss-class result and a target already marked KO: dodged / stealthed / missed does not seed, but `guard_blocked`, full `soaked`, and `immune` are not miss codes and currently do seed; a landed hp0 morale DoT with no `attack_result` also applies. Kind is seeded as literal flags (default `duel`, the move's damage class, morale wins); re-apply refreshes. Pushes the "is afflicted" row with its per-round amount and HP/Morale track. HP ticks bypass per-point soak but retain immunity, Clay Man protection, weakness multiplier/cap, and PoD wound classification; the application row does not predict that future victim-specific class. See **Combat log** / **Turn loop**. |
 | §13b-bonus | A fired `bonus_effect = dot` seeds the same target-slot DoT using `bonus_value` as its per-tick amount and `pod_combat_bonus_dot_rounds` (fixed at 2) as its duration. It uses the same miss/KO delivery gate and damage-class kind seeding as §13b. |
 | §13c | Mind control (`mind_control` flag): mark the target slot `slot_controlled` (steals one turn). Players are immune; `POD_has_strong_mental_defenses_trigger` blocks unless the caster passes `can_bypass_mental_defenses_trigger`. A pure control requires successful §5b2 delivery; a morale-bearing control additionally requires proof that morale damage landed, so dodge/stealth never still seizes the target. Blocked casts post a resist row. Single-target only. |
-| §14 | Parametric flags: `ap_gain` and a fired `ap_refund` bonus add to `pod_combat_current_ap`; base + conditional `ap_drain` are summed, take-max into the target mirror, and consumed at the target's next turn start; `initiative_debuff` stacks negatively into `pod_combat_target_init_bonus` for the next initiative fold. Target-side drain/debuff is suppressed by a failed §5b2 delivery. |
+| §14 | Parametric flags: `ap_gain` and a fired `ap_refund` bonus add to `pod_combat_current_ap`; the refund also stamps the transient host var `pod_combat_last_ap_refund` (cleared in `pod_combat_clear_per_target_state_effect`, mirrored onto the log entry as `ap_refund`, and part of the §16 wrap-up gate below) so the ApRefund log segment renders only when the bonus actually fired; base + conditional `ap_drain` are summed, take-max into the target mirror, and consumed at the target's next turn start; `initiative_debuff` stacks negatively into `pod_combat_target_init_bonus` for the next initiative fold. Target-side drain/debuff is suppressed by a failed §5b2 delivery. |
 | §14b | `summons_combatant`: run the move's character-creation recipe, then seat the result on the resolved friendly or `summon_hostile` destination (`pod_combat_summon_combatant_glue_effect`). After the damage phases (a same-cast AoE can't hit the new unit), before §15 (it can't counter on its summon turn); it acts next round. |
-| §15 | **Reaction phase.** Only a non-`team_enemy` move carrying `hp_damage` checks the target's armed retaliation (`pod_combat_check_retaliation_effect`). Pure morale/control and team AoE moves do not trigger reactions. See **Reactions**. |
+| §15 | **Reaction phase.** Only a move carrying `hp_damage` whose targeting is neither `team_enemy` nor `team_all` checks the target's armed retaliation (`pod_combat_check_retaliation_effect`). Pure morale/control and team AoE moves do not trigger reactions. At most one counter fires: a specific hit/miss charge answers first and holds the always-charge. See **Reactions**. |
 | §16 | Push the combat-log row (`pod_combat_push_log_effect`). AoE-aware gate, below. |
 | §17 | Bonus teardown: if §5d temporarily changed hit chance, rebuild the actor's ordinary tier+stealth value first; then clear `pod_combat_bonus_active` / `pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`. Also belt-and-braces-removes the actor's transient `pod_combat_force_agg` marker (normally dropped at the dispatch site) for any future early-exit path. |
 
@@ -403,7 +405,10 @@ these hold:
 - `pod_combat_last_self_damage` is set (recoil is applied once to the
   actor, not per AoE target, so the per-target rows never carry it), or
 - `pod_combat_last_energy_gain` / `pod_combat_last_energy_drain` is set
-  (energy bonuses apply once at §9b, after the per-target loop).
+  (energy bonuses apply once at §9b, after the per-target loop), or
+- `pod_combat_last_ap_refund` is set (the refund is credited once at
+  §14, after the per-target pushes, so without this arm an AoE move's
+  refund would never get a row).
 
 ### Phase ordering rules
 
@@ -795,6 +800,34 @@ live fight. (This replaced an earlier `pc_can_use` flag baked directly
 on the globally-shared move stories, which corrupted a co-op partner's
 action bar.)
 
+### Show-all splat filter (display only)
+
+The loadout editor's "Show all moves" lists **locked** moves alongside
+unlocked ones, so it is bounded by a second, weaker predicate that must
+not be mistaken for the unlock gate above. Each move story carries
+`move_unlock_group`, a splat family stamped by `POD_init_combat_move`
+from the generator's `config_section` classifier
+(`section_unlock_group()`; 16 values, `universal` through `truefaith`).
+`pod_combat_move_group_matches_actor_trigger = { ACTOR }` switches on it
+and tests the viewer with the matching PoD splat trigger, deliberately
+using the widest sensible family so browsing never hides a reachable
+move: `has_POD_vamp_blood_trigger` for vampire (ghouls, revenants and
+dhampirs learn disciplines) and `POD_splat_has_glamour_trigger` for fae
+(kinain hold Arts).
+
+Show-all therefore lists own-family moves **plus** everything already in
+`pod_combat_unlocked_moves`, which keeps a multi-splat PC's cross-splat
+powers visible. The sub-toggle `pod_combat_show_other_splats` drops the
+family restriction and restores the whole ~570-row catalogue; the sheet
+renders every row it is given, so that view is slow by nature and the
+filter exists to keep the default fast.
+
+It fails open in both directions — an unclassified group and a move
+story predating the var both match everyone — because hiding a move a
+player could take is a bug while showing one nobody can take is only
+noise. The generator refuses to emit an unclassified section for the
+same reason.
+
 ### Per-slot init
 
 `pod_combat_init_slot_from_character_effect = { CHARACTER ENEMY_LEADER
@@ -891,6 +924,20 @@ always drives the loop: AI turns before the PC resolve when the round is
 set up, the PC acts on player input, then AI turns after the PC resolve
 when the PC ends its turn. A 1v1 is just a degenerate NvN (player/0 +
 enemy/0), so there is one code path for every roster.
+
+> **Current AI selector contract.** The per-turn action ceiling is the
+> effective AP cap + 2 headroom, with an unrestricted fallback,
+> one alternate-target retry, and `pod_combat_ai_turn_stalled` as the
+> no-progress stop. Controlled turns admit only adverse
+> `single_enemy` moves. Initiative debuffs stack; AP drains take the
+> strongest pending value; retaliation arming is take-strongest. The
+> redundancy gate rejects a candidate only when its entire useful
+> payload is redundant, including recipient-aware checks for team and
+> ally utility, so useful hybrids remain eligible. Per-action summary
+> state feeds finishability, pending drain/control/DoT/initiative
+> checks, and recipient-aware healing urgency into admission and
+> scoring. HP and morale finish thresholds, kill-priority bands, and
+> selector tracing are exposed in the debug tuning window.
 
 #### Initiative
 
@@ -1237,6 +1284,7 @@ design:
 | `pod_combat_result_code_indicates_hp_damage_trigger` | `attack_result = hp_damage` — a wound went through. (OR'd with the `pod_combat_aoe_any_hp_damage` latch so an AoE drain heals once if **any** target took HP damage, since the per-target log clear wipes the host axes mid-loop.) |
 | `pod_combat_result_code_indicates_contact_trigger` | `attack_result` ∈ (`hp_damage`, `guard_blocked`, `soaked`) — anything that physically touched, even if absorbed. Used by retaliate-on-contact and `on_contact` riders. |
 | `pod_combat_result_code_indicates_miss_trigger` | `attack_result` ∈ (`missed`, `dodged`, `stealthed`) — the attack was evaded. Used by retaliate-on-evasion and `on_miss` riders. |
+| `pod_combat_result_code_indicates_attack_trigger` | any `attack_result` at all. **Not a partition member** — the union of the whole axis, so `immune` (which belongs to neither of the two above) and any future code qualify. Used by retaliate-on-any-attack, via the hold-rule wrapper `pod_combat_reaction_any_condition_trigger`. |
 
 ### Combat log
 
@@ -1270,7 +1318,8 @@ Two callers create the entries:
   `target` char refs, `actor_side`, optional `aoe_burst_index`, the
   amount fields (`damage`, `heal_amount`,
   `morale_damage_amount`, `morale_heal_amount`, `self_damage`,
-  `retal_damage`, `energy_gain`, `energy_drain`, `soaked_count`), the
+  `retal_damage`, `energy_gain`, `energy_drain`, `ap_refund`,
+  `soaked_count`), the
   three result-axis vars (`outcome` /
   `attack_result` / `retal_fired`, see **Result model**), the
   actual-result markers (`result_agg` / `retal_agg` / `retal_morale`),
@@ -1303,12 +1352,14 @@ segments**, each separated by a ` · ` divider:
 | `PODCombatLogSegDodge` | `dodge` |
 | `PODCombatLogSegStealth` | `stealth` |
 | `PODCombatLogSegRemoveGuard` | `remove_guard` |
-| `PODCombatLogSegRetalArmed` | `retaliate_if_hit` / `retaliate_if_missed` |
+| `PODCombatLogSegRetalArmed` | `retaliate_if_hit` / `retaliate_if_missed` / `retaliate_if_attacked` |
 | `PODCombatLogSegApGain` | `ap_gain` |
 | `PODCombatLogSegApDrain` | `ap_drain` (full drain renders as 0 AP next turn) |
 | `PODCombatLogSegInitDebuff` | `initiative_debuff` |
-| `PODCombatLogSegEnergyGain` | backend exists for a fired `energy_gain` bonus (`energy_gain` > 0), but the combat window currently mounts no widget pair for it, so it does not render |
-| `PODCombatLogSegEnergyDrain` | backend exists for a fired `energy_drain` bonus (`energy_drain` > 0), but the combat window currently mounts no widget pair for it, so it does not render |
+| `PODCombatLogSegEnergyGain` | a fired `energy_gain` bonus (`energy_gain` > 0 on the entry) |
+| `PODCombatLogSegEnergyDrain` | a fired `energy_drain` bonus (`energy_drain` > 0 on the entry) |
+| `PODCombatLogSegApRefund` | a fired `ap_refund` bonus (`ap_refund` > 0 on the entry) |
+| `PODCombatLogSegMarker` | `marker_modifier` (the marker this move applied to its user) |
 
 Separate **amount riders** (`PODCombatLogHealRider`,
 `PODCombatLogMoraleDamageRider`, `PODCombatLogMoraleHealRider`,
@@ -1353,16 +1404,26 @@ The bake conditions:
   burst rather than once per target. Recoil is **not** burst-gated:
   self-damage is applied once to the actor (never per target), so it can
   only appear on a single-target row or the AoE wrap-up row. The
-  energy bonus segments follow recoil's shape: entry-captured
-  (`energy_gain` / `energy_drain`, lifted at §9b only when the bonus
-  actually applied — the drain lift sits inside the practice gate), not
-  burst-gated, and cleared per push so at most one row per move carries
-  them. Their bake/SV/custom-loc backend is live, but
-  `pod_combat_window.gui` currently has no Energy Gain/Drain widget
-  pairs, so those two segments remain invisible in the current UI.
+  energy bonus and AP-refund segments follow recoil's shape:
+  entry-captured (`energy_gain` / `energy_drain`, lifted at §9b only
+  when the bonus actually applied — the drain lift sits inside the
+  practice gate; `ap_refund`, lifted at §14), not burst-gated, and
+  cleared per push so at most one row per move carries them. The marker
+  segment is intent-style instead: it reads `marker_modifier` off the
+  move and is burst-gated, because §12c applies the marker
+  unconditionally once the move resolves.
 
 Rows that skip the bake (system / DoT / mind / daze rows) carry no
 `seg_*` vars and read as all-invisible.
+
+**Widget order in `pod_combat_window.gui` must match the bake order in
+`pod_combat_push_log_effect`.** A segment's separator is decided at bake
+time from how many segments preceded it (`seg_bake_prior`), not at
+render time, so a widget mounted out of order prints its ` · ` in the
+wrong place, and a baked segment with no mounted widget pair renders
+nothing while still counting toward every later segment's separator (a
+silent "leading ` · `" bug that looks like a loc problem). Every baked
+segment has a mounted pair today, Recoil through Marker.
 
 #### System and bookend rows
 
@@ -1392,8 +1453,8 @@ An AoE move pushes **one row per target** from inside its iterator. Each
 per-target row carries `aoe_burst_index` (0 for the first, 1+ after) so
 the move-level segments render once via the burst gate, and `target` set
 to the iterated character so the target column reads "All enemies
-(Steve)". The iterator also sets the `pod_combat_aoe_phase_pushed_rows`
-tripwire.
+(Steve)" — or "Everyone (Steve)" for a `team_all` sweep. The iterator
+also sets the `pod_combat_aoe_phase_pushed_rows` tripwire.
 
 After the AoE loop, the final push step gates the **wrap-up row** on
 that tripwire: when the tripwire is set, the wrap-up is normally skipped
@@ -1402,8 +1463,9 @@ state fired that the per-target rows missed — a self-heal
 (`pod_combat_last_heal_amount`), self-morale-heal
 (`pod_combat_last_morale_heal_amount`), a retal overlay
 (`pod_combat_last_retal_fired`), recoil self-damage
-(`pod_combat_last_self_damage`), or a fired energy bonus
-(`pod_combat_last_energy_gain` / `_drain`). In that case the wrap-up row is pushed
+(`pod_combat_last_self_damage`), a fired energy bonus
+(`pod_combat_last_energy_gain` / `_drain`), or a fired AP refund
+(`pod_combat_last_ap_refund`). In that case the wrap-up row is pushed
 carrying just those riders. Non-AoE moves never set the tripwire, so
 they always push exactly one row.
 
@@ -1599,6 +1661,69 @@ round-duration tiers are not cleared at a turn boundary and lapse only at combat
 end. Nothing observable depends on it (KO'd slots are untargetable and take no
 wound rolls).
 
+### `team_all`: the both-teams sweep
+
+`targeting = team_all` hits **every living combatant, the caster included**,
+on both sides. It reuses the `team_enemy` machinery wholesale — per-victim
+hit rolls, one burst-level stealth consume, one log row per victim.
+
+**The caster is not swept; it is hit actor-side afterwards.** The loop's
+filter deliberately skips it:
+
+```
+pod_combat_aoe_team_all_sweep_filter_trigger = {
+	NOT = { pod_combat_slot_is_current_actor_trigger = yes }
+}
+```
+
+This is a correctness requirement, not a style choice. Sweeping the caster
+would load the same combatant into the **target** workspace while it is also
+the **actor**, and `pod_combat_save_workspace_effect` flushes the actor
+workspace back over every mirrored slot field at end of move — so the loop's
+writes for the caster would be silently reverted. `slot_morale` is the clearest
+casualty; HP would appear to work only because it lives on PoD's wound track
+rather than the slot. (The same hazard is latent in `team_ally`, whose sweep
+*does* include the actor: a `team_ally` morale heal on the caster is lost the
+same way.) Because the matcher derefs `scope:host`, every caller must save the
+host first.
+
+So each applier sweeps the others, then applies the caster's share to the actor
+side: typed HP damage via `pod_combat_deal_typed_retal_damage_effect` (bypass
+guard, no hit roll — you neither block nor miss yourself — but PoD still soaks
+and classifies it, so a caster immune to its own element shrugs it off),
+morale damage via `SIDE = actor`, and debuff **tiers** via
+`pod_combat_apply_team_all_self_debuffs_effect`. The caster's HP share is lifted
+into `pod_combat_last_self_damage`, so the existing recoil rider on the §16
+wrap-up row reports it; the lift is additive, since the move may also carry a
+`self_damage` rider.
+
+`bypass_dodge` / `bypass_stealth` are **not** self-applied: they describe how
+the attack meets each victim's defenses rather than a debuff the blast inflicts,
+and breaking the caster's own stealth in the pre-damage phase would rob the
+burst of the stealth accuracy it is entitled to.
+
+Three further consequences worth stating:
+
+- **Damage and debuffs broadcast; support does not.** §5b broadcasts tier
+  debuffs and stance-strips across the sweep, but §5c/§9/§10/§12/§12b route
+  buffs, heals and beneficiary stances to the **actor** for every mode
+  except `single_ally` / `single_pc`. A `team_all` heal would therefore mend
+  only its caster, so the generator's `team_all_support` lint rejects the
+  combination rather than shipping the surprise.
+- **No reactions.** §15 skips `team_all` for the same reason it skips
+  `team_enemy`: a counter can only fire from one workspace target, so firing
+  would arbitrarily single out the pre-AoE one.
+- **Victory is scored after the move, not mid-sweep.** A burst that KOs the
+  last enemy keeps sweeping the remaining allies. The ally-down morale shock
+  fires per KO inside the loop but is floored at 1 morale, so it can never
+  cascade a second KO.
+
+For the AI this is a last-one-standing button: `@ai_aoe_multi_enemy` still
+rewards a crowded enemy side, but three stacking friendly-fire penalties bury
+it otherwise — `@ai_aoe_ff_self` always applies (the caster is always in the
+blast), and `@ai_aoe_ff_one_ally` / `@ai_aoe_ff_two_ally` add on top while the
+actor still has living teammates.
+
 ---
 
 ## §6 Reaction system
@@ -1606,12 +1731,29 @@ wound rolls).
 A **reaction** is a counter-strike a combatant arms on its own turn and
 that fires automatically on the next matching eligible incoming
 single-target HP-damage attack. Pure morale/control/utility moves and
-`team_enemy` attacks do not check reactions. Two flavours exist:
+`team_enemy` / `team_all` attacks do not check reactions. Three flavours
+exist:
 
 - **Thorns** — fires when an attack makes **contact** (lands, is soaked,
   or is guard-blocked).
 - **Riposte** — fires when an attack **misses** (whiffs, is dodged, or
   hits stealth).
+- **Always** — fires on **any** resolved attack, hit or miss.
+
+The Always charge gates on `outcome = flag:attack` alone — any
+`attack_result`, `immune` included; it is not a member of the
+contact/evasion partition but the union of the whole axis, so any
+resolved swing (landed, blocked, soaked, evaded, or shrugged off by
+immunity) consumes it.
+
+If a specific charge (hit or miss) and the Always charge are both armed
+when an attack resolves, the specific charge answers it and the Always
+charge is held for a later attack — at most one counter fires per
+incoming attack.
+
+Take-strongest replacement compares candidates within one charge family
+only: a stronger Always candidate replaces only the armed Always charge
+and never displaces — nor is displaced by — a hit- or miss-charge.
 
 The lifecycle has two halves: arm now, fire on the next matching
 eligible attack.
@@ -1619,14 +1761,16 @@ eligible attack.
 ### Arming (during the arming combatant's own move)
 
 In the move-execution step that handles retaliation stances
-(`pod_combat_move_effects.txt`), a move with `retaliate_if_hit` or
-`retaliate_if_missed` writes the armed reaction onto the actor's
-workspace, which is mirrored onto its slot story:
+(`pod_combat_move_effects.txt`), a move with `retaliate_if_hit`,
+`retaliate_if_missed`, or `retaliate_if_attacked` writes the armed
+reaction onto the actor's workspace, which is mirrored onto its slot
+story:
 
 | Move var | Workspace var armed | Fires on |
 |----------|--------------------|----------|
 | `retaliate_if_hit` | `pod_combat_actor_retaliate_hit` | contact |
 | `retaliate_if_missed` | `pod_combat_actor_retaliate_miss` | evasion |
+| `retaliate_if_attacked` | `pod_combat_actor_retaliate_any` | any resolved attack |
 
 The candidate counter damage is chosen as `retaliate_damage` →
 `hp_damage` → `1`; an arming move therefore always supplies an amount.
@@ -1637,8 +1781,8 @@ vars describe the counter, each with a `_hit` / `_miss` form:
 
 | Companion var | Meaning |
 |---------------|---------|
-| `pod_combat_actor_retaliate_<hit\|miss>_kind` | counter's damage kind: `morale`, `aggravated`, or an elemental class flag (fire/cold/…); unset = plain |
-| `pod_combat_actor_retaliate_<hit\|miss>_morale` | presence companion to a `morale` kind (drives the slot tooltip) |
+| `pod_combat_actor_retaliate_<hit\|miss\|any>_kind` | counter's damage kind: `morale`, `aggravated`, or an elemental class flag (fire/cold/…); unset = plain |
+| `pod_combat_actor_retaliate_<hit\|miss\|any>_morale` | presence companion to a `morale` kind (drives the slot tooltip) |
 
 Kind precedence is **morale > `retaliate_agg` > the move's elemental
 class > unset**: a `retaliate_morale` move sets the `_kind` to `morale`;
@@ -1647,32 +1791,37 @@ move's damage class seeds it (`pod_combat_seed_kind_from_class_effect`,
 literal flags only); a plain move leaves it unset.
 
 The slot story carries the same fields as `slot_retaliate_hit` /
-`slot_retaliate_miss` (+ the `_kind` / `_morale` companions),
-which drive the per-slot retaliation status icon
+`slot_retaliate_miss` / `slot_retaliate_any` (+ the `_kind` / `_morale`
+companions), which drive the per-slot retaliation status icon
 (`pod_combat_slot_has_retaliation_value`) and its tooltip
 (`PODCombatStatusRetaliationText`).
 
 ### Firing (during the next attacker's move)
 
-For a non-`team_enemy` move carrying `hp_damage`, the reaction phase
-calls `pod_combat_check_retaliation_effect` with `TARGET_SIDE` = the
-side holding the stance (usually `target`) and `ACTOR_SIDE` = the
-attacker who will take the counter. It checks both armed slots:
+For a non-`team_enemy`, non-`team_all` move carrying `hp_damage`, the
+reaction phase calls `pod_combat_check_retaliation_effect` with
+`TARGET_SIDE` = the side holding the stance (usually `target`) and
+`ACTOR_SIDE` = the attacker who will take the counter. It checks the
+three armed slots **in this order**:
 
 | Armed var | Gated by | Fires on |
 |-----------|----------|----------|
 | `pod_combat_<side>_retaliate_hit` | `pod_combat_result_code_indicates_contact_trigger` | `hp_damage` / `soaked` / `guard_blocked` |
 | `pod_combat_<side>_retaliate_miss` | `pod_combat_result_code_indicates_miss_trigger` | `missed` / `dodged` / `stealthed` |
+| `pod_combat_<side>_retaliate_any` | `pod_combat_reaction_any_condition_trigger` | any resolved attack the two above did not answer |
 
-Those two **result-code partition triggers** read the just-resolved
+The first two **result-code partition triggers** read the just-resolved
 `pod_combat_last_outcome` / `pod_combat_last_attack_result` (see
-**Result model**) and decide which reaction is eligible. The shared
-helper `pod_combat_apply_reaction_if_triggered_effect` runs the
+**Result model**) and decide which reaction is eligible. The third gate
+wraps `pod_combat_result_code_indicates_attack_trigger` (the union of
+the whole attack axis) with `NOT = { has_variable =
+pod_combat_last_retal_fired }`, which is what implements the hold rule —
+so the call order above is semantics, not style. The shared helper
+`pod_combat_apply_reaction_if_triggered_effect` runs the
 limit-then-fire-then-clear pattern once per slot, then removes the armed
 var and both companions in lockstep (so a stale companion can't
-mislabel a later counter). A matching contact/evasion consumes the
-reaction even if the counter's later spirit gate makes its payload
-no-op.
+mislabel a later counter). A matching attack consumes the reaction even
+if the counter's later spirit gate makes its payload no-op.
 
 ### How the counter resolves
 
@@ -1764,7 +1913,7 @@ the current actor / selected target —
 `pod_combat_slot_is_selected_target_trigger`.
 
 **AoE dispatchers reload only the target, not the whole workspace.** The
-four AoE tails call `pod_combat_reload_selected_target_effect` (a
+AoE tails call `pod_combat_reload_selected_target_effect` (a
 target-only reload) rather than the full
 `pod_combat_load_workspace_effect`, so the live actor workspace (spent
 energy, consumed stealth, applied tiers) survives the sweep; only the
@@ -2208,7 +2357,7 @@ Code-side entry points and where they live.
 
 | File | Purpose |
 |---|---|
-| `pod_combat_move_init_effects.txt` | Setter effects — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. Also home to the loadout copy effects and the move-sheet scratch-list machinery (`pod_combat_sheet_rebuild_effect` / `_set_sort_effect` / `_reset_effect`). |
+| `pod_combat_move_init_effects.txt` | Setter API — `POD_combat_move_set_*` for every story_cycle attribute. Called by the move list. Also home to the loadout copy effects and the move-sheet scratch-list machinery (`pod_combat_sheet_rebuild_effect` / `_set_sort_effect` / `_reset_effect`). |
 | `pod_combat_move_list_effects.txt` | The manually maintained move registry: one `POD_init_combat_move` constructor followed immediately by its setter block for every move (validator suppressions live in `pod_combat_error_suppression_effects.txt`, not here). |
 | `pod_combat_move_effects.txt` | `POD_execute_combat_move` — the §0-§17 phase contract above. |
 | `pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
@@ -2234,7 +2383,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
 | `pod_combat_move_unlock_triggers.txt` | Unlock authority: one manually maintained character-scoped rule per move, plus `pod_combat_actor_unlocks_move_trigger`, the `config_section`/`skill_key` story adapter used by editor, preset, PC-bake, and AI-seeding paths. Every move, including universal moves, needs an explicit dispatcher leaf. The permissive fallbacks are safety guards, not authoring shortcuts. |
-| `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` - manually maintained literal-key switches for the move's `cond_param`, because CK3 requires a literal trait or secret-type key. Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. `target_known_secret` is currently a fail-closed stub. |
+| `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` / `pod_combat_cond_has_modifier_trigger` - literal-key switches for the move's `cond_param`, because CK3 requires a literal trait, secret-type or modifier key. Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. `target_known_secret` is currently a fail-closed stub. |
 | `pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. Also home to the damage-class partition triggers (`pod_combat_move_class_is_elemental_trigger` / `pod_combat_class_always_aggravated_trigger`) and to `pod_combat_ai_move_admissible_trigger` - the AI's entire move-admission gate set, which the move roll calls as its `limit`. |
 | `pod_combat_damage_source_weakness_triggers.txt` | AI weakness-exploitation mapping, not the authoritative wound matrix. It defines helpers for silver, gold, sun, fire, holy, poison, and cold iron. The current `pod_combat_move_exploits_target_weakness_trigger` bridge dispatches only silver/gold/sun/fire/holy; poison and cold-iron helpers exist but are not currently connected to the AI score arm. Actual aggravated/immunity/multiplier behavior lives in the PoD health-track trigger/value files. |
 | `POD_health_track_triggers.txt` (PoD file, delta) | Current combat damage matrix: per-splat aggravated classification and default immunities for the elemental death reasons, poison/cold-iron weakness helpers, holy/true-faith classification (including vampires/abominations, demons, kuei-jin, wraiths, and true Fae), and the `pod_combat_force_agg` change-type bridge. |
@@ -2303,6 +2452,7 @@ write splits the directory).
 | `00_POD_game_rules.txt` (PoD file, delta) | Defines the `pod_combat` game rule and enabled/disabled settings; the single-combat override consults `pod_combat_enabled`. |
 | `00_POD_misc_modifiers.txt` (PoD file, delta) | Defines `pod_combat_duel_active`, the 30-day safety-net marker placed on active participants and normally removed at duel end. |
 | `00_POD_single_combat_modifiers.txt` | Move-specific `prowess_from_pain` wound-state modifiers used by the combat move set. |
+| `pod_combat_modifiers.txt` | Combat-owned marker modifiers applied by §12c and read by the `has_modifier` condition (currently `pod_combat_anima_flare`). Pure markers, no numeric effects. A new file rather than a delta in PoD's `00_POD_misc_modifiers.txt`, so it needs no `verify_deltas.py` row and survives a PoD re-sync untouched. |
 | `00_PoD_deaths.txt` (PoD file, delta) | Defines `death_cold_iron`, used by the cold-iron damage class. |
 
 ### GUI
@@ -2359,7 +2509,7 @@ Moves are maintained directly in five synchronized game-data locations:
 the move registry, the shared unlock-rule file and runtime dispatcher,
 the hidden decision file, per-move localization, and the combat-version
 constant. The condition sub-dispatch is a conditional sixth edit for a
-new literal `has_trait` condition key.
+new literal `has_trait` or `has_modifier` condition key.
 
 The stable `skill_key` connects every record. Eligibility is authored
 exactly once in `pod_combat_move_<key>_unlock_trigger`; the hidden
@@ -2370,10 +2520,10 @@ existing saves rebuild their move stories.
 
 | File | Purpose |
 |---|---|
-| `scripts/python/POD-Combat/COMBAT_MOVE_AUTHORING_GUIDE.info` | Self-contained direct-file workflow, setter reference, balance rubric, verification checklist, and test plan (in-tree mirror `COMBAT_MOVE_AUTHORING_GUIDE.info`). |
+| `devpod/common/scripted_effects/COMBAT_MOVE_AUTHORING_GUIDE.info` | Self-contained direct-file workflow, setter reference, balance rubric, verification checklist, and test plan. |
 | `devpod/common/scripted_effects/POD_combat/pod_combat_move_list_effects.txt` | Manually maintained constructor and setter blocks. |
 | `devpod/common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt` | Manually maintained shared rules and dispatcher leaves. |
-| `devpod/common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | Conditional edit when a move introduces a new literal condition parameter (currently trait/known-secret dispatch); unknown values fail closed. |
+| `devpod/common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | Conditional edit when a move introduces a new literal condition parameter (currently trait / known-secret / marker-modifier dispatch); unknown values fail closed. |
 | `devpod/common/decisions/POD_Combat/pod_combat_move_decisions.txt` | Manually maintained hidden decisions. |
 | `devpod/localization/english/gui/POD_combat_moves_l_english.yml` | Manually maintained per-move localization. |
 | `devpod/common/script_values/pod_combat_values.txt` | Hand-increment `POD_current_combat_version` after a gameplay-relevant registry change so existing saves rebuild the catalogue. |
@@ -2485,8 +2635,8 @@ prestige level on an attacker death) still point at the dedicated
 Short pointers for the common extension tasks. Each cross-references the
 section that describes the system being extended; the multi-file fan-out
 cases (a new outcome flag, a new damage class, a new combat-log
-segment, a new capability flag) are in **Cross-file change checklists**
-below.
+segment, a new capability flag, a new marker character modifier) are in
+**Cross-file change checklists** below.
 
 ### Add an execution phase
 
@@ -2717,16 +2867,36 @@ The append-only recipe:
    `seg_X_on`, `pod_combat_log_before_X_value` reads `seg_X_sep`.
 3. **Renderer** `PODCombatLogSegX` in `POD_combat_log_custom_loc.txt`
    — defensive `NOT exists scope:move` first branch, then this
-   segment's branches only, blank fallback last.
+   segment's branches only, blank fallback last. A renderer reached
+   through `PODSegText` runs in a **nested** customizable-loc context.
+   A nested dispatcher cannot read the OUTER saved scopes from inside
+   its own triggers: it sees no `scope:entry` / `scope:move` and falls
+   through to its fallback. What it can do is be **re-rooted on a saved
+   scope** - `[move.Custom('SomeDispatcher')]` runs `SomeDispatcher`
+   with the move story as its root, which is the standard engine idiom
+   (vanilla uses it heavily, e.g. `[second.Custom('quirk_pos_noun')]`).
+   So a shared dispatcher is fine as long as it reads its own root
+   rather than a saved scope. `pod_combat_log_seg_marker` is the worked
+   example: one key-agnostic line that re-roots
+   `PODCombatAppliedMarkerName` onto `move` for the marker's name.
+   To reuse a display name without any dispatcher, interpolate the
+   other key with `$other_loc_key$`.
 4. **Widget pair** in `pod_combat_window.gui` using
-   `PODSegSepVisible` / `PODSegVisible` / `PODSegText`.
+   `PODSegSepVisible` / `PODSegVisible` / `PODSegText`, mounted at the
+   **same position the bake block occupies** — separators are decided
+   at bake time from the count of preceding segments, so order must
+   match, and a missing pair means the segment silently never renders.
 5. **Loc fragment key(s)** in `POD_combat_static_l_english.yml`.
 6. **Error suppression** for any NEW entry var or message flag the
    renderer reads (`pod_combat_error_suppression_effects.txt`).
 7. **Outcome segments only**: lift the amount to a
    `pod_combat_last_*` host var in the pipeline, capture it in
-   `push_log`, and add it to
-   `pod_combat_clear_last_result_vars_effect`.
+   `push_log`, and add it to the shared
+   `pod_combat_clear_per_target_state_effect` list (which
+   `pod_combat_clear_last_result_vars_effect` delegates to) so it
+   cannot leak onto a later row. If the lift happens **after** the
+   per-target AoE pushes, as `ap_refund` does at §14, also add the var
+   to the §16 wrap-up gate, or an AoE cast of the move logs nothing.
 
 #### Adding a new outcome flag
 
@@ -2794,3 +2964,90 @@ gate behavior in the contact resolver and related pipelines.
 7. **Capability composition**: no attack-type defaults are applied at
    runtime. Every move that needs the capability must set the flag
    explicitly in its setter block.
+
+#### Adding a marker character modifier
+
+A marker modifier is an effect-free CK3 character modifier that one move
+stamps on its user (§12c, setter `POD_combat_move_set_marker_modifier =
+{ KEY = ... }`, story var `marker_modifier`) so that a **later** move can
+test for it through the `has_modifier` condition predicate. The shipped
+example is `pod_combat_anima_flare`: a Terrestrial Exalted flare raises
+the marker once per fight, and the Charm moves carry `cond_mode = bonus`
+/ `cond_predicate = has_modifier` / `bonus_effect = ap_refund`, so they
+partially refund their own AP while it is up. This is how "your next
+actions are cheaper" is expressed without an AP-cost-modifier layer.
+
+To add another marker key, in lockstep:
+
+1. **Modifier block** in `common/modifiers/pod_combat_modifiers.txt`,
+   plus its name and `_desc` keys in `POD_combat_static_l_english.yml`.
+   Keep it a pure marker: a numeric effect would also apply outside the
+   fight, since CK3 character modifiers are day-scoped.
+2. **Generator vocabulary**: add the key to `MARKER_MODIFIERS` in
+   `scripts/python/POD-Combat/generate_combat_files.py`, which validates
+   both the `marker_modifier` column and a `has_modifier` move's
+   `cond_param` against that tuple.
+3. **Apply case**: a `flag:<key>` arm in the §12c switch in
+   `pod_combat_move_effects.txt`. `add_character_modifier` needs a
+   literal key, so the switch cannot be parameterised over the flag.
+4. **Condition case**: a `flag:<key>` arm in
+   `pod_combat_cond_has_modifier_trigger`
+   (`pod_combat_condition_dispatch_triggers.txt`).
+5. **Name dispatchers**: a case in `PODCombatCondMarkerName` (switches
+   on `cond_param`) and in `PODCombatAppliedMarkerName` (switches on
+   `marker_modifier`), both in `POD_combat_log_custom_loc.txt`. Both
+   resolve to the modifier's own name key, so no marker's flavour gets
+   baked into a shared phrasing.
+6. **Nothing in the combat log.** `pod_combat_log_seg_marker` is
+   key-agnostic - it re-roots `PODCombatAppliedMarkerName` onto the
+   `move` scope - so step 5 is what makes the new marker render there.
+7. **Removal** at all three lifecycle sites: `pod_combat_duel_end_effect`
+   and `pod_combat_host_died_release_effect` (`pod_combat_effects.txt`),
+   plus the on-the-way-in self-heal inside
+   `pod_combat_init_slot_from_character_effect`'s `is_alive` block
+   (`pod_combat_group_effects.txt`), beside the soak-tier clears.
+8. **Validator suppression**: `pod_combat_suppress_flag = { FLAG = <key> }`
+   in `pod_combat_error_suppression_effects.txt` section 4. The key is
+   written parametrically by `POD_combat_move_set_marker_modifier` but
+   compared literally at steps 3-5, so until some CSV row actually carries
+   the key the game logs `Flag '<key>' is used but is never set`. Drop the
+   entry once a shipped move carries the key and the macro expansion
+   supplies the set on its own.
+
+**Why removal exists in three places.** CK3 character modifiers are
+day-scoped, not round-scoped, and a whole fight resolves inside one game
+day, so nothing expires on its own during play. Normal teardown strips
+the marker at duel end; the host-death path strips it on the abnormal
+teardown; the slot-init clear repairs a combatant who entered a fight
+still carrying one. The `days = 30` on the apply call is only a leak
+backstop for a fight abandoned without either teardown running.
+
+AI wiring is per-primitive, not per-key, so a new key needs none of it:
+`marker_modifier` is already part of the setup tactical-intent
+membership (kept in lockstep across `pod_combat_ai_effects.txt`,
+`pod_combat_triggers.txt` and `verify_intent_membership.py`), and the
+AP-strand penalty already exempts a move whose `ap_refund` bonus would
+fire. That exemption is a guarded `trigger_if` on
+`has_variable = bonus_effect`, because boolean blocks do not
+short-circuit and almost no move declares a `bonus_effect` at all.
+`marker_modifier` also counts as an independent payload in
+`pod_combat_move_has_independent_payload_trigger`, so a marker move is
+never rejected by the redundancy gate just because a stance or tier
+rider it also carries is already covered.
+
+Limits worth knowing before designing around this:
+
+- **A refund is not a discount.** Both affordability gates read the
+  gross `ap_cost`, so a move the actor cannot afford stays unclickable
+  no matter how large its refund.
+- The generator caps an `ap_refund` `bonus_value` strictly below
+  `ap_cost` so the move always costs at least 1 AP net. The engine has
+  no clamp; that invariant lives only in the generator.
+- `ap_refund` had no live users in the catalogue before this feature,
+  so its runtime path is barely exercised in play.
+- The marker lands on the **user only**. A `team_ally` marker move is
+  not supported: the team_ally utility-admissibility arm admits only
+  stance / soak-tier / hit-tier riders.
+- A move has one condition slot (gate XOR bonus, one bonus effect), so
+  spending it on `has_modifier` / `ap_refund` means that move can carry
+  no other gate or bonus.
