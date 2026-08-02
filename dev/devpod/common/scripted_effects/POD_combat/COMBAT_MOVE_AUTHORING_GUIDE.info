@@ -2,6 +2,11 @@
 
 This guide is for a move designer adding or changing combat moves.
 
+To look up what a setter or flag accepts rather than read the whole workflow,
+use `COMBAT_MOVE_QUICK_REFERENCE.info`. It is all tables: every constructor
+parameter and setter with its allowed values, the complete presence-flag set,
+the targeting broadcast matrix, and the silent-failure list.
+
 A combat move is not defined by one block. A normal move is a small set of
 records connected by one stable key:
 
@@ -35,7 +40,7 @@ Additional files are conditional:
 
 | File | Edit it only when |
 |---|---|
-| `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | A `has_trait` move condition uses a literal trait key that is not already in its switch. |
+| `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | A `has_trait` or `has_modifier` move condition uses a literal key that is not already in its switch. |
 | `localization/english/gui/POD_combat_static_l_english.yml` | A complex unlock rule introduces a new `custom_tooltip` requirement key. |
 | `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` | A genuinely new optional variable or parametric flag needs validator pairing after spelling, scope, and runtime use have been verified. |
 
@@ -311,6 +316,7 @@ POD_init_combat_move = {
 	SKILL_KEY  = <key>
 	CATEGORY   = <category>
 	CONFIG     = <configuration>
+	GROUP      = <splat family>
 	AP_COST    = <amount>
 	AI_WEIGHT  = <amount>
 	TARGETING  = <targeting>
@@ -323,11 +329,12 @@ POD_init_combat_move = {
 | `SKILL_KEY` | Unique lower-snake-case flag | Stable runtime and saved-preset identity. |
 | `CATEGORY` | `ATK`, `DEF`, `CTL`, `PWR` | Loadout category and category-cap accounting. |
 | `CONFIG` | Existing or newly added dispatcher slug | Outer runtime unlock-dispatch branch. |
+| `GROUP` | One of the 16 splat families (`universal`, `vampire`, `werewolf`, `bastet`, `mokole`, `fera`, `fae`, `demon`, `wraith`, `mummy`, `kueijin`, `hunter`, `sorcerer`, `psychic`, `theurgy`, `truefaith`) | Which kind of character can ever hold this. Drives only the loadout editor's "Show all moves" display filter, never access. Derived from `CONFIG` by the generator's `section_unlock_group()`. |
 | `AP_COST` | Non-negative integer or an existing AP constant | Action points spent on use. Zero is an exceptional, reviewed value. |
 | `AI_WEIGHT` | Positive number | Base AI score before tactical adjustments. |
 | `TARGETING` | Supported targeting flag | Who receives target-directed effects. |
 
-All seven parameters are required.
+All eight parameters are required.
 
 Optional attributes are represented by absence. Do not add zero-valued setters
 as placeholders unless a documented setter explicitly uses `0` as a sentinel,
@@ -376,6 +383,7 @@ Allowed constructor values are:
 | `self` | The actor. Use for self-healing, stances, transformations, and summons. |
 | `team_enemy` | Every living enemy. Use only effects known to broadcast. |
 | `team_ally` | Every living ally, including the actor. Use only effects known to broadcast. |
+| `team_all` | Every living combatant on both sides, the actor included. Damage, morale damage and debuff riders only. Support payloads route to the caster on this mode, so the generator rejects them here. |
 | `single_pc` | The player character. This is a specialized AI-side protection target with no current move examples. Only HP and morale healing explicitly route to the PC; tier buffs and stances affect the actor instead. Require focused engine and AI review before using it. |
 
 ### 7.1 Team-target compatibility
@@ -395,6 +403,18 @@ Safe `team_ally` payloads:
 - Morale healing.
 - Soak and hit buffs.
 - Guard, dodge, and stealth stances.
+
+Safe `team_all` payloads are the `team_enemy` list above, and nothing more. It
+covers both sides **including the caster**, so a heal or buff on it would strike
+everyone and then mend or strengthen only the caster; the generator's
+`team_all_support` check is a hard error rather than a warning for that reason.
+Retaliation never fires against a `team_all` move, exactly as with `team_enemy`.
+
+Price the self-hit in. The caster takes the move's own `hp_damage` and
+`morale_damage`, classified by its `damage_type`, so a caster immune to its own
+element shrugs it off and everyone else does not. `bypass_dodge` and
+`bypass_stealth` are the one exception to "everyone": they describe how the
+attack meets a victim's defenses, so they are not turned on their own caster.
 
 The following remain single-target or selected-workspace effects and should not
 be presented as team-wide without engine work:
@@ -741,10 +761,11 @@ Supported move-state and outcome flags include:
 | `is_starter_move` | Include the move in default player loadout seeding. |
 | `retaliate_if_hit` | Arm a one-use counter that fires when an incoming HP-damage move makes contact. |
 | `retaliate_if_missed` | Arm a one-use counter that fires when an incoming HP-damage move misses or is evaded. |
+| `retaliate_if_attacked` | Arm a one-use counter that fires on any resolved incoming HP-damage move, contact or evasion. One charge, not two. |
 | `dot_morale` | Make the move's damage-over-time ticks harm morale rather than HP. |
 | `summon_hostile` | Seat the summoned creature on the side opposite the caster. |
 
-Delivery flags from section 9 use the same setter.
+Delivery flags from section 8 use the same setter.
 
 Do not mark a restricted move as `is_starter_move` without reviewing default
 loadout seeding. The seeder does not re-check the move's unlock rule. Starter
@@ -814,6 +835,12 @@ or:
 POD_combat_move_set_flag = { NAME = retaliate_if_missed }
 ```
 
+or, for a counter that answers either outcome:
+
+```paradox
+POD_combat_move_set_flag = { NAME = retaliate_if_attacked }
+```
+
 Optional counter typing:
 
 ```paradox
@@ -831,10 +858,19 @@ Morale retaliation takes precedence over HP class choices.
 
 The armed counter applies to the actor for the next incoming qualifying move.
 It is checked only against an incoming move with an HP-damage payload, and
-never against `team_enemy`; morale-only attacks do not trigger it. Re-arming
-keeps the stronger pending counter amount rather than replacing it with a
-weaker one. Use a repeat limit where repeatedly rearming it in one turn would
-be abusive.
+never against `team_enemy` or `team_all`; morale-only attacks do not trigger
+it. Re-arming keeps the stronger pending counter amount rather than replacing
+it with a weaker one, comparing within one charge family only. Use a repeat
+limit where repeatedly rearming it in one turn would be abusive.
+
+The three flags are three independent charges, so pairing `retaliate_if_hit`
+with `retaliate_if_missed` arms two counters that can each fire once across two
+incoming attacks. `retaliate_if_attacked` is the single charge that covers both
+outcomes (and an attack shrugged off by immunity, which belongs to neither
+partition) - prefer it when the intent is "counter whatever comes next". When a
+specific charge and the always-charge are both armed, the specific one answers
+and the always-charge is held rather than spent, so at most one counter fires
+per incoming attack.
 
 ## 15. Damage over time
 
@@ -990,6 +1026,7 @@ minimum or missing amount.
 | `outnumbered` | `global` | `0` |
 | `ally_knocked_out` | `global` | `0` |
 | `has_trait` | `user` or `target` | `THRESHOLD = 0` plus `cond_param` |
+| `has_modifier` | `user` or `target` | `THRESHOLD = 0` plus `cond_param` naming a marker modifier key (18.7) |
 
 `target_known_secret` is reserved in the evaluator but its literal-key
 dispatcher currently fails closed. Do not author a move with that predicate
@@ -998,15 +1035,21 @@ engine feature.
 
 Unknown predicates and unknown identifier parameters fail closed.
 
-### 18.5 Trait-condition dispatch
+### 18.5 Identifier-condition dispatch
 
-`has_trait` needs a literal trait key:
+`has_trait` and `has_modifier` each need a literal key, because CK3 cannot
+interpolate a variable into `has_trait` or `has_character_modifier`. The
+condition carries that key in `cond_param`:
 
 ```paradox
 POD_combat_move_set_cond_param = { PARAM = verified_trait_key }
 ```
 
-The current condition dispatcher supports:
+`common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt`
+holds one sub-dispatch per identifier predicate, each a switch on `cond_param`
+that turns it back into a literal.
+
+The `has_trait` dispatcher supports:
 
 - `vampire`
 - `wraith`
@@ -1014,8 +1057,7 @@ The current condition dispatcher supports:
 - `psychic`
 
 For another verified trait, add a literal branch inside
-`pod_combat_cond_has_trait_trigger` in
-`common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt`:
+`pod_combat_cond_has_trait_trigger`:
 
 ```paradox
 		flag:verified_trait_key = {
@@ -1023,7 +1065,20 @@ For another verified trait, add a literal branch inside
 		}
 ```
 
-Place it before `fallback = { always = no }`.
+The `has_modifier` dispatcher works the same way, over marker-modifier keys
+instead of traits:
+
+```paradox
+		flag:pod_combat_anima_flare = {
+			has_character_modifier = pod_combat_anima_flare
+		}
+```
+
+Place each new branch before that switch's `fallback = { always = no }`. A
+marker key also needs its definition and the rest of its wiring; see 18.7.
+
+Unknown predicates and unknown identifier parameters fail closed, so a typo
+yields a condition that is never true rather than an error.
 
 After introducing a new literal parameter, check the script validator and
 `error.log`. If it reports the new parametric flag as unmatched, add the exact
@@ -1058,6 +1113,112 @@ Supported `EFFECT` values:
 
 `change_type` and the three stance effects ignore numeric magnitude; pass
 `VALUE = 0`.
+
+`ap_refund` is a refund, not a discount. Both affordability gates read the
+gross `ap_cost`, so a move the actor cannot afford stays unclickable however
+large its refund; the AP comes back only after the move resolves. Keep
+`bonus_value` strictly below the move's `AP_COST` so a successful use still
+costs at least 1 AP net; nothing in the engine clamps it. No live move used
+`ap_refund` before the marker work in 18.7, so treat its runtime path as
+unexercised and test it directly rather than trusting it by analogy with the
+other bonus effects.
+
+### 18.7 Marker modifiers
+
+A marker modifier is the supported way for one move to leave a state a
+*different* move can test. The applying move sets a marker key; a consuming
+move reads it back with the `has_modifier` predicate. Composed with the
+`ap_refund` bonus effect, that expresses "your next actions are cheaper"
+without an AP-cost-modifier layer.
+
+The applier uses one setter:
+
+```paradox
+POD_combat_move_set_marker_modifier = { KEY = pod_combat_anima_flare }
+```
+
+Supported keys are those defined in
+`common/modifiers/pod_combat_modifiers.txt`, currently `pod_combat_anima_flare`
+alone. That file is combat-owned rather than a delta inside PoD's own modifier
+file, so a PoD re-sync cannot drop it.
+
+Rules and limits:
+
+- **The marker applies to the user, never to a target or a team.** A
+  `team_ally` marker move is not supported: the team-ally admissibility arm
+  admits only stance, soak-tier, and hit-tier riders.
+- **A move cannot satisfy its own condition.** The marker is applied in
+  execution section 12c of `POD_execute_combat_move`, well after the condition
+  is evaluated in execution section 2b, so the payoff is always cross-move and
+  always on a later turn.
+- **One condition slot per move.** A move gets one condition, used as a gate
+  or as a bonus, and a bonus carries exactly one effect. Spending it on
+  `has_modifier` plus `ap_refund` means that move can carry no other gate and
+  no other bonus.
+- **CK3 character modifiers are day-scoped, not round-scoped.** Nothing in the
+  engine expires one at end of round, which is why the marker is stripped by
+  combat teardown, re-stripped when a character is seated into a slot, and
+  given a `days = 30` backstop at the apply site for a fight that is abandoned
+  rather than concluded.
+
+### 18.7.1 Worked example: a marker plus a refund
+
+The Terrestrial Exalted "Anima Flare" lights the anima once per combat; the
+Charm moves that follow partially refund their own AP while it burns.
+
+The applier carries the marker setter and `once_per = combat`, and no
+condition of its own:
+
+```paradox
+	POD_combat_move_set_marker_modifier = { KEY = pod_combat_anima_flare }
+	POD_combat_move_set_once_per = { DURATION = combat }
+```
+
+Each consumer spends its condition slot on the marker and pays out a refund
+strictly below its own `AP_COST`, so a successful use still costs at least
+1 AP net:
+
+```paradox
+	POD_combat_move_set_condition = {
+		MODE = bonus
+		TARGET = user
+		PREDICATE = has_modifier
+		THRESHOLD = 0
+	}
+	POD_combat_move_set_cond_param = { PARAM = pod_combat_anima_flare }
+	POD_combat_move_set_bonus = { EFFECT = ap_refund VALUE = 1 }
+```
+
+The AI needs no extra work here. The gate, the flat condition-met scoring
+nudge, and the AP-strand exemption for a move whose refund would fire all run
+off the shared evaluator.
+
+### 18.7.2 Adding a marker key
+
+CK3 needs a literal at every apply and read site, so a new key is hand-wired.
+Add all of these in lockstep, or the key half-works:
+
+1. A modifier block in `common/modifiers/pod_combat_modifiers.txt`, plus its
+   name and `_desc` keys in `POD_combat_static_l_english.yml`.
+2. A case in the execution section 12c apply switch in
+   `pod_combat_move_effects.txt`, and the matching read-side case in
+   `pod_combat_cond_has_modifier_trigger` (see the identifier-condition
+   dispatch above).
+3. A case in `PODCombatCondMarkerName` and in `PODCombatAppliedMarkerName`
+   (`common/customizable_localization/POD_combat_log_custom_loc.txt`). Both
+   resolve to the modifier's own name key, which keeps the shared condition
+   and effect phrasings generic. The combat-log row needs nothing further:
+   `pod_combat_log_seg_marker` is key-agnostic and re-roots
+   `PODCombatAppliedMarkerName` onto the `move` scope.
+4. A removal line in `pod_combat_duel_end_effect`, in
+   `pod_combat_host_died_release_effect`, and in the slot-init self-heal
+   inside `pod_combat_init_slot_from_character_effect`. Skipping any of the
+   three leaves the marker on a character after the fight.
+5. A `pod_combat_suppress_flag = { FLAG = <key> }` line in section 4 of
+   `pod_combat_error_suppression_effects.txt`, for as long as no CSV row
+   carries the key. The setter writes the key parametrically while steps 2
+   and 3 compare it literally, so without the entry the game logs
+   `Flag '<key>' is used but is never set` at load.
 
 ## 19. AI authoring
 
@@ -1306,7 +1467,8 @@ scope:new_combat_move = {
 }
 ```
 
-Use `retaliate_if_missed` for a riposte that follows evasion instead.
+Use `retaliate_if_missed` for a riposte that follows evasion instead, or
+`retaliate_if_attacked` for one charge that answers either outcome.
 
 ## 22. Shared unlock-rule design
 
@@ -1436,15 +1598,32 @@ A new capability commonly requires coordinated work in:
 | Story setter and variable | `common/scripted_effects/POD_combat/pod_combat_move_init_effects.txt` |
 | Execution phase and result | `common/scripted_effects/POD_combat/pod_combat_move_effects.txt` and sometimes `pod_combat_effects.txt` |
 | Usability and redundancy | `common/scripted_triggers/POD_combat/pod_combat_move_execution_triggers.txt` or `pod_combat_triggers.txt` |
-| Stat-card presentation | `common/customizable_localization/POD_combat_skill_guis.txt` |
+| Independent-payload inventory | `pod_combat_move_has_independent_payload_trigger` in `pod_combat_move_execution_triggers.txt`. A primitive missing from it lets the redundancy gate reject a move whose only real payload is that primitive, because a redundant stance or tier rider then looks like the whole move. |
+| Character modifier and its lifecycle | `common/modifiers/pod_combat_modifiers.txt` for the definition, plus removal in `pod_combat_duel_end_effect` and `pod_combat_host_died_release_effect` (`pod_combat_effects.txt`) and in the slot-init self-heal in `pod_combat_group_effects.txt`. |
+| Stat-card presentation | `common/scripted_guis/pod_combat_skill_guis.txt` |
+| Compact card and move-sheet cells | `common/customizable_localization/POD_combat_log_custom_loc.txt` (the `PODCombatCL*` and `PODCombatSheetFx*` dispatchers), so a move carrying only the new primitive does not render an empty effects cell. |
 | Static labels and failures | `localization/english/gui/POD_combat_static_l_english.yml` |
 | AI admission, intent, and scoring | `common/scripted_effects/POD_combat/pod_combat_ai_effects.txt` and related triggers |
+| AI tactical-intent membership | Three lockstep copies: the counter fold in `pod_combat_ai_effects.txt`, the intent dispatch ladder in `common/scripted_triggers/POD_combat/pod_combat_triggers.txt`, and `SETTER_VARS` plus `SETUP_PRIMITIVES` in `scripts/python/POD-Combat/verify_intent_membership.py`. Miss one and the AI quietly stops considering moves that carry the primitive. |
 | Validator pairing | `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` |
-| Visible combat result | Combat-log dispatch and localization |
+| Visible combat result | A combat-log segment: its bake site, its `PODCombatLogSeg*` renderer in `POD_combat_log_custom_loc.txt`, its loc key, and its widget pair in `gui/POD_windows/pod_combat_window.gui`. See the segment recipe in `COMBAT_REFERENCE.info`. |
 
 Simply setting an unknown story variable does nothing. The runtime must
 explicitly read and apply it, the interface must explain it, and the AI must
 understand when it is useful.
+
+Two traps recur on the combat-log half. A segment whose backend is complete
+still renders nothing until its widget pair is mounted in the window, in the
+same order as the bake. And per-target state that a segment reads has to be
+listed in the execution section 16 wrap-up gate, or an area move drops the row
+it should have produced.
+
+`PODSegText` evaluates in a nested customizable-loc context, so a dispatcher it
+calls cannot read the OUTER saved scopes from inside its own triggers. It can
+still be **re-rooted** on one: `[move.Custom('SomeDispatcher')]` runs the
+dispatcher against the move story, which is how `pod_combat_log_seg_marker`
+stays key-agnostic. Delegation is therefore fine when the dispatcher reads its
+own root, and only breaks when it expects `scope:entry` / `scope:move`.
 
 Before proposing a new primitive, search for an existing setter, presence flag,
 condition, or combination that already expresses the design.
@@ -1593,8 +1772,8 @@ Observe multiple AI turns. Confirm:
 - [ ] Control and damage-over-time moves use compatible targeting.
 - [ ] Rider conditions match the intended result.
 - [ ] Repeat limits prevent obvious loops.
-- [ ] Conditions use a supported predicate, target, threshold, and optional
-  literal parameter.
+- [ ] Conditions use a supported predicate, target, threshold, and the literal
+  parameter that predicate requires.
 - [ ] A bonus condition has exactly one compatible bonus effect.
 - [ ] `AI_WEIGHT` is close to category peers.
 

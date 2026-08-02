@@ -462,6 +462,7 @@ pod_combat_ai_move_admissible_trigger = {
 				has_variable = steal_gold
 				has_variable = gain_dread
 				has_variable = bonus_effect
+				has_variable = marker_modifier
 				has_variable = retaliate_damage
 				has_variable = retaliate_morale
 			}
@@ -491,14 +492,16 @@ pod_combat_ai_move_admissible_trigger = {
 }
 
 # True for a candidate whose effect reaches the loaded workspace target:
-# single_enemy always, and team_enemy (the selected slot is a guaranteed member
-# of the burst, so its loaded state is a valid weight proxy). Lets the
-# target-aware offensive weights credit AoE the same as a single-target hit.
+# single_enemy always, plus team_enemy and team_all (the selected slot is a
+# guaranteed member of either burst, so its loaded state is a valid weight
+# proxy). Lets the target-aware offensive weights credit AoE the same as a
+# single-target hit.
 # Evaluated in the candidate-move scope, where var:targeting resolves.
 pod_combat_ai_candidate_targets_enemy_trigger = {
 	OR = {
 		var:targeting = flag:single_enemy
 		var:targeting = flag:team_enemy
+		var:targeting = flag:team_all
 	}
 }
 
@@ -974,15 +977,18 @@ pod_combat_move_class_is_elemental_trigger = {
 
 # Classes that land aggravated against the TYPICAL target - an AI soak-bypass /
 # brutality heuristic and pre-landing log-box guess, NOT the authoritative verdict
-# (that is PoD core's per-victim POD_damage_type_is_aggravated). aggravated is
-# universal; fire and balefire spare only the incorporeal (fire: wraith/spirit;
-# balefire: wraith). The splat-gated classes (lightning/cold/sun/silver/gold/holy/
-# poison/cold_iron) are aggravated only against specific splats, so they stay out.
+# (that is PoD core's per-victim POD_damage_type_is_aggravated). aggravated,
+# lightning and balefire are aggravated against every splat, so for those three the
+# target-blindness here is exact. Fire is the one approximation: it spares the
+# incorporeal (wraith/spirit), so it over-credits against those two. The splat-gated
+# classes (cold/sun/silver/gold/holy/poison/cold_iron) are aggravated only against
+# specific splats, so they stay out.
 pod_combat_class_always_aggravated_trigger = {
 	has_variable = damage_type
 	OR = {
 		var:damage_type = flag:aggravated
 		var:damage_type = flag:fire
+		var:damage_type = flag:lightning
 		var:damage_type = flag:balefire
 	}
 }
@@ -1039,6 +1045,59 @@ pod_combat_sheet_sorted_stat_absent_trigger = {
 	}
 }
 
+# Does $ACTOR$ belong to the splat family that can ever hold this move?
+# Enclosing scope is the move story. This is a DISPLAY filter for show-all
+# only - the real unlock gate is pod_combat_actor_unlocks_move_trigger, which
+# this never substitutes for.
+#
+# Every branch body scope-switches into $ACTOR$: a bare splat check would
+# evaluate against the move story and fail for every viewer, silently
+# emptying the filtered list. The group var is written by
+# POD_init_combat_move from the generator's config_section classifier.
+#
+# Fails open twice over, because showing a move nobody can take is a
+# cosmetic miss while hiding one a player could take is a bug: an
+# unclassified group matches everyone, and so does a move story built
+# before the var existed (a save predating this feature, until the next
+# POD_reload_combat_moves).
+pod_combat_move_group_matches_actor_trigger = {
+	trigger_if = {
+		limit = { has_variable = move_unlock_group }
+		switch = {
+			trigger = var:move_unlock_group
+			flag:universal = { always = yes }
+			# Blood family, not just vampires: ghouls, revenants and dhampirs
+			# all learn disciplines.
+			flag:vampire   = { $ACTOR$ = { has_POD_vamp_blood_trigger = yes } }
+			flag:werewolf  = { $ACTOR$ = { POD_is_werewolf_trigger = yes } }
+			flag:bastet    = { $ACTOR$ = { POD_is_bastet_trigger = yes } }
+			flag:mokole    = { $ACTOR$ = { POD_is_mokole_trigger = yes } }
+			flag:fera      = { $ACTOR$ = { POD_is_fera_trigger = yes } }
+			# Glamour-holders, so kinain keep the Arts they can hold.
+			flag:fae       = { $ACTOR$ = { POD_splat_has_glamour_trigger = yes } }
+			flag:demon     = { $ACTOR$ = { POD_is_demon_trigger = yes } }
+			flag:wraith    = {
+				$ACTOR$ = {
+					OR = {
+						POD_is_wraith_trigger = yes
+						POD_is_spirit_trigger = yes
+					}
+				}
+			}
+			flag:mummy     = { $ACTOR$ = { POD_is_mummy_trigger = yes } }
+			flag:kueijin   = { $ACTOR$ = { is_kueijin_trigger = yes } }
+			flag:hunter    = { $ACTOR$ = { POD_is_supehunter_trigger = yes } }
+			# Numina are open to anyone who took the trait, splat regardless.
+			flag:sorcerer  = { $ACTOR$ = { is_sorcerer_trigger = yes } }
+			flag:psychic   = { $ACTOR$ = { has_trait = psychic } }
+			flag:theurgy   = { $ACTOR$ = { has_trait = theurgist } }
+			flag:truefaith = { $ACTOR$ = { POD_has_true_faith_trigger = yes } }
+			fallback = { always = yes }
+		}
+	}
+	trigger_else = { always = yes }
+}
+
 # The sheet's whole filter set. Filtering happens HERE at list-build time,
 # never in per-row GUI visible gates.
 pod_combat_sheet_row_match_trigger = {
@@ -1051,6 +1110,25 @@ pod_combat_sheet_row_match_trigger = {
 			}
 		}
 		scope:pod_combat_sheet_owner = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = prev } }
+	}
+	trigger_else_if = {
+		# Show-all on its own is own-splat-only: the full catalogue is ~570
+		# rows of mostly unobtainable moves and the sheet renders every one.
+		# Unlocked moves ride along unconditionally so a multi-splat PC never
+		# loses sight of powers they already hold.
+		limit = {
+			scope:pod_combat_sheet_owner = {
+				NOT = { has_variable = pod_combat_show_other_splats }
+			}
+		}
+		OR = {
+			scope:pod_combat_sheet_owner = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = prev } }
+			pod_combat_move_group_matches_actor_trigger = { ACTOR = scope:pod_combat_sheet_owner }
+		}
+	}
+	trigger_else = {
+		# Show-all + Show other splats: the whole catalogue, slow by choice.
+		always = yes
 	}
 	# Category filters - same semantics as pod_combat_loadout_category_match:
 	# none set = everything, else the move's category must match a set flag.

@@ -239,9 +239,15 @@ POD_execute_combat_move = {
 	# BEFORE the damage iteration, so each hit respects them on its own target.
 	# §5's workspace strip only touches the pre-AoE target, which each iteration
 	# overwrites. §5c's target-writes still run but are redundant for team_enemy.
+	# team_all does the same across both teams, plus the caster's own tier share.
 	if = {
 		limit = { $STORY$ = { var:targeting = flag:team_enemy } }
 		pod_combat_apply_team_enemy_debuffs_effect = { STORY = $STORY$ }
+	}
+	else_if = {
+		limit = { $STORY$ = { var:targeting = flag:team_all } }
+		pod_combat_apply_team_all_debuffs_effect = { STORY = $STORY$ }
+		pod_combat_apply_team_all_self_debuffs_effect = { STORY = $STORY$ }
 	}
 
 	# ── 5b2. Pure-control contact delivery ────────────────────────
@@ -282,7 +288,10 @@ POD_execute_combat_move = {
 	# THIS attack: a self hit buff raises pod_combat_current_hit_chance for the
 	# §6 hit roll, and a target soak debuff sets the POD_soak_chance bridge var
 	# before the §6 wound roll. AoE target debuffs are still broadcast to slots in
-	# §5b; the workspace target-writes below stay redundant for team_enemy.
+	# §5b; the workspace target-writes below stay redundant for team_enemy/team_all.
+	# Buff tiers route to the actor for both team AoE modes (only single_ally and
+	# single_pc redirect to the target), so a team_all buff would land on the
+	# caster alone - the generator lint rejects support payloads on team_all.
 	# Buffs normally apply to the actor. A single_ally move names a
 	# beneficiary in the target workspace, so route every tier and its soak
 	# bridge to that target instead. team_ally still seeds the actor here and
@@ -324,12 +333,16 @@ POD_execute_combat_move = {
 	}
 
 	# ── 6. HP damage dispatch ────────────────────────────────────
-	# Routes single_enemy vs team_enemy AoE. See HP DAMAGE DISPATCH header below.
+	# Routes single_enemy vs team AoE. See HP DAMAGE DISPATCH header below.
 	if = {
 		limit = { $STORY$ = { has_variable = hp_damage } }
 		if = {
 			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
 			pod_combat_apply_team_enemy_hp_damage_effect = { STORY = $STORY$ }
+		}
+		else_if = {
+			limit = { $STORY$ = { var:targeting = flag:team_all } }
+			pod_combat_apply_team_all_hp_damage_effect = { STORY = $STORY$ }
 		}
 		else = {
 			# single_enemy (default, most common)
@@ -378,6 +391,10 @@ POD_execute_combat_move = {
 			limit = { $STORY$ = { var:targeting = flag:team_enemy } }
 			pod_combat_apply_team_enemy_morale_damage_effect = { STORY = $STORY$ }
 		}
+		else_if = {
+			limit = { $STORY$ = { var:targeting = flag:team_all } }
+			pod_combat_apply_team_all_morale_damage_effect = { STORY = $STORY$ }
+		}
 		else = {
 			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = scope:pod_combat_morale_deal_total }
 		}
@@ -414,6 +431,9 @@ POD_execute_combat_move = {
 	# agg_damage); else superficial (caps at max_hp - agg_damage).
 	# Rider-gated (see §7) on heal_condition - drain heals get
 	# heal_condition=on_hp_damage auto-emitted by the generator's `drain` token.
+	# team_all has no broadcast arm here (nor in §10/§12b): a heal reaching both
+	# sides would mend the enemies the same move just hit. It falls to the actor
+	# self-heal else, and the generator lint rejects the combination outright.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_heal }
@@ -543,12 +563,44 @@ POD_execute_combat_move = {
 		pod_combat_apply_team_ally_buffs_effect = { STORY = $STORY$ }
 	}
 
+	# ── 12c. Marker character modifier ───────────────────────────
+	# Stamps a persistent marker on the actor that LATER moves read through the
+	# has_modifier condition predicate. Deliberately after §2b, so a move never
+	# satisfies its own condition; the payoff is cross-move.
+	# The switch exists because CK3 needs a literal for add_character_modifier -
+	# marker_modifier holds a flag, which cannot be interpolated into the key.
+	# Mirrors the generated pod_combat_cond_has_modifier_trigger; a new key needs
+	# a case in both, plus removal in the two teardown effects and slot init.
+	# days = 30 is only a leak backstop (a fight resolves within the same day);
+	# combat teardown is what normally strips it.
+	if = {
+		limit = {
+			$STORY$ = { has_variable = marker_modifier }
+			has_variable = pod_combat_actor_char
+		}
+		switch = {
+			trigger = $STORY$.var:marker_modifier
+			flag:pod_combat_anima_flare = {
+				var:pod_combat_actor_char = {
+					add_character_modifier = {
+						modifier = pod_combat_anima_flare
+						days     = 30
+					}
+				}
+			}
+		}
+	}
+
 	# ── 13. Retaliation stances ──────────────────────────────────
 	# Arms a reaction that fires in §15 next turn when the actor is attacked.
 	#   retaliate_if_hit - fires on contact (hp_damage/guard_blocked/soaked).
 	#                         Thorns: any attack reaching the defender counters,
 	#                         even if soak/guard absorbed it.
 	#   retaliate_if_missed - fires on evasion (missed/dodged/stealthed). Riposte.
+	#   retaliate_if_attacked - fires on ANY resolved attack, hit or miss (and on
+	#                         immunity, which belongs to neither partition). One
+	#                         charge: a specific stance above answers first and
+	#                         holds this one. See pod_combat_check_retaliation_effect.
 	# Amount fallback, agg marking, and kind seeding: see
 	# pod_combat_arm_retaliation_effect (the canonical contract).
 	if = {
@@ -558,6 +610,10 @@ POD_execute_combat_move = {
 	if = {
 		limit = { $STORY$ = { has_variable = retaliate_if_missed } }
 		pod_combat_arm_retaliation_effect = { STORY = $STORY$ WHEN = miss }
+	}
+	if = {
+		limit = { $STORY$ = { has_variable = retaliate_if_attacked } }
+		pod_combat_arm_retaliation_effect = { STORY = $STORY$ WHEN = any }
 	}
 
 	# ── 13b. Damage-over-Time application ─────────────────────────
@@ -663,9 +719,13 @@ POD_execute_combat_move = {
 
 	# Bonus AP refund when the condition held (set §2b). The generator caps
 	# bonus_value below ap_cost, so the move still costs at least 1 AP net.
+	# The transient lift is what makes the refund visible in the log: the
+	# segment is outcome-style, so it must render only when the bonus actually
+	# fired, never off the move's declared bonus_effect.
 	if = {
 		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:ap_refund } }
 		change_variable = { name = pod_combat_current_ap add = $STORY$.var:bonus_value }
+		set_variable = { name = pod_combat_last_ap_refund value = $STORY$.var:bonus_value }
 	}
 	# AP-drain / init-debuff write the target workspace mirrors; save_target
 	# pushes them to the slot. Consumed at different times:
@@ -747,12 +807,12 @@ POD_execute_combat_move = {
 
 	# ── 15. Retaliation check ────────────────────────────────────
 	# Fire any retaliation the target armed on a previous turn.
-	# Skipped for team_enemy AoE: retaliation can only fire on one workspace
-	# target, so firing it would arbitrarily single out the pre-AoE target.
+	# Skipped for team AoE: retaliation can only fire on one workspace target, so
+	# firing it would arbitrarily single out the pre-AoE target.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_damage }
-			NOT = { $STORY$ = { var:targeting = flag:team_enemy } }
+			$STORY$ = { NOR = { var:targeting = flag:team_enemy  var:targeting = flag:team_all } }
 		}
 		pod_combat_check_retaliation_effect = { TARGET_SIDE = target ACTOR_SIDE = actor }
 	}
@@ -777,6 +837,9 @@ POD_execute_combat_move = {
 				# Energy bonuses apply once at §9b, also after the per-target loop.
 				has_variable = pod_combat_last_energy_gain
 				has_variable = pod_combat_last_energy_drain
+				# Same for the §14 AP refund - without this an AoE move's refund
+				# would land after the last per-target row and never be shown.
+				has_variable = pod_combat_last_ap_refund
 			}
 		}
 		pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
@@ -1021,8 +1084,74 @@ pod_combat_apply_team_enemy_hp_damage_effect = {
 	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
+pod_combat_apply_team_all_hp_damage_effect = {
+	# $STORY$ = move story
+	# The team_enemy sequence (see pod_combat_apply_team_enemy_hp_damage_effect for
+	# the canonical per-iteration pattern and the burst-stealth window) run over
+	# both teams, so the actor's own side takes the hit too. A KO mid-sweep does
+	# not stop the loop - victory is only scored once the whole move completes.
+	#
+	# The CASTER is hit as well, but after the sweep and through the actor
+	# workspace rather than from inside the loop. Sweeping its own slot would put
+	# the same combatant in both workspace sides, and the end-of-move actor flush
+	# rewrites every mirrored slot field from the actor workspace - so the loop's
+	# slot-side writes for the caster would be silently reverted (morale most
+	# visibly; HP survives only because it lives on PoD's wound track, not the
+	# slot). Routing it through the actor side keeps one authoritative copy.
+	save_scope_as = host
+	scope:combat_host = { set_variable = pod_combat_aoe_suppress_stealth_consume }
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_alive_trigger = yes
+			pod_combat_aoe_team_all_sweep_filter_trigger = yes
+		}
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			pod_combat_apply_single_hp_damage_effect = { STORY = $STORY$ TARGET_SIDE = target }
+			if = {
+				limit = { pod_combat_result_code_indicates_hp_damage_trigger = yes }
+				set_variable = pod_combat_aoe_any_hp_damage
+			}
+		}
+		pod_combat_save_target_to_story_effect = yes
+		pod_combat_aoe_check_target_alive_effect = yes
+		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
+	}
+	# The caster's own share. Bypass-guard and no hit roll - you neither block
+	# nor miss yourself - but PoD still soaks and classifies it, so a caster
+	# immune to its own element shrugs the blast off. The kind seeder is the
+	# literal-flag path (a var-to-var copy would degrade the flag), and it always
+	# writes, defaulting to flag:duel, so the switch never reads an unset var.
+	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_team_all_self_kind }
+	pod_combat_deal_typed_retal_damage_effect = {
+		TARGET_SIDE = actor
+		AMOUNT      = $STORY$.var:hp_damage
+		KIND_VAR    = pod_combat_team_all_self_kind
+	}
+	remove_variable = pod_combat_team_all_self_kind
+	# Surface it through the existing recoil rider, which is what makes the §16
+	# wrap-up row fire for an AoE. Additive: a team_all move may also carry a
+	# self_damage rider, and the two would otherwise overwrite each other.
+	if = {
+		limit = { scope:damage_dealt > 0 }
+		if = {
+			limit = { has_variable = pod_combat_last_self_damage }
+			change_variable = { name = pod_combat_last_self_damage add = scope:damage_dealt }
+		}
+		else = {
+			set_variable = { name = pod_combat_last_self_damage value = scope:damage_dealt }
+		}
+	}
+	scope:combat_host = { remove_variable = pod_combat_aoe_suppress_stealth_consume }
+	pod_combat_consume_actor_stealth_effect = { ACTOR_SIDE = actor }
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
+}
+
 # Arm one retaliation stance on the actor's workspace. $STORY$ = move story;
-# $WHEN$ = hit | miss (the pod_combat_actor_retaliate_<WHEN>* var family).
+# $WHEN$ = hit | miss | any (the pod_combat_actor_retaliate_<WHEN>* var family).
+# Take-strongest compares within one family only, so an `any` charge never
+# displaces - nor is displaced by - an armed hit/miss charge.
 # Amount fallback: retaliate_damage -> hp_damage -> 1; the final 1 covers a
 # move arming with neither var, else the workspace var stays unset and the
 # §15 has_variable gate silently swallows the reaction. Kind precedence:
@@ -1106,6 +1235,32 @@ pod_combat_apply_team_enemy_morale_damage_effect = {
 		pod_combat_aoe_check_target_alive_effect = yes
 		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
 	}
+	scope:host = { pod_combat_reload_selected_target_effect = yes }
+}
+
+pod_combat_apply_team_all_morale_damage_effect = {
+	# $STORY$ = move story
+	# The team_enemy morale twin over both teams, with the caster's share applied
+	# actor-side after the sweep for the reason documented on
+	# pod_combat_apply_team_all_hp_damage_effect. Morale is the field that makes
+	# that routing mandatory rather than merely tidy: slot_morale is rewritten
+	# from the actor workspace at end of move, so a slot-side self-write is lost.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_alive_trigger = yes
+			pod_combat_aoe_team_all_sweep_filter_trigger = yes
+		}
+		pod_combat_load_target_from_story_effect = yes
+		scope:host = {
+			pod_combat_deal_morale_damage_effect = { TARGET_SIDE = target AMOUNT = scope:pod_combat_morale_deal_total }
+		}
+		pod_combat_save_target_to_story_effect = yes
+		pod_combat_aoe_check_target_alive_effect = yes
+		pod_combat_aoe_push_per_target_log_effect = { STORY = $STORY$ }
+	}
+	pod_combat_deal_morale_damage_effect = { TARGET_SIDE = actor AMOUNT = scope:pod_combat_morale_deal_total }
 	scope:host = { pod_combat_reload_selected_target_effect = yes }
 }
 
@@ -1396,6 +1551,49 @@ pod_combat_apply_team_enemy_debuffs_effect = {
 		}
 		# Char-scope soak debuffs LAST (see pod_combat_apply_team_ally_buffs_effect)
 		# - one scope switch after all slot-local writes.
+		var:slot_char = {
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_tier_soak_debuff_round }
+			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_tier_soak_debuff_combat }
+		}
+	}
+}
+
+# team_all only: the caster's share of a broadcast debuff, applied to the actor
+# workspace after the sweep (same routing rationale as the HP applier).
+# Tiers only. bypass_dodge / bypass_stealth describe how the ATTACK meets each
+# victim's defenses, not a debuff the blast inflicts, so self-applying them is
+# meaningless - and breaking the caster's own stealth here, in the pre-damage
+# phase, would also rob the burst of the stealth accuracy it is entitled to.
+pod_combat_apply_team_all_self_debuffs_effect = {
+	pod_combat_apply_workspace_debuff_tiers_effect = { STORY = $STORY$ SIDE = actor }
+}
+
+pod_combat_apply_team_all_debuffs_effect = {
+	# $STORY$ = move story
+	# pod_combat_apply_team_enemy_debuffs_effect over both teams, so a team_all
+	# debuff lands on the caster's own side as well. Same ordering contract:
+	# every slot-local write first, the var:slot_char scope switch last.
+	save_scope_as = host
+	every_in_list = {
+		variable = pod_combat_active_slots
+		limit = {
+			pod_combat_slot_is_alive_trigger = yes
+			pod_combat_aoe_team_all_sweep_filter_trigger = yes
+		}
+		pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_round_tier DST = slot_hit_debuff_round_tier }
+		pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = hit_debuff_combat_tier DST = slot_hit_debuff_combat_tier }
+		if = {
+			limit = { $STORY$ = { has_variable = bypass_dodge } }
+			remove_variable = slot_is_dodging
+		}
+		if = {
+			limit = { $STORY$ = { has_variable = bypass_stealth } }
+			pod_combat_break_stealth_slot_effect = yes
+		}
+		if = {
+			limit = { $STORY$ = { has_variable = remove_guard } }
+			remove_variable = slot_is_guarding
+		}
 		var:slot_char = {
 			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_round_tier DST = pod_combat_tier_soak_debuff_round }
 			pod_combat_upgrade_tier_var_effect = { STORY = $STORY$ SRC = soak_debuff_combat_tier DST = pod_combat_tier_soak_debuff_combat }

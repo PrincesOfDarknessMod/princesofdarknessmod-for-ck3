@@ -57,7 +57,13 @@
 # scenario sharpening (additive weight nudges; tune freely).
 @ai_spirit_gate_wasted    = -25  # physical attack vs an incorporeal target the actor can't hurt (guaranteed whiff)
 @ai_spirit_gate_viable    = 15   # damage move that CAN connect with an incorporeal target
-@ai_aoe_multi_enemy       = 12   # team_enemy damage while 2+ enemies of the actor are alive
+@ai_aoe_multi_enemy       = 12   # team_enemy / team_all damage while 2+ enemies of the actor are alive
+# team_all friendly fire. The three arms stack, so the caster's own share is
+# always priced in and each living teammate makes the move worse: a both-teams
+# nuke should read as a last-one-standing button, not an opener.
+@ai_aoe_ff_self           = -10  # team_all always catches the caster
+@ai_aoe_ff_one_ally       = -15  # team_all damage with 1+ living teammates in the blast
+@ai_aoe_ff_two_ally       = -15  # stacks on the above at 2+ living teammates
 @ai_hitdebuff_advantage   = 10   # hit_debuff aimed at an accurate enemy (drag a real threat down)
 @ai_combat_buff_reward    = 8    # combat-duration buff/debuff early in the fight (outlasts a round buff)
 @ai_cheap_finish_tempo    = 12   # affordable damage when AP is running low (press, don't dawdle on utility)
@@ -1239,6 +1245,9 @@ pod_combat_ai_fold_usable_move_effect = {
 					has_variable = steal_gold
 					has_variable = gain_dread
 					has_variable = bonus_effect
+					# A marker is setup by definition: it pays off only through a
+					# LATER move that reads it via the has_modifier condition.
+					has_variable = marker_modifier
 					has_variable = retaliate_damage
 					has_variable = retaliate_morale
 				}
@@ -1901,6 +1910,7 @@ pod_combat_ai_score_candidate_effect = {
 					has_variable = stealth
 					has_variable = retaliate_if_hit
 					has_variable = retaliate_if_missed
+					has_variable = retaliate_if_attacked
 					has_variable = gain_dread
 					has_variable = steal_gold
 				}
@@ -2001,7 +2011,7 @@ pod_combat_ai_score_candidate_effect = {
 		if = {
 			limit = {
 				pod_combat_move_has_independent_payload_trigger = { STORY = scope:ai_candidate_move }
-				NOR = { var:targeting = flag:team_ally  var:targeting = flag:team_enemy  var:targeting = flag:single_ally }
+				NOR = { var:targeting = flag:team_ally  var:targeting = flag:team_enemy  var:targeting = flag:team_all  var:targeting = flag:single_ally }
 				pod_combat_ai_candidate_has_redundant_rider_trigger = yes
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_partial_waste }
@@ -2122,15 +2132,13 @@ pod_combat_ai_score_candidate_effect = {
 				has_variable = hp_damage
 				pod_combat_class_always_aggravated_trigger = yes
 				pod_combat_ai_candidate_targets_enemy_trigger = yes
-				# Fire/balefire do NOT bypass soak vs the incorporeal (wraith/spirit): they
-				# scorch but don't rend, and non-aggravated damage is soakable. Withhold the
-				# bonus there; true-agg and the other classes bypass regardless of form.
+				# Fire does NOT bypass soak vs the incorporeal (wraith/spirit): it scorches
+				# but doesn't rend, and non-aggravated damage is soakable. Withhold the bonus
+				# there. Balefire is deliberately NOT in this carve-out - Wyrm-fire sears the
+				# bodiless too - and true-agg / lightning bypass regardless of form.
 				NOT = {
 					AND = {
-						OR = {
-							var:damage_type = flag:fire
-							var:damage_type = flag:balefire
-						}
+						var:damage_type = flag:fire
 						scope:combat_host = { has_variable = pod_combat_target_incorporeal_spirit }
 					}
 				}
@@ -2234,6 +2242,10 @@ pod_combat_ai_score_candidate_effect = {
 		# the 22 cost 0 AP and are already excluded by the ap_cost > 0 clause, but
 		# time_out_of_time is COSTED (minor) and grants 1, so this guard is what keeps
 		# the arithmetic exact rather than merely redundant.
+		# A bonus_effect = ap_refund whose condition holds right now refunds the same
+		# way, so it earns the same exemption - but only while the condition holds,
+		# which is what pod_combat_ai_bonus_met records (refreshed for every bonus
+		# move by pod_combat_ai_precompute_bonus_met_effect just before this walk).
 		if = {
 			limit = {
 				# A move that spends no AP cannot strand any. Explicit rather than relying on
@@ -2242,6 +2254,13 @@ pod_combat_ai_score_candidate_effect = {
 				# does not enforce in either direction.
 				var:ap_cost > 0
 				NOT = { has_variable = ap_gain }
+				# Positive guard around the flag compare: boolean blocks do not
+				# short-circuit, so reading var:bonus_effect unguarded would warn on
+				# every move without one (564 of 570).
+				trigger_if = {
+					limit = { has_variable = pod_combat_ai_bonus_met  has_variable = bonus_effect }
+					NOT = { var:bonus_effect = flag:ap_refund }
+				}
 				var:ap_cost < scope:combat_host.var:pod_combat_current_ap
 				var:ap_cost > scope:combat_host.var:pod_combat_ai_ap_strand_floor
 			}
@@ -2496,16 +2515,23 @@ pod_combat_ai_score_candidate_effect = {
 		}
 		# Swinging into an armed counter costs the actor on the way in.
 		# retaliate_hit fires when the attack LANDS (the common case for a damage
-		# move), so retaliate_miss is deliberately not folded in here. has_variable
-		# never derefs, so the value mirror needs no guard.
+		# move), so retaliate_miss is deliberately not folded in here. The any-charge
+		# IS folded in: it answers every resolved swing, contact included, so it
+		# deters at least as strongly as an armed hit-charge. has_variable never
+		# derefs, so the value mirror needs no guard.
 		# single_enemy ONLY: move phase 15 skips retaliation entirely on team_enemy
-		# (it cannot pick which target counters), so an AoE is the correct answer
-		# to an armed counter, not a worse one.
+		# and team_all (neither can pick which target counters), so an AoE is the
+		# correct answer to an armed counter, not a worse one.
 		if = {
 			limit = {
 				has_variable = hp_damage
 				var:targeting = flag:single_enemy
-				scope:combat_host = { has_variable = pod_combat_target_retaliate_hit }
+				scope:combat_host = {
+					OR = {
+						has_variable = pod_combat_target_retaliate_hit
+						has_variable = pod_combat_target_retaliate_any
+					}
+				}
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_into_armed_retaliation }
 		}
@@ -2518,6 +2544,7 @@ pod_combat_ai_score_candidate_effect = {
 				OR = {
 					has_variable = retaliate_if_hit
 					has_variable = retaliate_if_missed
+					has_variable = retaliate_if_attacked
 				}
 				scope:combat_host = { pod_combat_ai_actor_is_wounded_trigger = yes }
 			}
@@ -2564,7 +2591,10 @@ pod_combat_ai_score_candidate_effect = {
 		if = {
 			limit = {
 				has_variable = hp_damage
-				var:targeting = flag:team_enemy
+				OR = {
+					var:targeting = flag:team_enemy
+					var:targeting = flag:team_all
+				}
 				scope:combat_host = {
 					any_in_list = {
 						variable = pod_combat_active_slots
@@ -2575,6 +2605,53 @@ pod_combat_ai_score_candidate_effect = {
 				}
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_aoe_multi_enemy }
+		}
+		# team_all friendly fire, the mirror of the bonus above. The first arm is
+		# unconditional: team_all always catches its own caster, so every such
+		# move carries that cost. The next two count LIVING TEAMMATES also caught
+		# in the blast (own team, minus the actor's own slot by position).
+		# Stacking arms rather than one scaled penalty, to stay in the
+		# additive-nudge idiom the rest of the walk uses. The actor is addressed
+		# by team+position, not the scope:host current-actor matcher - the
+		# scoring walk never saves scope:host.
+		if = {
+			limit = {
+				OR = { has_variable = hp_damage  has_variable = morale_damage }
+				var:targeting = flag:team_all
+			}
+			change_variable = { name = pod_combat_ai_score  add = @ai_aoe_ff_self }
+		}
+		if = {
+			limit = {
+				OR = { has_variable = hp_damage  has_variable = morale_damage }
+				var:targeting = flag:team_all
+				scope:combat_host = {
+					any_in_list = {
+						variable = pod_combat_active_slots
+						count >= 1
+						var:combat_team = scope:combat_host.var:pod_combat_current_actor_team
+						NOT = { var:team_position = scope:combat_host.var:pod_combat_current_actor_position }
+						pod_combat_slot_is_alive_trigger = yes
+					}
+				}
+			}
+			change_variable = { name = pod_combat_ai_score  add = @ai_aoe_ff_one_ally }
+		}
+		if = {
+			limit = {
+				OR = { has_variable = hp_damage  has_variable = morale_damage }
+				var:targeting = flag:team_all
+				scope:combat_host = {
+					any_in_list = {
+						variable = pod_combat_active_slots
+						count >= 2
+						var:combat_team = scope:combat_host.var:pod_combat_current_actor_team
+						NOT = { var:team_position = scope:combat_host.var:pod_combat_current_actor_position }
+						pod_combat_slot_is_alive_trigger = yes
+					}
+				}
+			}
+			change_variable = { name = pod_combat_ai_score  add = @ai_aoe_ff_two_ally }
 		}
 		# Drag a genuinely accurate enemy's hit chance down (debuff-side
 		# mirror of the self hit-buff-when-low bonus).
