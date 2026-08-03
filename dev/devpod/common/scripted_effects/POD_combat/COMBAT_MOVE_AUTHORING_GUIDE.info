@@ -1,0 +1,1787 @@
+# Combat Move Authoring Guide
+
+This guide is for a move designer adding or changing combat moves.
+
+To look up what a setter or flag accepts rather than read the whole workflow,
+use `COMBAT_MOVE_QUICK_REFERENCE.info`. It is all tables: every constructor
+parameter and setter with its allowed values, the complete presence-flag set,
+the targeting broadcast matrix, and the silent-failure list.
+
+A combat move is not defined by one block. A normal move is a small set of
+records connected by one stable key:
+
+1. A move story in the move registry.
+2. One shared character-scoped unlock rule.
+3. One runtime dispatcher leaf that calls that rule.
+4. One hidden decision for art and unmet-requirement text.
+5. Three localization keys.
+6. One increment to the combat move version after gameplay changes.
+
+The runtime already knows how to execute the supported costs, targeting modes,
+damage classes, healing, stances, modifiers, control effects, conditions,
+retaliation, damage over time, and summons documented below. A normal move
+author combines those existing pieces. If the design needs a behavior that is
+not represented here, treat it as a combat-engine feature rather than trying
+to invent a new variable in the move block.
+
+## 1. Files edited for a normal move
+
+Paths in this guide are relative to `devpod/`.
+
+| File | Required edit |
+|---|---|
+| `common/scripted_effects/POD_combat/pod_combat_move_list_effects.txt` | Add the move constructor and its setter block. |
+| `common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt` | Add the shared unlock rule and a dispatcher leaf. |
+| `common/decisions/POD_Combat/pod_combat_move_decisions.txt` | Add the hidden presentation decision. |
+| `localization/english/gui/POD_combat_moves_l_english.yml` | Add the name, dynamic description, and flavor tooltip. |
+| `common/script_values/pod_combat_values.txt` | Increment `POD_current_combat_version` after a gameplay change. |
+
+Additional files are conditional:
+
+| File | Edit it only when |
+|---|---|
+| `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | A `has_trait` or `has_modifier` move condition uses a literal key that is not already in its switch. |
+| `localization/english/gui/POD_combat_static_l_english.yml` | A complex unlock rule introduces a new `custom_tooltip` requirement key. |
+| `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` | A genuinely new optional variable or parametric flag needs validator pairing after spelling, scope, and runtime use have been verified. |
+
+An ordinary move using existing setters does not require edits to the combat
+execution engine, AI scripts, GUI, story-cycle types, game-start actions,
+static combat localization, or error-suppression file.
+
+## 2. Design the move before writing script
+
+Write down these decisions first:
+
+| Design question | Script result |
+|---|---|
+| What is the stable lower-snake-case key? | `SKILL_KEY`, decision ID suffix, trigger suffix, dispatcher flag, and localization suffix. |
+| Which existing family owns it? | `CONFIG` and placement under the matching dispatcher branch. |
+| What is its primary combat role? | `CATEGORY = ATK`, `DEF`, `CTL`, or `PWR`. |
+| Who receives its effects? | `TARGETING`. |
+| Who can equip and use it? | One shared unlock trigger. |
+| How does an offensive effect reach its target? | Delivery capability flags. |
+| What does it cost? | `AP_COST` plus optional resource-cost setters. |
+| What does it do? | Existing `POD_combat_move_set_*` calls. |
+| How often may one actor use it? | Optional `once_per` setter. |
+| How likely is AI use before battlefield adjustments? | `AI_WEIGHT`. |
+| What art and title icon represent it? | Hidden decision picture and localized name icon. |
+| What does the player read? | Display name and one short flavor sentence. |
+
+Do not begin by copying every property from a complicated move. Start with the
+smallest block that expresses the design, then add only the supported
+capabilities and effects it actually needs.
+
+## 3. The identity contract
+
+Choose one stable key, written in lower snake case. This guide uses
+`your_move_key` as a placeholder.
+
+| Purpose | Required form |
+|---|---|
+| Move key | `your_move_key` |
+| Decision ID | `POD_combat_move_your_move_key` |
+| Unlock rule | `pod_combat_move_your_move_key_unlock_trigger` |
+| Dispatcher leaf | `flag:your_move_key` |
+| Localization base key | `POD_combat_move_your_move_key` |
+
+The registry's `DECISION`, the decision block ID, and the three localization
+keys must be identical apart from the `_desc` and `_tooltip` suffixes. The
+registry's `SKILL_KEY`, the dispatcher flag, and the suffix in the unlock-rule
+name must also agree exactly.
+
+Before adding the move, search the editable tree for both:
+
+```text
+your_move_key
+POD_combat_move_your_move_key
+```
+
+The key must be unique. Treat it as permanent once a released save can contain
+it, because saved loadout presets retain the skill-key flag.
+
+`CONFIG` is a separate lower-snake-case identifier. It groups related moves in
+the runtime unlock dispatcher. It does not choose the move's category, picture,
+title icon, or AI behavior.
+
+## 4. Complete normal-move template
+
+This section shows every required record for a straightforward, gated physical
+attack. Replace every placeholder and remove any access predicate the move does
+not need.
+
+### 4.1 Register the move
+
+In
+`common/scripted_effects/POD_combat/pod_combat_move_list_effects.txt`, insert
+the block inside the existing `POD_initialize_combat_moves` initializer's
+`hidden_effect_new_object` block, under the appropriate family section:
+
+```paradox
+	POD_init_combat_move = {
+		DECISION   = POD_combat_move_your_move_key
+		SKILL_KEY  = your_move_key
+		CATEGORY   = ATK
+		CONFIG     = your_config_section
+		AP_COST    = @ap_cost_medium
+		AI_WEIGHT  = 20
+		TARGETING  = single_enemy
+	}
+	scope:new_combat_move = {
+		POD_combat_move_set_flag = { NAME = checks_guard }
+		POD_combat_move_set_flag = { NAME = checks_spirit_gate }
+		POD_combat_move_set_flag = { NAME = checks_stance }
+		POD_combat_move_set_flag = { NAME = requires_hit_roll }
+		POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+	}
+```
+
+Keep `scope:new_combat_move` immediately after its constructor. Each
+constructor replaces the saved `new_combat_move` scope, so separating the two
+blocks can apply setters to the wrong story.
+
+### 4.2 Define the shared unlock rule
+
+In
+`common/scripted_triggers/POD_combat/pod_combat_move_unlock_triggers.txt`, add
+one character-scoped trigger:
+
+```paradox
+pod_combat_move_your_move_key_unlock_trigger = {
+	has_trait = verified_trait_key
+	has_perk = verified_perk_key
+}
+```
+
+Trigger lines at this level are ANDed. Use only identifiers verified in the
+current PoD source or engine documentation.
+
+A move available to every combatant still gets an explicit rule:
+
+```paradox
+pod_combat_move_your_move_key_unlock_trigger = {
+	always = yes
+}
+```
+
+### 4.3 Connect the runtime dispatcher
+
+In the same file, find
+`pod_combat_actor_unlocks_move_trigger`. Locate the outer
+`flag:your_config_section` branch matching the registry's `CONFIG`, then add
+this leaf before that inner switch's `fallback`:
+
+```paradox
+				flag:your_move_key = {
+					$ACTOR$ = {
+						pod_combat_move_your_move_key_unlock_trigger = yes
+					}
+				}
+```
+
+If the configuration section does not exist yet, add a complete outer branch
+before the outer switch's `fallback`:
+
+```paradox
+		flag:your_config_section = {
+			switch = {
+				trigger = $STORY$.var:skill_key
+				flag:your_move_key = {
+					$ACTOR$ = {
+						pod_combat_move_your_move_key_unlock_trigger = yes
+					}
+				}
+				fallback = { always = yes }
+			}
+		}
+```
+
+Both dispatcher levels have permissive safety fallbacks. They are not
+authoring shortcuts. A missing leaf or misspelled `CONFIG` can silently make a
+restricted move available to everyone at runtime while its decision still
+shows the intended requirement.
+
+Every move needs an explicit dispatcher leaf, including a universal move whose
+shared rule is `always = yes`.
+
+### 4.4 Add the hidden decision
+
+In `common/decisions/POD_Combat/pod_combat_move_decisions.txt`, add:
+
+```paradox
+POD_combat_move_your_move_key = {
+	picture = { reference = @texture_atk }
+	is_valid_showing_failures_only = {
+		pod_combat_move_your_move_key_unlock_trigger = yes
+	}
+	decision_group_type = hidden ai_check_interval = 0 confirm_text = blank_line
+}
+```
+
+The hidden decision does not execute the combat move. It supplies:
+
+- The large illustration used by the combat and loadout interfaces.
+- Engine-rendered unmet requirements.
+- The decision identity used by the dynamic move description.
+
+Do not repeat the raw access predicates here. The decision must call the same
+shared unlock trigger as the runtime dispatcher.
+
+Do not add an explicit `desc`. CK3 resolves
+`POD_combat_move_your_move_key_desc` automatically.
+
+Reuse a verified `@texture_*` constant already declared at the top of the file
+where possible. The general fallbacks are:
+
+| Category-style art | Constant |
+|---|---|
+| Attack | `@texture_atk` |
+| Defense | `@texture_def` |
+| Control | `@texture_ctl` |
+| Power | `@texture_pwr` |
+
+If a new art constant is necessary, verify that its `.dds` asset exists before
+declaring the path.
+
+### 4.5 Add localization
+
+In `localization/english/gui/POD_combat_moves_l_english.yml`, add three keys
+under the matching family heading:
+
+```yaml
+ POD_combat_move_your_move_key: "@skill_prowess_icon!Display Name"
+ POD_combat_move_your_move_key_desc: "[PODCombatMoveDesc('POD_combat_move_your_move_key')]"
+ POD_combat_move_your_move_key_tooltip: "#weak;italic One short flavor sentence.#!"
+```
+
+Rules:
+
+- Keep one leading space before every key.
+- Replace `@skill_prowess_icon!` with a verified discipline, splat, or family
+  icon when appropriate.
+- Keep the name bare. The interface appends the current AP cost.
+- Keep the `_desc` expression unchanged except for the decision ID.
+- Use `_tooltip` for concise, player-facing flavor, not a duplicate stat list.
+- Escape or restructure text that would break localization quoting.
+
+The category, configuration section, decision picture, and localized title
+icon are independent choices. Setting `CONFIG = potence`, for example, does
+not automatically choose Potence art or `@potence_icon!`.
+
+### 4.6 Increment the move version
+
+In `common/script_values/pod_combat_values.txt`, find:
+
+```paradox
+POD_current_combat_version = <current integer>
+```
+
+After adding, removing, or changing gameplay data for a move, increase the
+integer that is current at integration time by exactly one. It is a revision
+number, not a move count.
+
+Do not bump it for documentation-only edits. Pure display-name, flavor, or
+picture changes do not require the move stories to be rebuilt, although the
+game still needs to reload the edited files.
+
+## 5. A live move to compare against
+
+`potent_strike` is a compact example of the complete relationship:
+
+| Record | Value |
+|---|---|
+| `SKILL_KEY` | `potent_strike` |
+| Decision | `POD_combat_move_potent_strike` |
+| Category | `ATK` |
+| Configuration | `potence` |
+| Target | `single_enemy` |
+| Access | `has_trait = potencediscipline` |
+| Picture | `@texture_potence` |
+| Title icon | `@potence_icon!` |
+
+Its registry block uses the four physical delivery flags and
+`POD_combat_move_set_hp_damage`. Its hidden decision and runtime dispatcher
+both call `pod_combat_move_potent_strike_unlock_trigger`. Its localization uses
+the exact decision ID for all three keys.
+
+Use it to compare structure and placement, not as a source of identifiers for
+an unrelated move.
+
+## 6. Constructor reference
+
+Every move begins with:
+
+```paradox
+POD_init_combat_move = {
+	DECISION   = POD_combat_move_<key>
+	SKILL_KEY  = <key>
+	CATEGORY   = <category>
+	CONFIG     = <configuration>
+	GROUP      = <splat family>
+	AP_COST    = <amount>
+	AI_WEIGHT  = <amount>
+	TARGETING  = <targeting>
+}
+```
+
+| Parameter | Allowed form | Meaning |
+|---|---|---|
+| `DECISION` | `POD_combat_move_<key>` | Hidden decision used for identity, art, and access-failure text. |
+| `SKILL_KEY` | Unique lower-snake-case flag | Stable runtime and saved-preset identity. |
+| `CATEGORY` | `ATK`, `DEF`, `CTL`, `PWR` | Loadout category and category-cap accounting. |
+| `CONFIG` | Existing or newly added dispatcher slug | Outer runtime unlock-dispatch branch. |
+| `GROUP` | One of the 16 splat families (`universal`, `vampire`, `werewolf`, `bastet`, `mokole`, `fera`, `fae`, `demon`, `wraith`, `mummy`, `kueijin`, `hunter`, `sorcerer`, `psychic`, `theurgy`, `truefaith`) | Which kind of character can ever hold this. Drives only the loadout editor's "Show all moves" display filter, never access. Derived from `CONFIG` by the generator's `section_unlock_group()`. |
+| `AP_COST` | Non-negative integer or an existing AP constant | Action points spent on use. Zero is an exceptional, reviewed value. |
+| `AI_WEIGHT` | Positive number | Base AI score before tactical adjustments. |
+| `TARGETING` | Supported targeting flag | Who receives target-directed effects. |
+
+All eight parameters are required.
+
+Optional attributes are represented by absence. Do not add zero-valued setters
+as placeholders unless a documented setter explicitly uses `0` as a sentinel,
+such as condition bonus stances.
+
+### 6.1 Categories
+
+Use the category that best describes the move's loadout role:
+
+| Category | Typical role |
+|---|---|
+| `ATK` | Direct physical or supernatural pressure. |
+| `DEF` | Healing, protection, survival, and defensive counters. |
+| `CTL` | Debuffs, denial, tempo disruption, and mind control. |
+| `PWR` | Transformations, supernatural setup, summons, and broad utility. |
+
+Category is not the AI tactical-intent field. The AI infers battlefield intent
+from the move's actual payload.
+
+### 6.2 AP constants
+
+The registry declares shared AP constants near its top:
+
+| Constant | Value |
+|---|---:|
+| `@ap_cost_tiny` | 1 |
+| `@ap_cost_minor` | 2 |
+| `@ap_cost_medium` | 3 |
+| `@ap_cost_major` | 4 |
+| `@ap_cost_massive` | 5 |
+| `@ap_cost_maximum` | 6 |
+
+Prefer these constants for standard costs. Use a raw integer only when the
+move is a deliberate outlier and the reason survives balance review.
+`AP_COST = 0` is supported, but should be reserved for a strongly gated,
+resource-priced, repeat-limited design with a close live peer.
+
+## 7. Targeting
+
+Allowed constructor values are:
+
+| `TARGETING` | Intended use |
+|---|---|
+| `single_enemy` | One selected enemy. This supports the full single-target offensive feature set. |
+| `single_ally` | One living ally other than the actor. Use for focused healing or buffs. |
+| `self` | The actor. Use for self-healing, stances, transformations, and summons. |
+| `team_enemy` | Every living enemy. Use only effects known to broadcast. |
+| `team_ally` | Every living ally, including the actor. Use only effects known to broadcast. |
+| `team_all` | Every living combatant on both sides, the actor included. Damage, morale damage and debuff riders only. Support payloads route to the caster on this mode, so the generator rejects them here. |
+| `single_pc` | The player character. This is a specialized AI-side protection target with no current move examples. Only HP and morale healing explicitly route to the PC; tier buffs and stances affect the actor instead. Require focused engine and AI review before using it. |
+
+### 7.1 Team-target compatibility
+
+Team targeting is not a generic loop around every setter.
+
+Safe `team_enemy` payloads:
+
+- Direct HP damage.
+- Direct morale damage.
+- Soak and hit debuffs.
+- Guard removal.
+
+Safe `team_ally` payloads:
+
+- HP healing.
+- Morale healing.
+- Soak and hit buffs.
+- Guard, dodge, and stealth stances.
+
+Safe `team_all` payloads are the `team_enemy` list above, and nothing more. It
+covers both sides **including the caster**, so a heal or buff on it would strike
+everyone and then mend or strengthen only the caster; the generator's
+`team_all_support` check is a hard error rather than a warning for that reason.
+Retaliation never fires against a `team_all` move, exactly as with `team_enemy`.
+
+Price the self-hit in. The caster takes the move's own `hp_damage` and
+`morale_damage`, classified by its `damage_type`, so a caster immune to its own
+element shrugs it off and everyone else does not. `bypass_dodge` and
+`bypass_stealth` are the one exception to "everyone": they describe how the
+attack meets a victim's defenses, so they are not turned on their own caster.
+
+The following remain single-target or selected-workspace effects and should not
+be presented as team-wide without engine work:
+
+- AP drain.
+- Initiative debuff.
+- Gold theft.
+- Mind control.
+- Energy drain.
+- Damage over time.
+- Conditional `heal_target`.
+- Conditional `hit`.
+
+`on_hp_damage` riders can use the team attack's aggregate "any target took HP
+damage" result. `on_contact` and `on_miss` are not meaningful aggregate
+per-target reports for a team move.
+
+Use `single_enemy` for mind control and all damage-over-time designs.
+
+A state condition on a team move is evaluated once against the loaded
+workspace, not once per recipient. `TARGET = user` and `global` can be
+appropriate. `TARGET = target` or `relational` describes only the currently
+loaded target and must not be presented as an each-recipient test.
+
+Do not combine `team_enemy` with `requires_control_contact` and assume that
+every recipient must pass contact. Team debuffs and stance stripping broadcast
+before the one-workspace contact check. Such a design needs focused engine
+review or must be reduced to `single_enemy`.
+
+## 8. Delivery capability flags
+
+Offensive moves are assembled from capability flags. There is no single
+"attack type" property.
+
+Add a presence flag with:
+
+```paradox
+POD_combat_move_set_flag = { NAME = <supported_flag> }
+```
+
+Never invent a flag name. A misspelled name creates an unused story variable
+and usually produces no gameplay behavior.
+
+### 8.1 Standard physical contact
+
+Use all four flags:
+
+```paradox
+POD_combat_move_set_flag = { NAME = checks_guard }
+POD_combat_move_set_flag = { NAME = checks_spirit_gate }
+POD_combat_move_set_flag = { NAME = checks_stance }
+POD_combat_move_set_flag = { NAME = requires_hit_roll }
+```
+
+This produces the normal physical pipeline:
+
+- A hit roll is required.
+- Dodge and stealth can interfere.
+- Guard can block the move and be consumed.
+- The physical spirit-contact gate applies.
+
+Guard bypass is represented by the absence of `checks_guard`. There is no
+separate guard-bypass flag.
+
+### 8.2 Supernatural automatic contact
+
+For a supernatural effect that should auto-hit, ignore guard, and ignore the
+physical spirit gate while still respecting stance interaction, use:
+
+```paradox
+POD_combat_move_set_flag = { NAME = checks_stance }
+```
+
+Do not add `requires_hit_roll`, `checks_guard`, or `checks_spirit_gate` unless
+the specific fiction and mechanics call for them.
+
+### 8.3 Direct morale attacks
+
+Direct morale damage uses its own auto-hit, no-guard, no-soak path. It remains
+aware of dodge and stealth. The normal authored form includes
+`checks_stance`, but does not add the physical hit-roll, guard, or spirit-gate
+flags unless the move also has an HP/contact payload that needs them.
+
+### 8.4 Pure control
+
+A move with no direct HP or morale payload is guaranteed unless it explicitly
+requires control contact.
+
+For contact-based control:
+
+```paradox
+POD_combat_move_set_flag = { NAME = requires_control_contact }
+POD_combat_move_set_flag = { NAME = checks_stance }
+```
+
+Add `requires_hit_roll`, `checks_guard`, and `checks_spirit_gate` when the
+control effect should behave like physical contact. Omit
+`requires_control_contact` when the control effect is intentionally
+guaranteed. Delivery flags by themselves do not gate a pure-control move.
+
+### 8.5 Delivery overrides
+
+| Flag | Effect |
+|---|---|
+| `bypass_dodge` | Strip the target's Dodge stance, then bypass it. This is destructive even when `checks_stance` is absent. |
+| `bypass_stealth` | Break the target's Stealth stance, then bypass it. This is destructive even when `checks_stance` is absent. |
+| Omit `checks_guard` | Guard does not block the move. |
+| Omit `requires_hit_roll` | The relevant HP/contact path does not roll to hit. |
+| Omit `checks_spirit_gate` | The physical spirit-contact gate does not apply. |
+
+Use overrides only when the move's fiction clearly earns them. An auto-hit,
+guard-bypassing, stance-bypassing attack removes several defensive answers and
+must be priced or gated accordingly.
+
+## 9. Resource-cost setters
+
+AP cost belongs in the constructor. Additional costs go in
+`scope:new_combat_move`:
+
+```paradox
+POD_combat_move_set_energy_cost   = { VALUE = @energy_cost_minor }
+POD_combat_move_set_stress_cost   = { VALUE = @stress_cost_minor }
+POD_combat_move_set_gold_cost     = { VALUE = @gold_cost_minor }
+POD_combat_move_set_prestige_cost = { VALUE = @prestige_cost_minor }
+POD_combat_move_set_piety_cost    = { VALUE = @piety_cost_minor }
+```
+
+Available shared constants:
+
+| Resource | Constants and values |
+|---|---|
+| Energy | `@energy_cost_tiny` through `@energy_cost_maximum` = 1 through 6; `@energy_cost_seven`, `eight`, `nine`, `ten` = 7 through 10. |
+| Stress | `@stress_cost_minor` = 10, `medium` = 20, `major` = 40, `massive` = 80. |
+| Gold | `@gold_cost_minor` = 15, `medium` = 50, `major` = 150, `massive` = 500. |
+| Prestige | `@prestige_cost_minor` = 50, `medium` = 100, `major` = 250, `massive` = 500. |
+| Piety | `@piety_cost_minor` = 50, `medium` = 100, `major` = 250, `massive` = 500. |
+
+Energy is splat-agnostic at execution time. The shared unlock rule must ensure
+that the intended user actually has the relevant supernatural capability and
+resource context.
+
+Stress, gold, prestige, and piety are campaign-facing costs. Review AI use
+carefully when adding them; do not assume a player-only cost is meaningful
+balance for non-player combatants.
+
+## 10. Damage and healing
+
+### 10.1 HP damage
+
+```paradox
+POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+```
+
+Shared damage constants run from 1 through 6:
+
+| Constant | Damage |
+|---|---:|
+| `@damage_tiny` | 1 |
+| `@damage_minor` | 2 |
+| `@damage_medium` | 3 |
+| `@damage_major` | 4 |
+| `@damage_massive` | 5 |
+| `@damage_maximum` | 6 |
+
+This setter also stamps `superficial` as the damage class.
+
+### 10.2 Damage class
+
+To use another class, call the class setter after the HP-damage setter:
+
+```paradox
+POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+POD_combat_move_set_damage_class = { VALUE = fire }
+```
+
+Calling the class setter first is wrong because the later HP-damage setter
+would overwrite it with `superficial`.
+
+Supported classes:
+
+- `aggravated`
+- `fire`
+- `cold`
+- `lightning`
+- `sun`
+- `silver`
+- `gold`
+- `holy`
+- `balefire`
+- `poison`
+- `cold_iron`
+
+`aggravated` forces aggravated treatment for every target. Elemental or bane
+classes pass their reason into PoD's health system, which resolves immunity,
+downgrade, and splat-specific behavior per target.
+
+### 10.3 Morale damage
+
+```paradox
+POD_combat_move_set_morale_damage = { VALUE = @morale_damage_minor }
+```
+
+The morale constants `@morale_damage_tiny` through
+`@morale_damage_maximum` equal 1 through 6.
+
+### 10.4 Self-damage
+
+```paradox
+POD_combat_move_set_self_damage = { VALUE = @self_damage_tiny }
+```
+
+Available self-damage constants are:
+
+- `@self_damage_tiny` = 1
+- `@self_damage_minor` = 2
+- `@self_damage_medium` = 3
+
+Self-damage is a real drawback, not flavor text. Test it on a nearly defeated
+actor and with every rider condition the move uses.
+
+### 10.5 HP healing
+
+```paradox
+POD_combat_move_set_hp_heal = {
+	VALUE = @healing_minor
+	TYPE = superficial
+}
+```
+
+Supported healing types:
+
+- `superficial`
+- `aggravated`
+
+Shared healing constants run from `@healing_tiny` = 1 through
+`@healing_massive` = 5.
+
+Aggravated healing is much more valuable because it also reduces aggravated
+damage. Price and gate it accordingly.
+
+### 10.6 Morale healing
+
+```paradox
+POD_combat_move_set_morale_heal = { VALUE = @morale_heal_minor }
+```
+
+Use an existing morale-heal constant visible in the registry rather than
+inventing a new constant name.
+
+### 10.7 Campaign-facing outcome setters
+
+```paradox
+POD_combat_move_set_steal_gold = { VALUE = 15 }
+POD_combat_move_set_gain_dread = { VALUE = 10 }
+```
+
+These are specialized, player-character-facing outcomes. Keep them
+single-target, verify their target semantics, and test both player and AI
+actors.
+
+## 11. Outcome riders
+
+HP healing, morale damage, and self-damage default to unconditional application
+when present. Use a rider-condition setter to tie one of them to the preceding
+HP/contact result:
+
+```paradox
+POD_combat_move_set_heal_condition = { VALUE = on_hp_damage }
+POD_combat_move_set_morale_damage_condition = { VALUE = on_contact }
+POD_combat_move_set_self_damage_condition = { VALUE = on_miss }
+```
+
+Supported values:
+
+| Value | Meaning |
+|---|---|
+| `always` | Apply regardless of the offensive result. Usually omit the setter because this is the default. |
+| `on_hp_damage` | Apply only if HP damage was actually dealt. |
+| `on_contact` | Apply on damaging contact, including fully soaked or guard-blocked contact. |
+| `on_miss` | Apply when the move misses or is evaded. |
+
+Choose the result that matches the fiction. A life-drain heal should normally
+use `on_hp_damage`, not `on_contact`, because a fully soaked strike did not
+provide vitality to steal.
+
+`POD_combat_move_set_heal_condition` gates HP healing only. Morale healing has
+no rider-condition setter and remains unconditional. The non-`always` rider
+values read HP/contact result axes; a morale-only move does not establish those
+axes from its morale delivery and must not use them as though they described
+the morale result.
+
+## 12. Tiered buffs and debuffs
+
+Tier values are:
+
+| Tier | Name | Default magnitude |
+|---|---|---:|
+| `1` | Small | 10 |
+| `2` | Medium | 20 |
+| `3` | Large | 30 |
+
+Round-duration setters:
+
+```paradox
+POD_combat_move_set_soak_buff_round   = { TIER = 1 }
+POD_combat_move_set_soak_debuff_round = { TIER = 1 }
+POD_combat_move_set_hit_buff_round    = { TIER = 1 }
+POD_combat_move_set_hit_debuff_round  = { TIER = 1 }
+```
+
+Combat-duration setters:
+
+```paradox
+POD_combat_move_set_soak_buff_combat   = { TIER = 1 }
+POD_combat_move_set_soak_debuff_combat = { TIER = 1 }
+POD_combat_move_set_hit_buff_combat    = { TIER = 1 }
+POD_combat_move_set_hit_debuff_combat  = { TIER = 1 }
+```
+
+The engine applies upgrade-only behavior for repeated tier states. Test a move
+against an existing weaker, equal, and stronger tier rather than assuming
+repeated uses stack numerically.
+
+## 13. Stances, control, tempo, and repeat limits
+
+### 13.1 Presence-only state flags
+
+Use the generic flag setter only with a supported runtime name:
+
+```paradox
+POD_combat_move_set_flag = { NAME = set_guard }
+```
+
+Supported move-state and outcome flags include:
+
+| Flag | Meaning |
+|---|---|
+| `set_guard` | Apply Guard. It blocks the next incoming move that checks guard, then is consumed. |
+| `dodge` | Apply the Dodge stance. |
+| `stealth` | Apply the Stealth stance. |
+| `remove_guard` | Strip Guard from the hostile target. |
+| `mind_control` | Steal the target's next AI turn when its mental defenses do not resist. Players are immune. Keep it `single_enemy`. |
+| `drain` | Mark a damage-plus-healing move as a drain for presentation and AI understanding. |
+| `is_starter_move` | Include the move in default player loadout seeding. |
+| `retaliate_if_hit` | Arm a one-use counter that fires when an incoming HP-damage move makes contact. |
+| `retaliate_if_missed` | Arm a one-use counter that fires when an incoming HP-damage move misses or is evaded. |
+| `retaliate_if_attacked` | Arm a one-use counter that fires on any resolved incoming HP-damage move, contact or evasion. One charge, not two. |
+| `dot_morale` | Make the move's damage-over-time ticks harm morale rather than HP. |
+| `summon_hostile` | Seat the summoned creature on the side opposite the caster. |
+
+Delivery flags from section 8 use the same setter.
+
+Do not mark a restricted move as `is_starter_move` without reviewing default
+loadout seeding. The seeder does not re-check the move's unlock rule. Starter
+status is a combat-wide authoring decision, not a synonym for "basic" or
+"first tier," and it does not make the move's runtime access universal.
+
+Mind control affects AI-controlled targets only. A player target is immune,
+and strong mental defenses resist unless the caster has the supported bypass.
+For a pure mind-control move, add `requires_control_contact` and the intended
+delivery flags if the effect should not be guaranteed.
+
+### 13.2 AP and initiative
+
+```paradox
+POD_combat_move_set_ap_gain = { VALUE = 1 }
+POD_combat_move_set_ap_drain = { VALUE = 2 }
+POD_combat_move_set_initiative_debuff = { VALUE = 2 }
+```
+
+AP gain affects the user. AP drain and initiative debuff affect the selected
+target and are not team broadcasts.
+
+Repeated AP drains keep the largest pending drain rather than adding together.
+Initiative debuffs add together within the round. Account for that difference
+when pricing repeatable tempo moves.
+
+Any move capable of a net-positive AP loop needs a meaningful resource cost,
+a repeat limit, and adversarial testing. A conditional AP refund must remain
+strictly below the move's AP cost so a successful use still costs at least one
+AP.
+
+### 13.3 Once-per limits
+
+```paradox
+POD_combat_move_set_once_per = { DURATION = round }
+```
+
+or:
+
+```paradox
+POD_combat_move_set_once_per = { DURATION = combat }
+```
+
+The limit is tracked per actor and per move.
+
+Use `round` for tempo effects that would otherwise be repeated until the
+target cannot act. Use `combat` for summons, transformations, exceptional
+burst effects, and other actions whose repetition would undermine the design.
+
+## 14. Retaliation
+
+Set the counter amount:
+
+```paradox
+POD_combat_move_set_retaliate_damage = { VALUE = @damage_minor }
+```
+
+Then arm exactly the trigger appropriate to the stance:
+
+```paradox
+POD_combat_move_set_flag = { NAME = retaliate_if_hit }
+```
+
+or:
+
+```paradox
+POD_combat_move_set_flag = { NAME = retaliate_if_missed }
+```
+
+or, for a counter that answers either outcome:
+
+```paradox
+POD_combat_move_set_flag = { NAME = retaliate_if_attacked }
+```
+
+Optional counter typing:
+
+```paradox
+POD_combat_move_set_retaliate_agg = yes
+```
+
+or:
+
+```paradox
+POD_combat_move_set_retaliate_morale = yes
+```
+
+An elemental damage class on the move can also supply the retaliation class.
+Morale retaliation takes precedence over HP class choices.
+
+The armed counter applies to the actor for the next incoming qualifying move.
+It is checked only against an incoming move with an HP-damage payload, and
+never against `team_enemy` or `team_all`; morale-only attacks do not trigger
+it. Re-arming keeps the stronger pending counter amount rather than replacing
+it with a weaker one, comparing within one charge family only. Use a repeat
+limit where repeatedly rearming it in one turn would be abusive.
+
+The three flags are three independent charges, so pairing `retaliate_if_hit`
+with `retaliate_if_missed` arms two counters that can each fire once across two
+incoming attacks. `retaliate_if_attacked` is the single charge that covers both
+outcomes (and an attack shrugged off by immunity, which belongs to neither
+partition) - prefer it when the intent is "counter whatever comes next". When a
+specific charge and the always-charge are both armed, the specific one answers
+and the always-charge is held rather than spent, so at most one counter fires
+per incoming attack.
+
+## 15. Damage over time
+
+```paradox
+POD_combat_move_set_dot = {
+	AMOUNT = 1
+	ROUNDS = 2
+}
+```
+
+The tick class comes from the move:
+
+- Superficial HP by default.
+- The assigned aggravated or elemental class when present.
+- Morale when `dot_morale` is set.
+
+Damage over time is orthogonal to direct damage. A move may strike immediately
+and seed a continuing effect.
+
+Rules:
+
+- Use `TARGETING = single_enemy`.
+- A new application refreshes or replaces the relevant pending effect; do not
+  balance it as endlessly stacking.
+- A guard-blocked or fully soaked contact can still seed the effect. Miss,
+  dodge, stealth evasion, and spirit-gate failure do not.
+- HP ticks bypass guard and soak after application.
+- Test application, refresh, expiration, target defeat, caster defeat, and
+  elemental or aggravated health behavior.
+- A conditional bonus DoT lasts the shared fixed duration of two rounds.
+
+## 16. Drain recipe
+
+A standard HP drain combines damage, healing, a result rider, and the drain
+flag:
+
+```paradox
+POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+POD_combat_move_set_hp_heal = {
+	VALUE = @healing_tiny
+	TYPE = superficial
+}
+POD_combat_move_set_heal_condition = { VALUE = on_hp_damage }
+POD_combat_move_set_flag = { NAME = drain }
+```
+
+Add the delivery flags separately. If the damage is aggravated or elemental,
+set its class after `POD_combat_move_set_hp_damage`. The heal type does not
+automatically follow the damage class.
+
+## 17. Summons
+
+Use:
+
+```paradox
+POD_combat_move_set_summon = { RECIPE = wraith }
+```
+
+Supported recipes:
+
+- `wraith`
+- `bane`
+- `gaian_spirit`
+- `elemental`
+
+Author normal summons with:
+
+- `TARGETING = self`
+- No direct HP-damage payload.
+- `POD_combat_move_set_once_per = { DURATION = combat }`
+- A meaningful supernatural resource cost.
+
+Add:
+
+```paradox
+POD_combat_move_set_flag = { NAME = summon_hostile }
+```
+
+only when the creature should join the side opposite the caster. Test side
+capacity, no-space behavior, allegiance, initialization, next-round action,
+and combat cleanup. No current live move exercises `summon_hostile`, so require
+focused capability review before shipping it.
+
+## 18. Move-state conditions
+
+A move supports one generalized condition. It can either prevent use or add
+one bonus effect.
+
+### 18.1 Gate condition
+
+A gate makes the move unusable while the condition is false:
+
+```paradox
+POD_combat_move_set_condition = {
+	MODE = gate
+	TARGET = target
+	PREDICATE = hp_missing
+	THRESHOLD = 2
+}
+```
+
+Do not add `POD_combat_move_set_bonus` to a gate move.
+
+### 18.2 Bonus condition
+
+A bonus leaves the base move usable and grants an extra effect when true:
+
+```paradox
+POD_combat_move_set_condition = {
+	MODE = bonus
+	TARGET = target
+	PREDICATE = has_trait
+	THRESHOLD = 0
+}
+POD_combat_move_set_cond_param = { PARAM = vampire }
+POD_combat_move_set_bonus = { EFFECT = energy_drain VALUE = 2 }
+```
+
+A bonus condition must have exactly one supported bonus effect.
+
+### 18.3 Condition targets
+
+| Target | Meaning |
+|---|---|
+| `user` | Evaluate the acting character. |
+| `target` | Evaluate the loaded target; fail if no appropriate target is loaded. |
+| `global` | Evaluate combat-wide or actor-side team state. |
+| `relational` | Evaluate the relationship from user to target. |
+
+### 18.4 Predicates
+
+Boolean predicates use `THRESHOLD = 0`. Numeric predicates use the required
+minimum or missing amount.
+
+| Predicate | Target | Threshold or parameter |
+|---|---|---|
+| `first_round` | `global` | `0` |
+| `round_min` | `global` | Minimum combat round |
+| `undamaged` | `user` or `target` | `0` |
+| `hp_missing` | `user` or `target` | Minimum missing HP boxes |
+| `full_morale` | `user` or `target` | `0` |
+| `morale_missing` | `user` or `target` | Minimum missing morale |
+| `has_guard` | `user` or `target` | `0` |
+| `has_dodge` | `user` or `target` | `0` |
+| `has_stealth` | `user` or `target` | `0` |
+| `prestige_level_min` | `user` or `target` | Minimum prestige level, 0 through 5 |
+| `piety_level_min` | `user` or `target` | Minimum piety level, 0 through 5 |
+| `dread_min` | `user` or `target` | Minimum dread, 0 through 100 |
+| `has_weapon_artifact` | `user` or `target` | `0` |
+| `has_armor_artifact` | `user` or `target` | `0` |
+| `relation_positive` | `relational` | Minimum positive opinion magnitude |
+| `relation_negative` | `relational` | Minimum negative opinion magnitude, written as a positive number |
+| `outnumbered` | `global` | `0` |
+| `ally_knocked_out` | `global` | `0` |
+| `has_trait` | `user` or `target` | `THRESHOLD = 0` plus `cond_param` |
+| `has_modifier` | `user` or `target` | `THRESHOLD = 0` plus `cond_param` naming a marker modifier key (18.7) |
+
+`target_known_secret` is reserved in the evaluator but its literal-key
+dispatcher currently fails closed. Do not author a move with that predicate
+until the dispatcher and its behavior have been implemented and tested as an
+engine feature.
+
+Unknown predicates and unknown identifier parameters fail closed.
+
+### 18.5 Identifier-condition dispatch
+
+`has_trait` and `has_modifier` each need a literal key, because CK3 cannot
+interpolate a variable into `has_trait` or `has_character_modifier`. The
+condition carries that key in `cond_param`:
+
+```paradox
+POD_combat_move_set_cond_param = { PARAM = verified_trait_key }
+```
+
+`common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt`
+holds one sub-dispatch per identifier predicate, each a switch on `cond_param`
+that turns it back into a literal.
+
+The `has_trait` dispatcher supports:
+
+- `vampire`
+- `wraith`
+- `spirit`
+- `psychic`
+
+For another verified trait, add a literal branch inside
+`pod_combat_cond_has_trait_trigger`:
+
+```paradox
+		flag:verified_trait_key = {
+			has_trait = verified_trait_key
+		}
+```
+
+The `has_modifier` dispatcher works the same way, over marker-modifier keys
+instead of traits:
+
+```paradox
+		flag:pod_combat_anima_flare = {
+			has_character_modifier = pod_combat_anima_flare
+		}
+```
+
+Place each new branch before that switch's `fallback = { always = no }`. A
+marker key also needs its definition and the rest of its wiring; see 18.7.
+
+Unknown predicates and unknown identifier parameters fail closed, so a typo
+yields a condition that is never true rather than an error.
+
+After introducing a new literal parameter, check the script validator and
+`error.log`. If it reports the new parametric flag as unmatched, add the exact
+flag to the central suppression driver:
+
+```paradox
+pod_combat_suppress_flag = { FLAG = verified_trait_key }
+```
+
+Do not add suppression merely to hide a real spelling or scope error.
+
+### 18.6 Bonus effects
+
+Supported `EFFECT` values:
+
+| Effect | `VALUE` meaning | Compatibility |
+|---|---|---|
+| `self_heal` | Superficial HP restored to user | Any sensible move |
+| `heal_target` | Superficial HP restored to selected target | Single target |
+| `morale_damage` | Extra morale damage | Hostile target |
+| `damage` | Extra HP damage | Move with an HP-damage path |
+| `change_type` | Changes the HP payload to aggravated | Use `0`; move needs HP damage |
+| `hit` | Added hit chance | Move must use a hit roll |
+| `ap_refund` | AP returned to user | Must remain below `AP_COST` |
+| `ap_drain` | AP removed from selected target | Single target |
+| `stance_guard` | Apply Guard to the actor | Use `0`; actor only |
+| `stance_dodge` | Apply Dodge to the actor | Use `0`; actor only |
+| `stance_stealth` | Apply Stealth to the actor | Use `0`; actor only |
+| `energy_gain` | Energy restored to user | Verify splat/resource behavior |
+| `energy_drain` | Energy removed from selected target | Single target |
+| `dot` | Damage per tick for two rounds | `single_enemy` |
+
+`change_type` and the three stance effects ignore numeric magnitude; pass
+`VALUE = 0`.
+
+`ap_refund` is a refund, not a discount. Both affordability gates read the
+gross `ap_cost`, so a move the actor cannot afford stays unclickable however
+large its refund; the AP comes back only after the move resolves. Keep
+`bonus_value` strictly below the move's `AP_COST` so a successful use still
+costs at least 1 AP net; nothing in the engine clamps it. No live move used
+`ap_refund` before the marker work in 18.7, so treat its runtime path as
+unexercised and test it directly rather than trusting it by analogy with the
+other bonus effects.
+
+### 18.7 Marker modifiers
+
+A marker modifier is the supported way for one move to leave a state a
+*different* move can test. The applying move sets a marker key; a consuming
+move reads it back with the `has_modifier` predicate. Composed with the
+`ap_refund` bonus effect, that expresses "your next actions are cheaper"
+without an AP-cost-modifier layer.
+
+The applier uses one setter:
+
+```paradox
+POD_combat_move_set_marker_modifier = { KEY = pod_combat_anima_flare }
+```
+
+Supported keys are those defined in
+`common/modifiers/pod_combat_modifiers.txt`, currently `pod_combat_anima_flare`
+alone. That file is combat-owned rather than a delta inside PoD's own modifier
+file, so a PoD re-sync cannot drop it.
+
+Rules and limits:
+
+- **The marker applies to the user, never to a target or a team.** A
+  `team_ally` marker move is not supported: the team-ally admissibility arm
+  admits only stance, soak-tier, and hit-tier riders.
+- **A move cannot satisfy its own condition.** The marker is applied in
+  execution section 12c of `POD_execute_combat_move`, well after the condition
+  is evaluated in execution section 2b, so the payoff is always cross-move and
+  always on a later turn.
+- **One condition slot per move.** A move gets one condition, used as a gate
+  or as a bonus, and a bonus carries exactly one effect. Spending it on
+  `has_modifier` plus `ap_refund` means that move can carry no other gate and
+  no other bonus.
+- **CK3 character modifiers are day-scoped, not round-scoped.** Nothing in the
+  engine expires one at end of round, which is why the marker is stripped by
+  combat teardown, re-stripped when a character is seated into a slot, and
+  given a `days = 30` backstop at the apply site for a fight that is abandoned
+  rather than concluded.
+
+### 18.7.1 Worked example: a marker plus a refund
+
+The Terrestrial Exalted "Anima Flare" lights the anima once per combat; the
+Charm moves that follow partially refund their own AP while it burns.
+
+The applier carries the marker setter and `once_per = combat`, and no
+condition of its own:
+
+```paradox
+	POD_combat_move_set_marker_modifier = { KEY = pod_combat_anima_flare }
+	POD_combat_move_set_once_per = { DURATION = combat }
+```
+
+Each consumer spends its condition slot on the marker and pays out a refund
+strictly below its own `AP_COST`, so a successful use still costs at least
+1 AP net:
+
+```paradox
+	POD_combat_move_set_condition = {
+		MODE = bonus
+		TARGET = user
+		PREDICATE = has_modifier
+		THRESHOLD = 0
+	}
+	POD_combat_move_set_cond_param = { PARAM = pod_combat_anima_flare }
+	POD_combat_move_set_bonus = { EFFECT = ap_refund VALUE = 1 }
+```
+
+The AI needs no extra work here. The gate, the flat condition-met scoring
+nudge, and the AP-strand exemption for a move whose refund would fire all run
+off the shared evaluator.
+
+### 18.7.2 Adding a marker key
+
+CK3 needs a literal at every apply and read site, so a new key is hand-wired.
+Add all of these in lockstep, or the key half-works:
+
+1. A modifier block in `common/modifiers/pod_combat_modifiers.txt`, plus its
+   name and `_desc` keys in `POD_combat_static_l_english.yml`.
+2. A case in the execution section 12c apply switch in
+   `pod_combat_move_effects.txt`, and the matching read-side case in
+   `pod_combat_cond_has_modifier_trigger` (see the identifier-condition
+   dispatch above).
+3. A case in `PODCombatCondMarkerName` and in `PODCombatAppliedMarkerName`
+   (`common/customizable_localization/POD_combat_log_custom_loc.txt`). Both
+   resolve to the modifier's own name key, which keeps the shared condition
+   and effect phrasings generic. The combat-log row needs nothing further:
+   `pod_combat_log_seg_marker` is key-agnostic and re-roots
+   `PODCombatAppliedMarkerName` onto the `move` scope.
+4. A removal line in `pod_combat_duel_end_effect`, in
+   `pod_combat_host_died_release_effect`, and in the slot-init self-heal
+   inside `pod_combat_init_slot_from_character_effect`. Skipping any of the
+   three leaves the marker on a character after the fight.
+5. A `pod_combat_suppress_flag = { FLAG = <key> }` line in section 4 of
+   `pod_combat_error_suppression_effects.txt`, for as long as no CSV row
+   carries the key. The setter writes the key parametrically while steps 2
+   and 3 compare it literally, so without the entry the game logs
+   `Flag '<key>' is used but is never set` at load.
+
+## 19. AI authoring
+
+No AI-file edit is needed for a normal move assembled from supported setters.
+
+The existing systems:
+
+- Add unlocked moves to AI combat loadouts through the shared unlock
+  dispatcher.
+- Begin scoring from the move story's `AI_WEIGHT`.
+- Infer tactical intent from damage, morale pressure, healing, stances,
+  modifiers, control, summons, and other supported payloads.
+- Check affordability, targeting, gate conditions, repeat limits, redundant
+  states, pending control and damage-over-time effects, and battlefield need.
+
+Use these starting weights unless a close peer supports another value:
+
+| Category | Typical `AI_WEIGHT` |
+|---|---:|
+| `ATK` | 20 |
+| `PWR` | 12 |
+| `CTL` | 10 |
+| `DEF` | 8 |
+
+These are base preferences, not percentages. Existing tactical modifiers can
+raise, lower, or reject a candidate.
+
+Test the move on AI actors who:
+
+- Pass and fail the shared unlock rule.
+- Can and cannot afford every cost.
+- Have a valid and invalid target.
+- Would benefit and would not benefit from the payload.
+- Already have the stance, tier, control, or continuing effect.
+
+A genuinely new payload primitive needs AI admission, intent, redundancy, and
+scoring support. Do not compensate for missing AI understanding by assigning an
+extreme base weight.
+
+## 20. Balance framework
+
+The ordinary turn budget is 6 AP. A full-budget move should feel like the
+actor's principal action for the turn.
+
+### 20.1 Starting AP estimates
+
+Use these as review baselines, not automatic formulas:
+
+| Primary effect | Starting AP |
+|---|---:|
+| 1 HP damage | 2 |
+| 2 HP damage | 3 |
+| 3 HP damage | 4 |
+| 4 HP damage | 5 |
+| 5 HP damage | 6 |
+| 1 superficial HP heal | 3 |
+| 2 superficial HP heal | 4 |
+| 3 superficial HP heal | 5 |
+| 4 superficial HP heal | 6 |
+| Small tier buff or debuff | 1 |
+| Medium tier buff or debuff | 2 |
+| Large tier buff or debuff | 3 |
+| Guard, Dodge, or Stealth stance | 2 |
+
+For a combination move, begin with the most expensive major component, add 1
+AP for the meaningful second component, then review the whole package. Do not
+simply sum every minor line; that tends to overprice coherent moves and
+underprice synergistic ones.
+
+### 20.2 Common adjustments
+
+Review these directional adjustments:
+
+- Starter access: usually +1 AP because it is always present in default
+  loadouts.
+- Team targeting: usually +1 AP before considering the number and strength of
+  broadcast effects.
+- Elemental or bane class: usually +1 AP or an equivalent resource/gating cost.
+- Forced aggravated damage: usually +2 AP or strong access/resource limits.
+- Retaliation that requires the enemy to trigger it: may justify -1 AP.
+- Meaningful self-damage: may justify -1 AP.
+- Energy cost of 4 or more: may justify -1 AP.
+- Auto-hit or multiple defense bypasses: increase price, resource cost, access
+  requirement, or repeat restriction.
+
+Treat 1 AP as the normal floor. Zero-AP moves are exceptional designs that
+must rely on meaningful resource cost, access gating, repeat limits, and a
+reviewed live peer rather than ordinary AP discounting.
+
+### 20.3 Hard review rules
+
+- Aggravated, fire, and balefire designs need a supernatural resource cost
+  unless a reviewed exception explains otherwise.
+- Broadly available forced aggravated damage should require advanced access.
+- Net-positive AP moves need a resource cost and a repeat limit.
+- Summons should be once per combat.
+- Mind control and damage over time should be single enemy.
+- Team moves must use only supported broadcast effects.
+- Player-only campaign costs do not by themselves balance AI access.
+- A gate that is almost always true is not a meaningful discount.
+- A bonus condition should reward a distinct state, not reproduce the move's
+  base payload every use.
+
+### 20.4 Energy scales
+
+Check the intended splat's pool before choosing a cost. For common five-point
+pools such as Blood, Gnosis, Pathos, Angst, or Glamour, use this rough
+severity:
+
+| Energy value | Feel |
+|---|---|
+| 0 | Free supernatural expression |
+| 2 | Routine cost |
+| 4 | Significant cost |
+| More than 4 | Exceptional commitment; verify the actor can realistically pay it |
+
+The execution engine uses a splat-agnostic energy unit, but that does not make
+all pools strategically identical.
+
+## 21. Common recipes
+
+These examples show setter combinations only. Each still needs its constructor,
+unlock rule, dispatcher leaf, decision, localization, and version increment.
+
+### 21.1 Basic physical attack
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = checks_guard }
+	POD_combat_move_set_flag = { NAME = checks_spirit_gate }
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_flag = { NAME = requires_hit_roll }
+	POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+}
+```
+
+### 21.2 Supernatural elemental attack
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_energy_cost = { VALUE = @energy_cost_major }
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_hp_damage = { VALUE = @damage_medium }
+	POD_combat_move_set_damage_class = { VALUE = fire }
+	POD_combat_move_set_once_per = { DURATION = round }
+}
+```
+
+### 21.3 Morale attack
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_morale_damage = { VALUE = @morale_damage_medium }
+}
+```
+
+### 21.4 Self stance
+
+Use `TARGETING = self`:
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = dodge }
+	POD_combat_move_set_once_per = { DURATION = round }
+}
+```
+
+Replace `dodge` with `set_guard` or `stealth` for the other supported stances.
+
+### 21.5 Contact-based control
+
+Use `TARGETING = single_enemy`:
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = checks_guard }
+	POD_combat_move_set_flag = { NAME = checks_spirit_gate }
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_flag = { NAME = requires_hit_roll }
+	POD_combat_move_set_flag = { NAME = requires_control_contact }
+	POD_combat_move_set_hit_debuff_round = { TIER = 1 }
+	POD_combat_move_set_ap_drain = { VALUE = 2 }
+	POD_combat_move_set_once_per = { DURATION = round }
+}
+```
+
+### 21.6 Team attack
+
+Use `TARGETING = team_enemy`:
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_energy_cost = { VALUE = @energy_cost_major }
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+	POD_combat_move_set_hit_debuff_round = { TIER = 1 }
+	POD_combat_move_set_once_per = { DURATION = combat }
+}
+```
+
+Do not add single-target riders and describe them as team-wide.
+
+### 21.7 Team protection
+
+Use `TARGETING = team_ally`:
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_energy_cost = { VALUE = @energy_cost_major }
+	POD_combat_move_set_soak_buff_round = { TIER = 1 }
+	POD_combat_move_set_flag = { NAME = set_guard }
+	POD_combat_move_set_once_per = { DURATION = combat }
+}
+```
+
+### 21.8 Conditional finisher
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = checks_guard }
+	POD_combat_move_set_flag = { NAME = checks_spirit_gate }
+	POD_combat_move_set_flag = { NAME = checks_stance }
+	POD_combat_move_set_flag = { NAME = requires_hit_roll }
+	POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
+	POD_combat_move_set_condition = {
+		MODE = bonus
+		TARGET = target
+		PREDICATE = hp_missing
+		THRESHOLD = 2
+	}
+	POD_combat_move_set_bonus = { EFFECT = damage VALUE = 1 }
+}
+```
+
+### 21.9 Counter stance
+
+Use `TARGETING = self`:
+
+```paradox
+scope:new_combat_move = {
+	POD_combat_move_set_flag = { NAME = set_guard }
+	POD_combat_move_set_flag = { NAME = retaliate_if_hit }
+	POD_combat_move_set_retaliate_damage = { VALUE = @damage_minor }
+	POD_combat_move_set_once_per = { DURATION = round }
+}
+```
+
+Use `retaliate_if_missed` for a riposte that follows evasion instead, or
+`retaliate_if_attacked` for one charge that answers either outcome.
+
+## 22. Shared unlock-rule design
+
+The shared per-move trigger is the sole authored source for access.
+
+Typical shapes:
+
+Universal:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	always = yes
+}
+```
+
+Trait:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	has_trait = verified_trait_key
+}
+```
+
+Trait and perk:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	has_trait = verified_trait_key
+	has_perk = verified_perk_key
+}
+```
+
+Verified PoD type trigger and perk:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	POD_is_demon_trigger = yes
+	has_perk = verified_perk_key
+}
+```
+
+Faith:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	faith = faith:verified_faith_key
+}
+```
+
+Visible grouped requirement:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	custom_tooltip = {
+		text = localized_requirement_key
+		OR = {
+			has_trait = verified_trait_a
+			has_trait = verified_trait_b
+		}
+	}
+}
+```
+
+The `custom_tooltip` key must be localized.
+
+Complex alternative:
+
+```paradox
+pod_combat_move_<key>_unlock_trigger = {
+	OR = {
+		has_trait = verified_trait_a
+		has_trait = verified_trait_b
+	}
+	has_perk = verified_perk_key
+}
+```
+
+Rules:
+
+- Verify every trait, perk, faith, secret, and scripted-trigger identifier.
+- Keep the trigger character-scoped.
+- Put the complete eligibility rule here.
+- Make the hidden decision call this trigger.
+- Make the dispatcher leaf call this trigger in `$ACTOR$` scope.
+- Do not copy the raw predicates into either caller.
+- Use `custom_tooltip` only when a genuinely complex requirement cannot
+  explain itself through normal trigger localization.
+
+This arrangement keeps runtime access, AI loadout access, loadout-editor
+access, and failure text aligned.
+
+## 23. Version reload behavior
+
+The move version lets existing saves rebuild move stories after gameplay data
+changes.
+
+The current flow is:
+
+1. A new game initializes the move stories at game start.
+2. An existing save compares its stored combat version when Configure Skills
+   opens or a combat duel is created.
+3. If the versions differ and no player fight is active, the system clears
+   current move references, recreates the move stories, reapplies player
+   starter loadouts, and stores the new version.
+4. If a player fight is active, rebuilding is deferred.
+
+The version check is not a parser hot reload. A safe test cycle is:
+
+1. Restart or reload the mod so the edited files are parsed.
+2. Load the save.
+3. Open Configure Skills or begin a duel.
+4. Confirm the new version is applied and the move appears as expected.
+
+Current equipped player loadouts can return to starter moves during a rebuild.
+Saved presets retain stable skill-key flags, which is another reason not to
+rename released keys casually.
+
+## 24. When a design becomes engine work
+
+Stop treating the change as a normal move when no documented setter or flag
+expresses the intended behavior.
+
+A new capability commonly requires coordinated work in:
+
+| Area | Likely file |
+|---|---|
+| Story setter and variable | `common/scripted_effects/POD_combat/pod_combat_move_init_effects.txt` |
+| Execution phase and result | `common/scripted_effects/POD_combat/pod_combat_move_effects.txt` and sometimes `pod_combat_effects.txt` |
+| Usability and redundancy | `common/scripted_triggers/POD_combat/pod_combat_move_execution_triggers.txt` or `pod_combat_triggers.txt` |
+| Independent-payload inventory | `pod_combat_move_has_independent_payload_trigger` in `pod_combat_move_execution_triggers.txt`. A primitive missing from it lets the redundancy gate reject a move whose only real payload is that primitive, because a redundant stance or tier rider then looks like the whole move. |
+| Character modifier and its lifecycle | `common/modifiers/pod_combat_modifiers.txt` for the definition, plus removal in `pod_combat_duel_end_effect` and `pod_combat_host_died_release_effect` (`pod_combat_effects.txt`) and in the slot-init self-heal in `pod_combat_group_effects.txt`. |
+| Stat-card presentation | `common/scripted_guis/pod_combat_skill_guis.txt` |
+| Compact card and move-sheet cells | `common/customizable_localization/POD_combat_log_custom_loc.txt` (the `PODCombatCL*` and `PODCombatSheetFx*` dispatchers), so a move carrying only the new primitive does not render an empty effects cell. |
+| Static labels and failures | `localization/english/gui/POD_combat_static_l_english.yml` |
+| AI admission, intent, and scoring | `common/scripted_effects/POD_combat/pod_combat_ai_effects.txt` and related triggers |
+| AI tactical-intent membership | Three lockstep copies: the counter fold in `pod_combat_ai_effects.txt`, the intent dispatch ladder in `common/scripted_triggers/POD_combat/pod_combat_triggers.txt`, and `SETTER_VARS` plus `SETUP_PRIMITIVES` in `scripts/python/POD-Combat/verify_intent_membership.py`. Miss one and the AI quietly stops considering moves that carry the primitive. |
+| Validator pairing | `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` |
+| Visible combat result | A combat-log segment: its bake site, its `PODCombatLogSeg*` renderer in `POD_combat_log_custom_loc.txt`, its loc key, and its widget pair in `gui/POD_windows/pod_combat_window.gui`. See the segment recipe in `COMBAT_REFERENCE.info`. |
+
+Simply setting an unknown story variable does nothing. The runtime must
+explicitly read and apply it, the interface must explain it, and the AI must
+understand when it is useful.
+
+Two traps recur on the combat-log half. A segment whose backend is complete
+still renders nothing until its widget pair is mounted in the window, in the
+same order as the bake. And per-target state that a segment reads has to be
+listed in the execution section 16 wrap-up gate, or an area move drops the row
+it should have produced.
+
+`PODSegText` evaluates in a nested customizable-loc context, so a dispatcher it
+calls cannot read the OUTER saved scopes from inside its own triggers. It can
+still be **re-rooted** on one: `[move.Custom('SomeDispatcher')]` runs the
+dispatcher against the move story, which is how `pod_combat_log_seg_marker`
+stays key-agnostic. Delegation is therefore fine when the dispatcher reads its
+own root, and only breaks when it expects `scope:entry` / `scope:move`.
+
+Before proposing a new primitive, search for an existing setter, presence flag,
+condition, or combination that already expresses the design.
+
+## 25. Manual verification
+
+### 25.1 Static identity audit
+
+Search the editable tree for the exact move key. Confirm:
+
+- One constructor with `SKILL_KEY = <key>`.
+- Its `DECISION` is `POD_combat_move_<key>`.
+- The setter block immediately follows that constructor.
+- One shared `pod_combat_move_<key>_unlock_trigger`.
+- One `flag:<key>` dispatcher leaf under the exact `CONFIG` branch.
+- The dispatcher leaf calls the shared trigger in `$ACTOR$` scope.
+- One hidden `POD_combat_move_<key>` decision.
+- The decision calls the same shared trigger.
+- Exactly one name, `_desc`, and `_tooltip` localization key.
+- The dynamic description references the exact decision ID.
+- The current combat version was incremented once for the gameplay change.
+
+Search separately for the `CONFIG` value. Confirm the move's leaf is inside
+that outer branch and before its fallback.
+
+### 25.2 Script and log audit
+
+After the game parses the edit, inspect the logs for:
+
+- Unknown effect, trigger, value, trait, perk, or flag identifiers.
+- Unexpected-token or unbalanced-brace errors.
+- Unset or unread story variables.
+- Missing localization.
+- Invalid illustration or icon references.
+- Scope errors in the shared unlock trigger.
+
+Do not suppress an error until spelling, scope, and actual runtime consumption
+have been verified.
+
+### 25.3 In-game access and presentation
+
+Test a character who passes the unlock rule and one who fails it.
+
+Confirm:
+
+- The move appears only for the eligible character.
+- The ineligible card explains the unmet condition.
+- AI actors follow the same access rule.
+- The title, small icon, large picture, AP cost, stat lines, and flavor render.
+- The move remains hidden from the ordinary decisions panel.
+- Reloading an existing save picks up the move.
+
+### 25.4 Cost and targeting
+
+Confirm:
+
+- The move cannot be used without enough AP.
+- Every additional resource cost is checked and deducted exactly once.
+- `single_enemy` and `single_ally` use the intended selected target.
+- `self` affects the actor.
+- Team effects reach every intended living slot and no unintended slot.
+- No single-target rider is falsely presented as team-wide.
+
+### 25.5 Delivery
+
+For an offensive move, test against:
+
+- A normal target.
+- Guard.
+- Dodge.
+- Stealth.
+- A failed hit roll.
+- A successful hit roll.
+- A target affected by the physical spirit gate.
+
+Confirm every bypass works only when explicitly authored.
+
+For pure control, test both the contact success and failure path. Ensure the
+effect is not guaranteed merely because `requires_control_contact` was omitted
+by mistake.
+
+### 25.6 Payload and state
+
+Test all authored effects separately and together:
+
+- HP and morale damage.
+- Soak and immunity behavior for the damage class.
+- HP and morale healing at full and missing values.
+- Self-damage at low health.
+- Tier application against weaker, equal, and stronger existing tiers.
+- Stance application, consumption, and redundant use.
+- AP gain, AP drain, and initiative timing.
+- Once-per-round and once-per-combat reset behavior.
+- Retaliation trigger, amount, class, consumption, and target.
+- Damage-over-time application, refresh, tick, and expiration.
+- Summon allegiance, capacity, action timing, and cleanup.
+- Gate false and true states.
+- Bonus false and true states.
+
+### 25.7 AI
+
+Observe multiple AI turns. Confirm:
+
+- The move enters the candidate pool only when unlocked and affordable.
+- The AI selects an appropriate target.
+- It does not repeatedly choose a redundant stance, tier, control, or
+  continuing effect.
+- It respects repeat limits and gate conditions.
+- Its frequency is reasonable relative to peer moves.
+- It does not stall when the move is the only superficially attractive but
+  unusable option.
+
+## 26. Final author checklist
+
+### Identity
+
+- [ ] The lower-snake-case key is unique and stable.
+- [ ] `DECISION`, `SKILL_KEY`, trigger name, dispatcher leaf, and localization
+  keys agree exactly.
+- [ ] `CONFIG` matches an explicit outer dispatcher branch.
+
+### Registry
+
+- [ ] The constructor is inside the existing move initializer.
+- [ ] `scope:new_combat_move` immediately follows it.
+- [ ] All seven constructor parameters use supported values.
+- [ ] Every setter and presence flag is documented and spelled exactly.
+- [ ] Damage class is set after HP damage.
+- [ ] Targeting supports every authored effect.
+- [ ] Delivery flags match the intended defenses and contact behavior.
+
+### Access and presentation
+
+- [ ] One shared character-scoped unlock rule contains the complete access
+  condition.
+- [ ] The dispatcher has an explicit move leaf before its fallback.
+- [ ] The hidden decision delegates to the shared rule.
+- [ ] Art and icon references exist.
+- [ ] The name, `_desc`, and `_tooltip` localization keys exist.
+- [ ] The name omits AP cost and the tooltip is concise flavor.
+
+### Mechanics and balance
+
+- [ ] AP and resource costs match the payload.
+- [ ] Area effects use only supported broadcasts.
+- [ ] Control and damage-over-time moves use compatible targeting.
+- [ ] Rider conditions match the intended result.
+- [ ] Repeat limits prevent obvious loops.
+- [ ] Conditions use a supported predicate, target, threshold, and the literal
+  parameter that predicate requires.
+- [ ] A bonus condition has exactly one compatible bonus effect.
+- [ ] `AI_WEIGHT` is close to category peers.
+
+### Integration
+
+- [ ] `POD_current_combat_version` was incremented once for the gameplay
+  change.
+- [ ] UTF-8 BOM, CRLF, tabs, and localization layout were preserved.
+- [ ] Script errors, missing localization, and invalid asset references were
+  checked.
+- [ ] Eligible and ineligible player and AI actors were tested in game.
