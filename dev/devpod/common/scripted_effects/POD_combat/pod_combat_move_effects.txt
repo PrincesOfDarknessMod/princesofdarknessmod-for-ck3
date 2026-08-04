@@ -113,6 +113,13 @@ POD_execute_combat_move = {
 		}
 	}
 
+	# ── 2c. Weapon profile (uses_weapon moves) ───────────────────
+	# Resolve the actor's equipped weapon ONCE per action into host
+	# transients the damage phases read. Unconditional set-or-clear, so an
+	# unarmed actor or a non-weapon move actively clears the previous
+	# action's profile rather than inheriting it.
+	pod_combat_seed_actor_weapon_profile_effect = { STORY = $STORY$ }
+
 	# ── 3. Energy cost (splat-agnostic) ──────────────────────────
 	# POD_splat_agnostic_energy_cost routes to the CURRENT scope's splat pool, so
 	# MUST scope-switch to the actor first - else every AI cast drains the PC pool.
@@ -862,15 +869,17 @@ POD_execute_combat_move = {
 	remove_variable = pod_combat_bonus_active
 	remove_variable = pod_combat_bonus_damage
 	remove_variable = pod_combat_bonus_aggravated
-	# Belt-and-braces: the force-agg marker is removed at the dispatch
-	# site; this covers any future early-exit path. The is_alive guard
-	# matters in a fatality fight - a §15 counter can kill the actor
+	pod_combat_clear_actor_weapon_profile_effect = yes
+	# Belt-and-braces: the force-agg and weapon-attack markers are removed at
+	# the dispatch site; this covers any future early-exit path. The is_alive
+	# guard matters in a fatality fight - a §15 counter can kill the actor
 	# synchronously, and remove_variable on a dead char ref errors
 	# (a dead actor's stray marker dies with the character anyway).
 	var:pod_combat_actor_char ?= {
 		if = {
 			limit = { is_alive = yes }
 			remove_variable = pod_combat_force_agg
+			remove_variable = pod_combat_weapon_attack
 		}
 	}
 }
@@ -895,9 +904,10 @@ pod_combat_apply_single_hp_damage_effect = {
 	# POD_combat_move_set_damage_class): an element rides its REASON into
 	# PoD core so immunities / downgrades / splat multipliers apply per
 	# target; `aggravated` forces duel_aggravated; superficial = duel.
-	# The switch's kind table is mirrored by the retaliation dispatcher
+	# The switch's kind table is mirrored by the weapon-retype switch just
+	# below it, the retaliation dispatcher
 	# (pod_combat_deal_typed_retal_damage_effect) and the DoT tick switch
-	# (pod_combat_deal_dot_tick_from_host_effect) - keep the three in step.
+	# (pod_combat_deal_dot_tick_from_host_effect) - keep the four in step.
 	#
 	# The change_type bonus (host pod_combat_bonus_aggravated):
 	#   - on a superficial move it upgrades the REASON to duel_aggravated;
@@ -907,9 +917,25 @@ pod_combat_apply_single_hp_damage_effect = {
 	#     devpod delta in POD_health_track_triggers.txt) and the elemental
 	#     REASON rides through, force-classified aggravated.
 	#
+	# A uses_weapon move adds a second, actor-side source of classification:
+	# the equipped weapon's retype (host pod_combat_weapon_class, seeded in
+	# §2c) and the wielded-artifact aggravation list. The retype is only ever
+	# seeded over a superficial move, so it cannot collide with the branches
+	# above.
+	#
 	# Save the move as scope:current_move so the resolver (and the whole dispatch
 	# chain below it) reads capability flags without re-threading $STORY$.
 	$STORY$ = { save_scope_as = current_move }
+
+	# A uses_weapon move marks the actor for the duration of this one dispatch,
+	# which is what lets POD_applies_superficial_as_aggravated_damage's wielded
+	# -artifact list promote the wound. Recoil, counters and DoT ticks reach the
+	# same classifier and deliberately do NOT carry the marker, so a bane sword
+	# no longer aggravates everything its bearer does.
+	if = {
+		limit = { scope:current_move = { has_variable = uses_weapon } }
+		scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_weapon_attack }
+	}
 
 	if = {
 		limit = {
@@ -918,6 +944,9 @@ pod_combat_apply_single_hp_damage_effect = {
 				AND = {
 					scope:combat_host = { has_variable = pod_combat_bonus_aggravated }
 					$STORY$ = { NOT = { pod_combat_move_class_is_elemental_trigger = yes } }
+					# A retyped move is elemental in all but name: its element has
+					# to ride the REASON so immunities still key off it.
+					scope:combat_host = { NOT = { has_variable = pod_combat_weapon_class } }
 				}
 			}
 		}
@@ -927,30 +956,67 @@ pod_combat_apply_single_hp_damage_effect = {
 		if = {
 			limit = {
 				scope:combat_host = { has_variable = pod_combat_bonus_aggravated }
-				$STORY$ = { pod_combat_move_class_is_elemental_trigger = yes }
+				OR = {
+					$STORY$ = { pod_combat_move_class_is_elemental_trigger = yes }
+					scope:combat_host = { has_variable = pod_combat_weapon_class }
+				}
 			}
 			scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_force_agg }
 		}
-		switch = {
-			trigger = scope:current_move.var:damage_type
-			flag:fire      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = fire } }
-			flag:cold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold } }
-			flag:lightning = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = lightning } }
-			flag:sun       = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = sun } }
-			flag:silver    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = silver } }
-			flag:gold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = gold } }
-			# holy keys PoD's aggravated promotion against true_faith.
-			flag:holy      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = true_faith } }
-			flag:balefire  = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = balefire } }
-			flag:poison    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = poison } }
-			flag:cold_iron = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold_iron } }
-			# superficial (the hp default) or unset -> generic physical.
-			fallback = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel } }
+		# The weapon retype only ever holds a class when the move's own class is
+		# superficial (seeded in §2c), so this never fights an authored element.
+		# Evaluated per victim: a retype the target is IMMUNE to would deal
+		# nothing at all, so it falls back to the move's own damage rather than
+		# leaving the bearer worse off than unarmed.
+		if = {
+			limit = {
+				scope:combat_host = {
+					has_variable = pod_combat_weapon_class
+					NOT = {
+						pod_combat_weapon_retype_is_wasted_trigger = { VICTIM = var:pod_combat_$TARGET_SIDE$_char }
+					}
+				}
+			}
+			switch = {
+				trigger = scope:combat_host.var:pod_combat_weapon_class
+				flag:fire      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = fire } }
+				flag:cold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold } }
+				flag:lightning = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = lightning } }
+				flag:sun       = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = sun } }
+				flag:silver    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = silver } }
+				flag:gold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = gold } }
+				flag:holy      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = true_faith } }
+				flag:balefire  = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = balefire } }
+				flag:poison    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = poison } }
+				flag:cold_iron = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold_iron } }
+				fallback = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel } }
+			}
+		}
+		else = {
+			switch = {
+				trigger = scope:current_move.var:damage_type
+				flag:fire      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = fire } }
+				flag:cold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold } }
+				flag:lightning = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = lightning } }
+				flag:sun       = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = sun } }
+				flag:silver    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = silver } }
+				flag:gold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = gold } }
+				# holy keys PoD's aggravated promotion against true_faith.
+				flag:holy      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = true_faith } }
+				flag:balefire  = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = balefire } }
+				flag:poison    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = poison } }
+				flag:cold_iron = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold_iron } }
+				# superficial (the hp default) or unset -> generic physical.
+				fallback = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel } }
+			}
 		}
 		# Classification is synchronous inside the wound call, so the
 		# marker can drop immediately.
 		scope:combat_host.var:pod_combat_actor_char ?= { remove_variable = pod_combat_force_agg }
 	}
+	# Same reasoning for the weapon marker, but it is set before the
+	# aggravated branch so it has to drop outside the if/else.
+	scope:combat_host.var:pod_combat_actor_char ?= { remove_variable = pod_combat_weapon_attack }
 }
 
 pod_combat_dispatch_damage_pipeline_effect = {
@@ -972,6 +1038,12 @@ pod_combat_dispatch_damage_pipeline_effect = {
 				if = {
 					limit = { scope:combat_host = { has_variable = pod_combat_bonus_damage } }
 					add = scope:combat_host.var:pod_combat_bonus_damage
+				}
+				# The equipped weapon's own bite, on every target a uses_weapon
+				# move reaches (single and AoE both funnel through here).
+				if = {
+					limit = { scope:combat_host = { has_variable = pod_combat_weapon_bonus_damage } }
+					add = scope:combat_host.var:pod_combat_weapon_bonus_damage
 				}
 			}
 		}
@@ -1124,6 +1196,8 @@ pod_combat_apply_team_all_hp_damage_effect = {
 	# literal-flag path (a var-to-var copy would degrade the flag), and it always
 	# writes, defaulting to flag:duel, so the switch never reads an unset var.
 	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_team_all_self_kind }
+	# Same swing, same instant: a weapon retype covers the caster's own share too.
+	pod_combat_override_kind_from_weapon_effect = { KIND_VAR = pod_combat_team_all_self_kind }
 	pod_combat_deal_typed_retal_damage_effect = {
 		TARGET_SIDE = actor
 		AMOUNT      = $STORY$.var:hp_damage
@@ -1210,6 +1284,12 @@ pod_combat_arm_retaliation_effect = {
 			limit = { $STORY$ = { pod_combat_move_class_is_elemental_trigger = yes } }
 			# Literal-flags-only seeding
 			pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_actor_retaliate_$WHEN$_kind }
+		}
+		else_if = {
+			# A counter armed while holding a typed weapon strikes back with it.
+			# Ranks below an authored class, which is the move's own identity.
+			limit = { scope:combat_host ?= { has_variable = pod_combat_weapon_class } }
+			pod_combat_override_kind_from_weapon_effect = { KIND_VAR = pod_combat_actor_retaliate_$WHEN$_kind }
 		}
 	}
 }
@@ -1356,6 +1436,8 @@ pod_combat_seed_dot_on_slot_effect = {
 	# Literal-flags-only seeding: the kind IS the damage class (aggravated
 	# ticks as duel_aggravated; superficial/absent falls to flag:duel).
 	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = slot_dot_kind }
+	# A weapon retype rides onto the burn it lit, same as the direct hit.
+	pod_combat_override_kind_from_weapon_effect = { KIND_VAR = slot_dot_kind }
 	# Morale wins over the damage class (matches the counter-damage precedence).
 	if = {
 		limit = { $STORY$ = { has_variable = dot_morale } }

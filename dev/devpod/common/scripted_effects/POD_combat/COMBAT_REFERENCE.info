@@ -358,6 +358,7 @@ ordering rules** below before moving anything.
 | §1b | If `once_per` is present, append this move story to the actor slot's round- or combat-duration used list. The usability gate rejects later attempts; the round list clears during initiative setup. |
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`), set `pod_combat_last_damage = 0`, and clear the pure-control delivery-failure latch. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
 | §2b | **Bonus condition pre-evaluation.** For a `cond_mode = bonus` move whose condition holds (`pod_combat_move_condition_met_trigger`), set the host flag `pod_combat_bonus_active` and stamp the §6 host vars (`pod_combat_bonus_damage` / `pod_combat_bonus_aggravated`). Each later phase then grants its bonus iff the flag is set and `bonus_effect` matches: §5d `hit`, §6 `damage`/`change_type`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13b-bonus `dot`, §14 `ap_refund` (which also stamps the transient `pod_combat_last_ap_refund` so the refund can be logged) / `ap_drain`. (Gate mode is enforced pre-execution in the usability triggers, not here.) |
+| §2c | **Weapon profile.** For a `uses_weapon` move, resolve the actor's equipped `primary_armament` (subject to `can_benefit_from_artifact`) into three host transients: `pod_combat_weapon_class` (the retype), `pod_combat_weapon_bonus_damage`, `pod_combat_weapon_undodgeable`. Unconditional set-or-clear, so an unarmed actor or a non-weapon move actively clears the previous action's profile. The retype is only ever seeded over a move whose own class is `superficial` - an authored element or `aggravated` is the move's identity and outranks the weapon. Torn down in §17 and, as insurance, in `pod_combat_cleanup_effect`. See **Weapon artifact overrides**. |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
 | §4 | Pay CK3 resources (`gold_cost` / `stress_cost` / `piety_cost` / `prestige_cost`) and apply `steal_gold` / `gain_dread`. **PC only** — gated on `pod_combat_current_actor_team = flag:player` AND position 0. AI turns are free. Practice still pays declared costs but suppresses gold theft and Dread gain. |
 | §5 | Strip the single target's stances **before** §6 so the attack resolves against the stripped state: `bypass_dodge` removes the dodge flag; `bypass_stealth` runs the workspace stealth-break (also removes the current stealth hit bonus); ordinary `remove_guard` clears the target's guard so a strip-guard + attack lands its own hit. A `requires_control_contact` guard strip waits for §5b2 instead. |
@@ -554,11 +555,86 @@ the enum (`pod_combat_triggers.txt`):
 target"; the authoritative per-victim verdict is the matrix above, not
 this trigger).
 
-The same kind table is mirrored by
+The same kind table is mirrored by the weapon-retype switch beside it in
+`pod_combat_apply_single_hp_damage_effect`,
 `pod_combat_deal_typed_retal_damage_effect` (typed counters) and
-`pod_combat_deal_dot_tick_from_host_effect` (DoT ticks) — keep the three
+`pod_combat_deal_dot_tick_from_host_effect` (DoT ticks) — keep the four
 switches in step. To add a class, follow **Adding a new damage class**
 in §11.
+
+
+### Weapon artifact overrides
+
+A move flagged `uses_weapon` (CSV column, presence flag on the move story)
+swings the actor's own equipped weapon, so the artifact in their
+`primary_armament` slot can shape the blow. Four things it can do, read
+off the artifact as variables stamped at creation:
+
+| Artifact variable | Effect on a `uses_weapon` move |
+|---|---|
+| `artifact_weapon_damage_class` (flag) | Retypes the damage to that element — but only over a `superficial` move, never over an authored element or `aggravated`, and only against a victim who is not IMMUNE to it. That last clause is checked per victim (`pod_combat_weapon_retype_is_wasted_trigger`) and matters: sun is immune for every splat except vampires, abominations and kuei-jin, so a sun-forged bow would otherwise deal literally nothing to a werewolf and leave its bearer worse off than unarmed. When the retype is wasted the blow falls back to the move's own damage. |
+| `artifact_weapon_bonus_damage` (int) | Flat HP added on every target the move reaches. |
+| `artifact_weapon_undodgeable` | The move steps around the target's Dodge/Stealth without consuming it (the same semantics as an authored move lacking `checks_stance`). |
+| `artifact_deals_aggravated`, or membership in `POD_weapon_artifact_forces_agg_trigger` | Forces the wound aggravated, per victim. |
+
+**The bane list is per-move inside combat.** `POD_weapon_artifact_forces_agg_trigger`
+(`common/scripted_triggers/POD_weapon_artifact_triggers.txt`) holds the ~29
+wielded artifacts that promote damage to aggravated. PoD's classifier calls it
+for every wound its bearer deals; inside the minigame the call is gated on the
+actor carrying `pod_combat_weapon_attack`, a marker set only around a
+`uses_weapon` move's own damage dispatch. So a bane sword aggravates your
+strikes and no longer aggravates your spat venom, your mind blasts, your DoT
+ticks or your own recoil. Outside the minigame nothing changed.
+
+**Adding a weapon is one edit.** Stamp the override variable on the artifact
+in its creation effect. Nothing else: no arm in the bane list, no entry in a
+name table, no GUI branch, no loc. The runtime, the move card and the AI all
+read the same four variables, and the artifact tooltip / details window append
+an "In a duel:" block describing them to every override-carrying artifact
+automatically (see **Override text** below). The only weapons still named in
+script are the ones whose aggravation is *conditional* (on the victim, or on
+the weapon's power) - that is logic, not a tag, and it lives in
+`POD_weapon_artifact_forces_agg_trigger`.
+
+**Existing saves are migrated once.** Artifact variables are stamped at
+creation, so nothing already in a save carries the generic ones.
+`POD_backfill_weapon_artifact_vars_effect` walks the world a single time
+(guarded by `global_var:pod_weapon_vars_backfilled`) and stamps them onto the
+artifacts that predate the feature. It is hooked from game start, from duel
+creation, and from `yearly_global_pulse` - the last is what heals a save whose
+owner never enters combat, since PoD's non-combat wounds read the same bane
+list. **That effect is the only place in the mod pairing an artifact name with
+an override, it is marked as deletable migration code, and nothing reads it.**
+Artifacts owned by dead characters or held in a title treasury are out of its
+reach and keep their old behaviour.
+
+**Override text.** `POD_weapon_override_custom_loc.txt` turns those variables
+into one standardised sentence, so the move card and the artifact's own
+surfaces cannot drift apart. The composed line reads its weapon from a scope
+named **`pod_weapon`** - every caller binds it, via the `PODWeaponOverrideText`
+/ `PODWeaponOverrideSelfText` macros or a `save_scope_as = pod_weapon` before
+the tooltip. On the artifact itself the block rides at the WIDGET level: both
+`[Artifact.GetDesc]` surfaces (the artifact tooltip in `gui/shared/cooltip.gui`
+and `gui/window_artifact_details.gui`) render
+`pod_artifact_desc_and_weapon_override`, which chains the desc, an emit-or-blank
+"In a duel:" header (`PODWeaponOvrHeader`) and the segment line. It CANNOT live
+inside a description loc key: `GetDesc` localizes the key in a fresh
+environment with no `Artifact` data context (its ROOT is a character - vanilla
+descriptions only ever reference `ROOT.Char` or globals), so a
+description-embedded `[PODWeaponOverrideSelfText]` errors at runtime and
+renders blank. Artifact designers write no mechanical prose and no loc at all;
+stamping the variable is the whole job.
+
+**What is deliberately static.** The move card, the sheet `Typ` column, the
+compact line's damage marks, the sheet class filters and the AI's class
+scoring all read the move's AUTHORED class, because they render off the
+shared catalogue story with no reader attached. A retyped move therefore
+still reads "superficial" on the card while the combat log's result stamp -
+which reports the classifier's real per-victim verdict - shows the truth.
+The stat card carries a viewer-relative line instead: the "Uses Your Weapon"
+tag always, plus a generated list of what the reader's own weapon does to the
+move ("deals Lightning damage", "+2 damage", "cannot be dodged", "wounds are
+aggravated"), built by the same dispatchers the artifact's tooltip uses.
 
 The **`change_type` bonus** (host `pod_combat_bonus_aggravated`, staged
 at §2b) upgrades the blow to aggravated. On a non-elemental move it
@@ -2223,7 +2299,7 @@ recorded as the victor.
    skipped entirely for `practice` spars): one batched pass over alive
    combatants. Each takes
    `POD_static_stress_gain` from its final morale deficit —
-   `(pod_combat_max_morale − slot_morale) ×
+   `(pod_combat_slot_max_morale_value − slot_morale) ×
    pod_combat_morale_stress_multiplier` (multiplier = 5). Batched to one
    pass because `POD_static_stress_gain` is heavy (per-call skill
    recalc).
@@ -2743,11 +2819,36 @@ pod_combat_initiative_modifier_value = {
   the second seed is the combatant's actual starting morale. Both sites
   call `pod_combat_starting_morale_value`, and both run after `slot_char`
   is written.
-- Morale is per-combatant. Its baseline is
-  `pod_combat_max_morale` (or the debug-tuned starting-morale override),
-  plus this hook. A positive modifier may push the seed above that
+- Morale is per-combatant, and so is its cap. Its baseline is
+  `pod_combat_slot_max_morale_value` (or the debug-tuned starting-morale
+  override), plus this hook. A positive modifier may push the seed above that
   baseline (intended head-room); it is floored at 1, so an over-negative
   value can never start a fighter already KO'd.
+
+#### The morale cap is scope-dependent
+
+The cap scales off the same PoD wound track that supplies max HP, so there is
+no single "the cap" value to read. `pod_combat_max_morale_base` is the
+**baseline only** - what a 6-box combatant gets (20, or the debug-tuned
+override). Each wound box above or below 6 moves that combatant's own ceiling
+by 5. Comparing a combatant's morale against the base directly is a bug; read
+the wrapper matching your scope:
+
+| Scope | Read |
+|---|---|
+| character | `pod_combat_char_max_morale_value` |
+| slot story | `pod_combat_slot_max_morale_value` |
+| combat host, acting side | `pod_combat_actor_max_morale_value` |
+| combat host, target side | `pod_combat_target_max_morale_value` |
+
+Each wrapper falls back to the bare baseline when its character pointer is
+absent (the tooltip-build case). Because `POD_health_track_base_length` is a
+splat ladder, the resulting caps are mortal 10 / ghoul, mummy, wraith 15 /
+vampire, kuei-jin, risen 20 / fera, demon, fae 25 / werewolf 30, with the
+per-character track perks (Shintai of Bone, Age of Kings, ...) riding on top.
+Every splat trait the ladder does not name - revenant, kinfolk, laham,
+nephilim, mage, changeling, zombu - falls to its 4-box `else` arm and so caps
+at 10 alongside plain mortals.
 
 ### Add a move
 
