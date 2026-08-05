@@ -100,25 +100,120 @@ pod_combat_ai_morale_kill_priority = {
 # threshold if the AI should stop stacking soak on an already-tanky actor.
 pod_combat_ai_soak_buff_cap_threshold = 100
 
-# One fixed morale cap for every combatant; morale itself is tracked per
-# slot (unlike max HP, which derives from the character's wound track).
-pod_combat_max_morale = {
+# ── MORALE CAP ────────────────────────────────────────────────────
+# The cap is per-character: it scales off the same PoD wound track that
+# supplies max HP, so a sturdier creature carries a deeper morale pool. That
+# makes it scope-dependent, which is why there is no single "the cap" value.
+# Read the wrapper that matches the scope you are in:
+#
+#   character scope  -> pod_combat_char_max_morale_value
+#   slot-story scope -> pod_combat_slot_max_morale_value
+#   combat-host scope-> pod_combat_actor_max_morale_value
+#                       pod_combat_target_max_morale_value
+#
+# pod_combat_max_morale_base is the BASELINE only (what a 6-box combatant
+# gets). Comparing a combatant's morale against it directly is a bug.
+
+pod_combat_max_morale_base = {
 	value = 20
 	if = { limit = { exists = global_var:pod_combat_tune_max_morale } value = global_var:pod_combat_tune_max_morale }
 }
 
-# Effective starting morale for a freshly-seated combatant: the cap (or the
-# tuned override) plus the per-character designer hook, floored at 1 (a slot
-# must read alive before real init - the init-time KO check treats
-# slot_morale <= 0 as KO'd). Slot-story scope (the hook reads var:slot_char).
+# CHARACTER scope. Exists so the slot- and host-scope wrappers can chain it off
+# a character pointer, the same reason pod_combat_char_prowess_value does.
+# POD_health_track_length is trait-derived and survives death, so no is_alive
+# gate (matching pod_combat_slot_max_hp_value).
+#
+# 6 boxes = the baseline, and each box either side is worth 5 morale. PoD's
+# ladder (POD_health_track_base_length) puts that at mortal 4 = -10 /
+# ghoul, mummy, wraith 5 = -5 / vampire, kuei-jin, risen 6 = +-0 /
+# fera, demon, fae 7 = +5 / werewolf 8 = +10, and the per-character track
+# perks (Shintai of Bone, Age of Kings, ...) ride along for free.
+pod_combat_char_max_morale_value = {
+	value = pod_combat_max_morale_base
+	add = {
+		value = POD_health_track_length
+		subtract = 6
+		multiply = 5
+	}
+	min = 1
+}
+
+# Scope wrappers. Each falls back to the bare baseline when its character
+# pointer is absent, which is the tooltip-build case (slot stories do not exist
+# during a tooltip walk, and the host workspace mirror is unset before the
+# first load_workspace of a fight).
+pod_combat_slot_max_morale_value = {
+	value = pod_combat_max_morale_base
+	if = {
+		limit = { has_variable = slot_char }
+		value = var:slot_char.pod_combat_char_max_morale_value
+	}
+}
+pod_combat_actor_max_morale_value = {
+	value = pod_combat_max_morale_base
+	if = {
+		limit = { has_variable = pod_combat_actor_char }
+		value = var:pod_combat_actor_char.pod_combat_char_max_morale_value
+	}
+}
+pod_combat_target_max_morale_value = {
+	value = pod_combat_max_morale_base
+	if = {
+		limit = { has_variable = pod_combat_target_char }
+		value = var:pod_combat_target_char.pod_combat_char_max_morale_value
+	}
+}
+
+# Effective starting morale for a freshly-seated combatant: the combatant's own
+# cap plus the per-character designer hook, floored at 1 (a slot must read alive
+# before real init - the init-time KO check treats slot_morale <= 0 as KO'd).
+# Slot-story scope (both the cap wrapper and the hook read var:slot_char).
 # Single source for BOTH seed sites: the slot constructor and the per-slot
 # init in pod_combat_group_effects.txt. A site that seeds the flat cap
 # directly instead would silently discard the hook.
 pod_combat_starting_morale_value = {
-	value = pod_combat_max_morale
+	value = pod_combat_slot_max_morale_value
+	# Debug knob: an absolute seat-everyone-here number, deliberately NOT
+	# wound-track scaled. The cap knob is the one that moves the whole ladder;
+	# this one exists to pin every combatant to a known value for a test.
 	if = { limit = { exists = global_var:pod_combat_tune_starting_morale } value = global_var:pod_combat_tune_starting_morale }
 	add = pod_combat_starting_morale_modifier_value
 	min = 1
+}
+
+pod_combat_starting_morale_modifier_value = {
+	# Summed into the morale this combatant begins the fight with (starting
+	# morale = pod_combat_slot_max_morale_value + this, floored at 1). Positive =
+	# enters steadier, negative = enters shaken. Evaluated once, at slot creation.
+	# Morale is tracked per-combatant (each fighter KOs at its own slot_morale <= 0),
+	# so this applies to every fighter independently, not just leaders.
+	value = 0
+	# Personality traits.
+	#if = {
+	#	limit = { var:slot_char = { has_trait = brave } }
+	#	add = 4
+	#}
+	#if = {
+	#	limit = { var:slot_char = { has_trait = zealous } }
+	#	add = 2
+	#}
+	#if = {
+	#	limit = { var:slot_char = { has_trait = wrathful } }
+	#	add = 2
+	#}
+	#if = {
+	#	limit = { var:slot_char = { has_trait = diligent } }
+	#	add = 2
+	#}
+	#if = {
+	#	limit = { var:slot_char = { has_trait = craven } }
+	#	add = -4
+	#}
+	#if = {
+	#	limit = { var:slot_char = { has_trait = cynical } }
+	#	add = -2
+	#}
 }
 
 # Soft per-team roster cap. Teams are otherwise unbounded - the duel
@@ -303,25 +398,6 @@ pod_combat_initiative_base_value = {
 	}
 }
 
-pod_combat_starting_morale_modifier_value = {
-	# Summed into the morale this combatant begins the fight with
-	# (starting morale = pod_combat_max_morale + this, floored at 1). Positive =
-	# enters steadier, negative = enters shaken. Evaluated once, at slot creation.
-	# Morale is tracked per-combatant (each fighter KOs at its own slot_morale <= 0),
-	# so this applies to every fighter independently, not just leaders.
-	value = 0
-	# The steady of nerve hold the line:
-	# if = {
-	# 	limit = { var:slot_char = { has_trait = brave } }
-	# 	add = 4
-	# }
-	# The craven crack sooner:
-	# if = {
-	# 	limit = { var:slot_char = { has_trait = craven } }
-	# 	add = -4
-	# }
-}
-
 pod_combat_ap_modifier_value = {
 	# Summed into this combatant's AP budget at the start of EACH of its turns
 	# (budget = pod_combat_base_ap + this, floored at 0, before any ap_drain is taken
@@ -357,7 +433,7 @@ pod_combat_morale_from_hp_ratio = {
 # morale-broken character (deficit 20) takes 100 stress. Adjust this
 # knob to rebalance stress attrition.
 pod_combat_morale_stress_multiplier = {
-	value = 5
+	value = 3
 	if = { limit = { exists = global_var:pod_combat_tune_morale_stress_mult } value = global_var:pod_combat_tune_morale_stress_mult }
 }
 
@@ -422,7 +498,7 @@ pod_combat_tune_ap_cap_increment_display_value = {
 	if = { limit = { exists = global_var:pod_combat_tune_ap_cap_increment } value = global_var:pod_combat_tune_ap_cap_increment }
 }
 pod_combat_tune_starting_morale_display_value = {
-	value = pod_combat_max_morale	# unset = the cap (before the designer hook)
+	value = pod_combat_max_morale_base	# unset = the cap (before the designer hook)
 	if = { limit = { exists = global_var:pod_combat_tune_starting_morale } value = global_var:pod_combat_tune_starting_morale }
 }
 pod_combat_tune_init_celerity_bonus_display_value = {
@@ -712,9 +788,9 @@ pod_combat_slot_morale_urgency_value = {
 	if = {
 		limit = { has_variable = slot_morale }
 		add = {
-			value = pod_combat_max_morale
+			value = pod_combat_slot_max_morale_value
 			subtract = var:slot_morale
-			divide = pod_combat_max_morale
+			divide = pod_combat_slot_max_morale_value
 			multiply = pod_combat_ai_heal_span_value
 		}
 	}
@@ -752,7 +828,7 @@ pod_combat_slot_morale_pct = {
 		limit = { has_variable = slot_morale }
 		value = var:slot_morale
 		multiply = 100
-		divide = pod_combat_max_morale
+		divide = pod_combat_slot_max_morale_value
 		min = 0
 		max = 100
 	}
