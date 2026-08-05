@@ -1421,106 +1421,255 @@ PixelShader =
 			}
 		]]
 	}
-}
-
-MainCode PS_VortexPortal
-{
-	Input = "VS_OUTPUT_PDX_GUI"
-	Output = "PDX_COLOR"
-	Code
-	[[
-		// float rand(float2 p) {
-		// 	return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
-		// }
-		
-		// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
-		// because the trig-based hash functions cause issues on vulkan
-		float rand(float2 p) {
-			float3 p3 = frac(float3(p.xyx) * .1031);
-			p3 += dot(p3, p3.yzx + 33.33);
-			return frac((p3.x + p3.y) * p3.z);
-		}
-
-		float noise(float2 p) {
-			float2 f = frac(p);
-			f = f * f * f * f * (3. - 2. * f) * (3. - 2. * f);
-			float2 i = floor(p);
-			return lerp(lerp(rand(i + float2(0, 0)), 
-						rand(i + float2(1, 0)), f.x),
-					lerp(rand(i + float2(0, 1)), 
-						rand(i + float2(1, 1)), f.x), f.y);
-		}
-
-		float fbm(float2 p) {
-			float v = 0.;
-			float a = 1.;
-			for(int i = 0; i < 4; ++i) {
-				p = 1.5 * p + 15.;
-				a *= 0.5;
-				v += a * noise(p);
+	MainCode PS_VortexPortal
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// float rand(float2 p) {
+			// 	return frac(sin(dot(p, float2(12.99, 78.233))) * 43758.545);
+			// }
+			
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float rand(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * .1031);
+				p3 += dot(p3, p3.yzx + 33.33);
+				return frac((p3.x + p3.y) * p3.z);
 			}
-			return v;
-		}
 
-		PDX_MAIN
-		{
-			float2 uv = (Input.UV0 - 0.5) * float2(2.0, 1.0);
-			uv.x -= 0.33;
-			float time = GuiTime * 0.4;
-			float dist = length(uv);
-			float angle = atan2(uv.y, uv.x);
-			
-			// Combined rotation + radial motion parameters
-			float rotationSpeed = 1.5;
-			float radialSpeed = -0.5;
-			float spiralTightness = 3.6;
-			
-			// Dual motion calculation
-			float2 p = float2(
-				cos(-angle - dist * spiralTightness + time * rotationSpeed),
-				dist + time * radialSpeed  // Radial outward movement
-			);
+			float noise(float2 p) {
+				float2 f = frac(p);
+				f = f * f * f * f * (3. - 2. * f) * (3. - 2. * f);
+				float2 i = floor(p);
+				return lerp(lerp(rand(i + float2(0, 0)), 
+							rand(i + float2(1, 0)), f.x),
+						lerp(rand(i + float2(0, 1)), 
+							rand(i + float2(1, 1)), f.x), f.y);
+			}
 
-			// Generate noise pattern with dual motion
-			float2 r1 = float2(fbm(p + 0.02 * time), fbm(p + 0.005 * time));
-			float2 r2 = float2(
-				fbm(p + 0.15 * time + 10. * r1), 
-				fbm(p + 0.12 * time + 12. * r1 + float2(time * 0.2, 0.0))
-			);
+			float fbm(float2 p) {
+				float v = 0.;
+				float a = 1.;
+				for(int i = 0; i < 4; ++i) {
+					p = 1.5 * p + 15.;
+					a *= 0.5;
+					v += a * noise(p);
+				}
+				return v;
+			}
 
-			float col = 2.0 * pow(fbm(p + r2 * float2(1.2, 0.8)), 2.0);
+			PDX_MAIN
+			{
+				float2 uv = (Input.UV0 - 0.5) * float2(2.0, 1.0);
+				uv.x -= 0.33;
+				float time = GuiTime * 0.4;
+				float dist = length(uv);
+				float angle = atan2(uv.y, uv.x);
+				
+				// Combined rotation + radial motion parameters
+				float rotationSpeed = 1.5;
+				float radialSpeed = -0.5;
+				float spiralTightness = 3.6;
+				
+				// Dual motion calculation
+				float2 p = float2(
+					cos(-angle - dist * spiralTightness + time * rotationSpeed),
+					dist + time * radialSpeed  // Radial outward movement
+				);
 
-			// Dark center tunnel
-			float centerSize = 0.3;
-			float centerMask = smoothstep(centerSize - 0.05, centerSize + 0.05, dist);
-			float3 finalColor = float3(0.0, 0.0, 0.0);
+				// Generate noise pattern with dual motion
+				float2 r1 = float2(fbm(p + 0.02 * time), fbm(p + 0.005 * time));
+				float2 r2 = float2(
+					fbm(p + 0.15 * time + 10. * r1), 
+					fbm(p + 0.12 * time + 12. * r1 + float2(time * 0.2, 0.0))
+				);
 
-			// Corona energy ring
-			float corona = smoothstep(centerSize, centerSize + 0.1, dist) * 
-						(1.0 - smoothstep(centerSize + 0.1, centerSize + 0.15, dist));
-			
-			// Radiating crimson flow (dual motion effect)
-			float3 vortexColor = float3(
-				(col * 1.5 + 0.2 * sin(dist * 20.0 - time * 5.0)) * centerMask,
-				col * 0.3 * centerMask,
-				pow(col, 4.0) * 0.25 * centerMask
-			);
+				float col = 2.0 * pow(fbm(p + r2 * float2(1.2, 0.8)), 2.0);
 
-			// Motion blending
-			finalColor = lerp(finalColor, vortexColor, centerMask);
-			
-			// Animated corona with outward streaks
-			float coronaFlash = sin(time * 5.0 + dist * 20.0) * 0.5 + 0.5;
-			finalColor += corona * float3(1.0, 0.6, 0.3) * (col + 0.5) * coronaFlash;
+				// Dark center tunnel
+				float centerSize = 0.3;
+				float centerMask = smoothstep(centerSize - 0.05, centerSize + 0.05, dist);
+				float3 finalColor = float3(0.0, 0.0, 0.0);
 
-			// Alpha with outward fade
-			float alpha = SampleImageSprite(Texture, Input.UV0).a * 
-						smoothstep(0.0, 0.5, dist) * 
-						(1.0 - smoothstep(0.8, 1.2, dist));
-			
-			return float4(finalColor, alpha);
-		}
-	]]
+				// Corona energy ring
+				float corona = smoothstep(centerSize, centerSize + 0.1, dist) * 
+							(1.0 - smoothstep(centerSize + 0.1, centerSize + 0.15, dist));
+				
+				// Radiating crimson flow (dual motion effect)
+				float3 vortexColor = float3(
+					(col * 1.5 + 0.2 * sin(dist * 20.0 - time * 5.0)) * centerMask,
+					col * 0.3 * centerMask,
+					pow(col, 4.0) * 0.25 * centerMask
+				);
+
+				// Motion blending
+				finalColor = lerp(finalColor, vortexColor, centerMask);
+				
+				// Animated corona with outward streaks
+				float coronaFlash = sin(time * 5.0 + dist * 20.0) * 0.5 + 0.5;
+				finalColor += corona * float3(1.0, 0.6, 0.3) * (col + 0.5) * coronaFlash;
+
+				// Alpha with outward fade
+				float alpha = SampleImageSprite(Texture, Input.UV0).a * 
+							smoothstep(0.0, 0.5, dist) * 
+							(1.0 - smoothstep(0.8, 1.2, dist));
+				
+				return float4(finalColor, alpha);
+			}
+		]]
+	}
+	MainCode PS_Backrooms
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			//Shadertoy: https://www.shadertoy.com/view/f3XXRl
+			#define ST_JominiResolution float3(1920.0, 1080.0, 1.0)
+			static const float4 ST_JominiMouse = float4(0.0, 0.0, 0.0, 0.0);
+
+			float2x2 ST_rot(float t)
+			{
+				float c = cos(t), s = sin(t);
+				return float2x2(c, -s, s, c);
+			}
+
+			float3 ST_wallpaper(float2 p)
+			{
+				float3 b = float3(.7, .7, .4);
+				float w = abs(frac(p.x) - .5);
+				return
+					frac(w + .7) < .05 ||
+					frac(p.x + .1) < .2 && frac(p.y) < .7 ||
+					frac(w + .7) > .2 &&
+					min(abs(abs(frac(.5 * p.y + 1. * frac(.5 * floor(p.x)) + .8 * w)-.1)-.1),.1)<.06
+				? b - .1 : b;
+			}
+
+			float3 ST_ceiling(float2 p)
+			{
+				float3 b = float3(.45, .4, .2);
+				p *= float2(.1, .25);
+				p += float2(2.3, 1.5);
+				return (abs(p.x - .525) < .475 && frac(2. * p.y) > .1 && frac(p.y * .4) < .2) ? float3(1, 1, 1) : frac(p.x) < .05 || frac(2. * p.y) < .1 ? b : b - .1;
+			}
+
+			float3 ST_carpet(float2 p)
+			{
+				float3 b = float3(.4, .35, .15);
+				p *= .1;
+				p.y += 37.;
+				p = floor(64. * p + 132.) * .01;
+				int2 v = 999 * int2(7777.-94. * p);
+				p = mul(sin(p * .05), float2x2(p, p - 16.));
+				return .5 * b * sqrt(exp(sin(3. * p.x) * cos(2. * p.y)) + 3. + frac(.1453 * (float)(v.x % (v.x ^ v.y))));
+			}
+
+			float3 ST_shake(float t)
+			{
+				float3 v = float3(3, 3, 2);
+				return .05 * v * sin(.5 * t * v + cos(.2 * t)) + float3(0, .1 * sin(t), 0);
+			}
+
+			PDX_MAIN
+			{
+				float2 JominiUV = float2(Input.UV0.x, 1.0 - Input.UV0.y);
+				float2 I = JominiUV * float2(1920.0, 1080.0);
+				float4 O = float4(0.0, 0.0, 0.0, 1.0);
+
+				float2 M = (2. * ST_JominiMouse.xy - ST_JominiResolution.xy) / ST_JominiResolution.y;
+					float2 uv = (I + I - ST_JominiResolution.xy) / ST_JominiResolution.y;
+					float3 col = float3(0.0, 0.0, 0.0);
+					float3 camP = float3(0., 9., 0.) + ST_shake(GlobalTime);
+					float3 camV = normalize(float3(uv, .8));
+					if(any(ST_JominiMouse.xy != float2(0, 0)))
+					{
+						camV.zy = mul(camV.zy, ST_rot(M.y));
+						camV.zx = mul(camV.zx, ST_rot(M.x));
+					}
+					camV.xy = mul(camV.xy, ST_rot(.05));
+
+					float rayD = -camP.y / camV.y;
+					float3 hitP = float3(camV.xz * rayD + camP.xz, 0).xzy;
+					if(camV.y < 0.) col = ST_carpet(hitP.xz);
+
+					rayD = (20. - camP.y) / camV.y;
+					hitP = float3(camV.xz * rayD + camP.xz, 20.).xzy;
+					if(camV.y > 0.) col = ST_ceiling(hitP.xz) + .005 * hitP.z;
+
+					rayD = (64. - camP.z) / camV.z;
+					hitP = float3(camV.xy * rayD + camP.xy, 64.);
+					if(0. < hitP.y && hitP.y < 20.) col = ST_wallpaper(hitP.xy) * (1.3 - .03 * distance(hitP.xy, float2(-17., 8.)));
+
+					rayD = (-48. - camP.x) / camV.x;
+					hitP = float3(camV.zy * rayD + camP.zy, -48.).zyx;
+					if(28. < hitP.z && hitP.z < 44. && 0. < hitP.y && hitP.y < 20.) col = ST_wallpaper(hitP.zy) + 1.2 - .012 * abs(hitP.z + 64.);
+
+					rayD = (-16. - camP.x) / camV.x;
+					hitP = float3(camV.zy * rayD + camP.zy, -16.).zyx;
+					if(40. < hitP.z && hitP.z < 41. && 0. < hitP.y && hitP.y < 18.) col = ST_wallpaper(hitP.zy);
+
+					rayD = (40. - camP.z) / camV.z;
+					hitP = float3(camV.xy * rayD + camP.xy, 40.);
+					if(-48. < hitP.x && hitP.x < -16. && 0. < hitP.y && hitP.y < 18.) col = ST_wallpaper(hitP.xy) + .9 - .01 * abs(hitP.x - 48.);
+
+					rayD = (28. - camP.z) / camV.z;
+					hitP = float3(camV.xy * rayD + camP.xy, 28.);
+					if(hitP.x < -48. && 0. < hitP.y && hitP.y < 20.) col = float3(.5, .5, .2) - .01 * hitP.y;
+
+					rayD = (-16. - camP.x) / camV.x;
+					hitP = float3(camV.zy * rayD + camP.zy, -16.).zyx;
+					if(8. < hitP.z && hitP.z < 9. && 0. < hitP.y && hitP.y < 20.) col = lerp(col, ST_wallpaper(hitP.zy), min(6. * hitP.y, 1.));
+
+					rayD = (8. - camP.z) / camV.z;
+					hitP = float3(camV.xy * rayD + camP.xy, 8.);
+					if((0. < hitP.x || hitP.x < -16.) && 0. < hitP.y && hitP.y < 20.) col = lerp(col, ST_wallpaper(hitP.xy), min(6. * hitP.y, 1.));
+
+					O = float4(col, 1);
+
+				return float4(O.rgb * Input.Color.rgb, O.a * Input.Color.a);
+			}
+		]]
+	}
+	MainCode PS_Nebula
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			#define ST_JominiResolution float3(1920.0, 1080.0, 1.0)
+
+			PDX_MAIN
+			{
+				float2 JominiUV = float2(Input.UV0.x, 1.0 - Input.UV0.y);
+				float2 w = JominiUV * float2(1920.0, 1080.0);
+				float4 f = float4(0.0, 0.0, 0.0, 1.0);
+
+				float k=0.;
+					float3 d =  float3(w, 1.)/ST_JominiResolution-.7, o = d, c=k*d, p = float3(0.0, 0.0, 0.0);
+
+					[loop]
+					for( int i=0; i<99; i++ ){
+
+						p = o+sin(GlobalTime*.1);
+						for (int j = 0; j < 10; j++)
+
+							p = abs(p) / dot(p,p) -1.,k += exp(-6. * abs(dot(p,o)));
+
+
+						k/=3.;
+						o += d *.05/k;
+						c = .97*c + .1*k*float3(k*k, k, 1);
+					}
+					c =  .4 *log(1.+c);
+					f.rgb = c;
+
+				return float4(f.rgb * Input.Color.rgb, f.a * Input.Color.a);
+			}
+		]]
+	}
 }
 # SampleImageSprite( Texture, Input.UV0 );
 
@@ -1973,6 +2122,36 @@ Effect VortexPortalDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_VortexPortal"
+	BlendState = "BlendState"
+	Defines = { "DISABLED" }
+}
+
+Effect Backrooms
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Backrooms"
+	BlendState = "BlendState"
+}
+
+Effect BackroomsDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Backrooms"
+	BlendState = "BlendState"
+	Defines = { "DISABLED" }
+}
+
+Effect Nebula
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Nebula"
+	BlendState = "BlendState"
+}
+
+Effect NebulaDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_Nebula"
 	BlendState = "BlendState"
 	Defines = { "DISABLED" }
 }
