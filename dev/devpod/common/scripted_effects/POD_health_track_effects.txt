@@ -60,6 +60,90 @@ POD_increase_wounds_effect = {
 		# Snapshot the soak chance once; the loop below rolls it per point of final_damage.
 		save_scope_value_as = { name = soak_pct value = POD_soak_chance }
 
+		# Combat Mini-game addition: an armour-shredding weapon lowers the soak
+		# of the packet it is delivering. Applied HERE and not inside
+		# POD_soak_chance because that script value is asked "how soaky is this
+		# character" with no attacker in hand - the slot card, the AI hoist, the
+		# character sidebar and the maim roll all evaluate it, and a term keyed
+		# on scope:wound_attacker would leak into every one of them. This is the
+		# single point where "this incoming blow, from this attacker" exists.
+		# Sitting above the preview keeps the tooltip honest about the real odds.
+		#
+		# scope:combat_host narrows it to a live minigame dispatch (49 non-hostile
+		# callers reach this line, and a stale wound_attacker from an earlier
+		# hostile call in the same chain would pass a bare exists check). The
+		# nested trigger_if is mandatory: neither AND nor OR short-circuits, so a
+		# bare var read would fire on attackers that carry no penalty.
+		# min = 0 is load-bearing - nothing downstream re-clamps soak_pct.
+		if = {
+			limit = {
+				exists = scope:combat_host
+				exists = scope:wound_attacker
+				scope:wound_attacker = {
+					trigger_if = {
+						limit = { has_variable = pod_combat_weapon_soak_pen }
+						var:pod_combat_weapon_soak_pen > 0
+					}
+					trigger_else = { always = no }
+				}
+			}
+			save_scope_value_as = {
+				name  = soak_pct
+				value = {
+					value    = scope:soak_pct
+					subtract = scope:wound_attacker.var:pod_combat_weapon_soak_pen
+					min      = 0
+				}
+			}
+		}
+		# The same weapon outside the minigame. There is no per-dispatch marker
+		# out here, so the weapon-shaped death reason is what stands in for "this
+		# wound was actually struck with the thing" - which is also what stops a
+		# shredding sword from thinning armour against a poisoning. The weapon is
+		# read straight off the attacker rather than from a transient.
+		#
+		# The combat exclusion is NOT redundant with the branch above: in a fight
+		# the marker is only set for uses_weapon moves, so a bite or a mind blast
+		# fails that branch and would otherwise fall through to here, where
+		# REASON = duel is itself weapon-shaped. Recoil would shred the actor's
+		# own armour the same way.
+		else_if = {
+			limit = {
+				NOT = { exists = scope:combat_host }
+				exists = scope:wound_attacker
+				# Same reason as the classifier arm: the saved attacker is never
+				# cleared, so refuse the self case rather than let a character's
+				# own weapon thin their own armour against someone else's blow.
+				NOT = { this = scope:wound_attacker }
+				POD_is_death_by_weapon = { DEATH_REASON = scope:death_reason }
+				scope:wound_attacker = {
+					any_equipped_character_artifact = {
+						artifact_slot_type = primary_armament
+						prev = { can_benefit_from_artifact = prev }
+						has_variable = artifact_weapon_soak_penalty
+					}
+				}
+			}
+			scope:wound_attacker = {
+				random_equipped_character_artifact = {
+					limit = {
+						artifact_slot_type = primary_armament
+						prev = { can_benefit_from_artifact = prev }
+						has_variable = artifact_weapon_soak_penalty
+					}
+					save_scope_as = pod_weapon_wound
+				}
+			}
+			save_scope_value_as = {
+				name  = soak_pct
+				value = {
+					value    = scope:soak_pct
+					subtract = scope:pod_weapon_wound.var:artifact_weapon_soak_penalty
+					min      = 0
+				}
+			}
+		}
+
 		# Visible damage preview for caller tooltips (event options, interaction accept buttons).
 		if = {
 			limit = {

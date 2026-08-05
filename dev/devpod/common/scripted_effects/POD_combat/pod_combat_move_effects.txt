@@ -501,7 +501,9 @@ POD_execute_combat_move = {
 		# Lift for the log segment (push_log capture + the §16 wrap-up gate).
 		# The REQUESTED amount: the splat-agnostic helpers don't expose the
 		# applied gain, so a pool-capped partial still logs the full bonus.
-		set_variable = { name = pod_combat_last_energy_gain value = $STORY$.var:bonus_value }
+		# Scaled to the actor's own resource so the row can read "+1 Blood".
+		pod_combat_scale_energy_to_splat_effect = { CHARACTER = var:pod_combat_actor_char COUNT = $STORY$.var:bonus_value }
+		set_variable = { name = pod_combat_last_energy_gain value = scope:pod_combat_scaled_energy }
 	}
 	if = {
 		limit = {
@@ -513,9 +515,57 @@ POD_execute_combat_move = {
 			NOT = { pod_combat_is_practice_trigger = yes }
 		}
 		var:pod_combat_target_char = { POD_splat_agnostic_energy_loss = { COUNT = $STORY$.var:bonus_value } }
-		# Requested amount, like the gain lift above. Inside the practice gate,
-		# so a spar never logs a drain that was skipped.
-		set_variable = { name = pod_combat_last_energy_drain value = $STORY$.var:bonus_value }
+		# Requested amount, like the gain lift above, but scaled to the TARGET:
+		# it is their pool that shrinks, and their splat decides by how much.
+		# Inside the practice gate, so a spar never logs a drain that was skipped.
+		pod_combat_scale_energy_to_splat_effect = { CHARACTER = var:pod_combat_target_char COUNT = $STORY$.var:bonus_value }
+		set_variable = { name = pod_combat_last_energy_drain value = scope:pod_combat_scaled_energy }
+	}
+
+	# ── 9c. Weapon recovery riders ───────────────────────────────
+	# A weapon that feeds on the wounds it opens. Fires ONCE per action, not
+	# once per victim: pod_combat_result_code_indicates_hp_damage_trigger reads
+	# the live result pair on a single target and the AoE latch on a sweep, so
+	# a three-target swing still returns one drink. Damage results are final by
+	# here (§6 closed, both sweeps ran inside it) and §15 counters have not run
+	# yet, so the actor is necessarily still alive - no is_alive guard, same as
+	# the §9b bonus heals above.
+	#
+	# A fully-soaked hit is not "damage": the predicate excludes flag:soaked, so
+	# armour that stops the blade also stops the feeding.
+	if = {
+		limit = {
+			has_variable = pod_combat_weapon_heal_on_damage
+			pod_combat_result_code_indicates_hp_damage_trigger = yes
+		}
+		# Absolute scope reference, not a bare var: the route helper consumes
+		# $AMOUNT$ inside a switch to the healed CHARACTER, where a host-relative
+		# read would find nothing (§9b passes $STORY$.var:bonus_value for the
+		# same reason).
+		pod_combat_restore_hp_superficial_effect = { SIDE = actor AMOUNT = scope:combat_host.var:pod_combat_weapon_heal_on_damage }
+	}
+	if = {
+		limit = {
+			has_variable = pod_combat_weapon_energy_on_damage
+			pod_combat_result_code_indicates_hp_damage_trigger = yes
+			has_variable = pod_combat_actor_char
+		}
+		# Scope-switch first: the splat-agnostic pool is the CURRENT scope's,
+		# so a bare call would refill the PC on every AI swing (§3's trap).
+		# COUNT is therefore read in CHARACTER scope and must be absolute.
+		var:pod_combat_actor_char = { POD_splat_agnostic_energy_gain = { COUNT = scope:combat_host.var:pod_combat_weapon_energy_on_damage } }
+		# Share the §9b lift so the existing energy-gain log segment renders it.
+		# Add rather than overwrite: a move can fire an energy_gain bonus AND
+		# carry a feeding weapon, and the row should show the whole gain.
+		# Both amounts are scaled to the actor's resource, so the sum is too.
+		pod_combat_scale_energy_to_splat_effect = { CHARACTER = var:pod_combat_actor_char COUNT = var:pod_combat_weapon_energy_on_damage }
+		if = {
+			limit = { has_variable = pod_combat_last_energy_gain }
+			change_variable = { name = pod_combat_last_energy_gain add = scope:pod_combat_scaled_energy }
+		}
+		else = {
+			set_variable = { name = pod_combat_last_energy_gain value = scope:pod_combat_scaled_energy }
+		}
 	}
 
 	# ── 10. Morale heal ──────────────────────────────────────────
@@ -880,6 +930,7 @@ POD_execute_combat_move = {
 			limit = { is_alive = yes }
 			remove_variable = pod_combat_force_agg
 			remove_variable = pod_combat_weapon_attack
+			remove_variable = pod_combat_weapon_soak_pen
 		}
 	}
 }
@@ -935,6 +986,17 @@ pod_combat_apply_single_hp_damage_effect = {
 	if = {
 		limit = { scope:current_move = { has_variable = uses_weapon } }
 		scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_weapon_attack }
+		# The soak-shred magnitude rides the SAME window as the marker, and for
+		# the same reason: PoD's soak roll runs inside the wound call and can
+		# only see the attacker, so the number has to sit on the actor. Riding
+		# the marker's lifetime exactly is load-bearing - a counter's victim IS
+		# this actor, so a leaked penalty would shred their own armour.
+		if = {
+			limit = { scope:combat_host = { has_variable = pod_combat_weapon_soak_penalty } }
+			scope:combat_host.var:pod_combat_actor_char ?= {
+				set_variable = { name = pod_combat_weapon_soak_pen value = scope:combat_host.var:pod_combat_weapon_soak_penalty }
+			}
+		}
 	}
 
 	if = {
@@ -1016,7 +1078,10 @@ pod_combat_apply_single_hp_damage_effect = {
 	}
 	# Same reasoning for the weapon marker, but it is set before the
 	# aggravated branch so it has to drop outside the if/else.
-	scope:combat_host.var:pod_combat_actor_char ?= { remove_variable = pod_combat_weapon_attack }
+	scope:combat_host.var:pod_combat_actor_char ?= {
+		remove_variable = pod_combat_weapon_attack
+		remove_variable = pod_combat_weapon_soak_pen
+	}
 }
 
 pod_combat_dispatch_damage_pipeline_effect = {
