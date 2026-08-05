@@ -1319,9 +1319,19 @@ PixelShader =
 			#define volsteps 20
 			#define stepsize 0.1
 
-			#define zoom   0.800
+			#ifdef BG
+				#define zoom   2.400
+			#else
+				#define zoom   0.800
+			#endif
+			
 			#define tile   0.850
-			#define speed  0.004
+			
+			#ifdef BG
+				#define speed  0.0015
+			#else
+				#define speed  0.004
+			#endif
 
 			#define brightness 0.0016
 			#define darkmatter 0.300
@@ -1343,17 +1353,20 @@ PixelShader =
 			PDX_MAIN
 			{
 				float2 uv = Input.UV0;
-				//uv = float2(1.0,1.0) - uv;
 				uv.x = 1.0 - uv.x;
 
-				float2 TextureSize;
-				PdxTex2DSize(Texture, TextureSize);
+				#ifdef BG
+					float2 TextureSize = SpriteSize.xy;
+				#else
+					float2 TextureSize;
+					PdxTex2DSize(Texture, TextureSize);
+				#endif
 
 				//get coords and direction
 				uv = uv - 0.5;
 				uv.y *= TextureSize.y/TextureSize.x;
 				#ifdef EVENT
-				uv.x *= 1.4;
+					uv.x *= 1.4;
 				#endif
 				float3 dir=float3(uv*zoom,1.);
 				float time=GuiTime*speed+.25;
@@ -1366,7 +1379,11 @@ PixelShader =
 				dir.xz=mul(dir.xz,rot1);
 				dir.xy=mul(dir.xy,rot2);
 				float3 from=float3(1.,.5,0.5);
-				from+=float3(time*2.,time,-2.);
+				#ifdef BG
+					from+=float3(1000.,time*2.,-2.);
+				#else
+					from+=float3(time*2.,time,-2.);
+				#endif
 				from.xz=mul(from.xz,rot1);
 				from.xy=mul(from.xy,rot2);
 				//disappearing stars (happy accident?)
@@ -1413,9 +1430,9 @@ PixelShader =
 
 				//vignette
 				#ifndef EVENT
-				float vig = 1.0-length(uv);
-				C.rgb = lerp(C.rgb,C.rgb*float3(vig,vig,vig),0.8);
-				alpha = lerp(alpha,alpha*vig,0.6);
+					float vig = 1.0-length(uv);
+					C.rgb = lerp(C.rgb,C.rgb*float3(vig,vig,vig),0.8);
+					alpha = lerp(alpha,alpha*vig,0.6);
 				#endif
 				return float4(C.rgb, alpha);
 			}
@@ -2227,4 +2244,19 @@ Effect DeepUmbraEventDisabled
 	PixelShader = "PS_DeepUmbra"
 	
 	Defines = { "EVENT" "DISABLED" }
+}
+
+Effect DeepUmbraBG
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
+	
+	Defines = { "BG" }
+}
+Effect DeepUmbraBGDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_DeepUmbra"
+	
+	Defines = { "BG" "DISABLED" }
 }
