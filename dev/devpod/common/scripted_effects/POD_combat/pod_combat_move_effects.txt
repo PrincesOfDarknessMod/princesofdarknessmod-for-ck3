@@ -558,7 +558,7 @@ POD_execute_combat_move = {
 		# Add rather than overwrite: a move can fire an energy_gain bonus AND
 		# carry a feeding weapon, and the row should show the whole gain.
 		# Both amounts are scaled to the actor's resource, so the sum is too.
-		pod_combat_scale_energy_to_splat_effect = { CHARACTER = var:pod_combat_actor_char COUNT = var:pod_combat_weapon_energy_on_damage }
+		pod_combat_scale_energy_to_splat_effect = { CHARACTER = var:pod_combat_actor_char COUNT = scope:combat_host.var:pod_combat_weapon_energy_on_damage }
 		if = {
 			limit = { has_variable = pod_combat_last_energy_gain }
 			change_variable = { name = pod_combat_last_energy_gain add = scope:pod_combat_scaled_energy }
@@ -978,13 +978,20 @@ pod_combat_apply_single_hp_damage_effect = {
 	# chain below it) reads capability flags without re-threading $STORY$.
 	$STORY$ = { save_scope_as = current_move }
 
-	# A uses_weapon move marks the actor for the duration of this one dispatch,
-	# which is what lets POD_applies_superficial_as_aggravated_damage's wielded
-	# -artifact list promote the wound. Recoil, counters and DoT ticks reach the
-	# same classifier and deliberately do NOT carry the marker, so a bane sword
-	# no longer aggravates everything its bearer does.
+	# An ARMED uses_weapon move marks the actor for the duration of this one
+	# dispatch, which is what lets POD_applies_superficial_as_aggravated_damage's
+	# wielded-artifact list promote the wound. Recoil, counters and DoT ticks
+	# reach the same classifier and deliberately do NOT carry the marker, so a
+	# bane sword no longer aggravates everything its bearer does.
+	# The armed test matters because that list is the loose one: its arms scan
+	# any equipped artifact with no slot or can_benefit filter (see
+	# pod_combat_weapon_triggers.txt), so without it a bare-handed swing would
+	# still be aggravated by a bane trinket the bearer cannot even wield.
 	if = {
-		limit = { scope:current_move = { has_variable = uses_weapon } }
+		limit = {
+			scope:current_move = { has_variable = uses_weapon }
+			scope:combat_host.var:pod_combat_actor_char ?= { pod_combat_actor_is_armed_trigger = yes }
+		}
 		scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_weapon_attack }
 		# The soak-shred magnitude rides the SAME window as the marker, and for
 		# the same reason: PoD's soak roll runs inside the wound call and can
@@ -1324,6 +1331,7 @@ pod_combat_arm_retaliation_effect = {
 		# final else, so a morale/agg counter replaced by a plain one would keep
 		# the stale _kind / _morale presence flags.
 		remove_variable = pod_combat_actor_retaliate_$WHEN$_kind
+		remove_variable = pod_combat_actor_retaliate_$WHEN$_kind_from_weapon
 		remove_variable = pod_combat_actor_retaliate_$WHEN$_morale
 		if = {
 			limit = { $STORY$ = { has_variable = retaliate_damage } }
@@ -1355,6 +1363,12 @@ pod_combat_arm_retaliation_effect = {
 			# Ranks below an authored class, which is the move's own identity.
 			limit = { scope:combat_host ?= { has_variable = pod_combat_weapon_class } }
 			pod_combat_override_kind_from_weapon_effect = { KIND_VAR = pod_combat_actor_retaliate_$WHEN$_kind }
+			# Provenance, for the fire-time waste guard: only a WEAPON-derived kind
+			# stands down against an immune victim. An authored elemental counter
+			# keeps its identity and may legitimately read immune. The victim is
+			# unknowable until the counter fires, so the test cannot run here; this
+			# marker rides the slot round-trip with the other stance fields.
+			set_variable = { name = pod_combat_actor_retaliate_$WHEN$_kind_from_weapon value = yes }
 		}
 	}
 }
@@ -1498,11 +1512,27 @@ pod_combat_seed_dot_on_slot_effect = {
 	# to its caster (killer attribution / attacker-keyed aggravated), not the PC
 	# host. Overwrites on re-apply like the other slot_dot_* vars (no stacking).
 	set_variable = { name = slot_dot_source value = $CASTER$ }
+	# Saved ahead of the kind seeding (rather than beside the other
+	# dot_applied_* scopes below) so the waste guard can hand the victim to a
+	# host-scope trigger.
+	var:slot_char = { save_scope_as = dot_applied_victim }
 	# Literal-flags-only seeding: the kind IS the damage class (aggravated
 	# ticks as duel_aggravated; superficial/absent falls to flag:duel).
 	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = slot_dot_kind }
-	# A weapon retype rides onto the burn it lit, same as the direct hit.
-	pod_combat_override_kind_from_weapon_effect = { KIND_VAR = slot_dot_kind }
+	# A weapon retype rides onto the burn it lit, same as the direct hit -
+	# including its waste guard. A burn this victim is immune to ticks zero for
+	# its whole duration, which is strictly worse than the authored kind the
+	# retype replaced. Unlike the counter path the victim is known here (the
+	# seed runs in the actor's own dispatch), so the LIVE profile trigger is the
+	# right one.
+	if = {
+		limit = {
+			scope:combat_host ?= {
+				NOT = { pod_combat_weapon_retype_is_wasted_trigger = { VICTIM = scope:dot_applied_victim } }
+			}
+		}
+		pod_combat_override_kind_from_weapon_effect = { KIND_VAR = slot_dot_kind }
+	}
 	# Morale wins over the damage class (matches the counter-damage precedence).
 	if = {
 		limit = { $STORY$ = { has_variable = dot_morale } }
@@ -1510,7 +1540,6 @@ pod_combat_seed_dot_on_slot_effect = {
 	}
 	save_scope_value_as = { name = dot_applied_amount value = $AMOUNT$ }
 	save_scope_value_as = { name = dot_applied_rounds value = $ROUNDS$ }
-	var:slot_char = { save_scope_as = dot_applied_victim }
 }
 
 # CANONICAL upgrade-only tier write, shared by §5c's workspace writes, both
