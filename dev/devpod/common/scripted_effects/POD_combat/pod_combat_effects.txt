@@ -77,6 +77,7 @@ pod_combat_clear_per_target_state_effect = {
 	remove_variable = pod_combat_last_damage
 	remove_variable = pod_combat_last_energy_gain
 	remove_variable = pod_combat_last_energy_drain
+	remove_variable = pod_combat_last_ap_refund
 }
 
 
@@ -141,6 +142,7 @@ pod_combat_apply_reaction_if_triggered_effect = {
 		}
 		remove_variable = $TRIGGER_VAR$
 		remove_variable = $KIND_VAR$
+		remove_variable = $KIND_VAR$_from_weapon
 		# Clear the tooltip-only morale companion too, else it orphans on the
 		# slot and mislabels a LATER plain/elemental counter as Morale on the
 		# slot-card status tooltip (PODCombatStatusRetaliationText).
@@ -177,6 +179,19 @@ pod_combat_check_retaliation_effect = {
 		ACTOR_SIDE        = $ACTOR_SIDE$
 		RETALIATOR_SIDE   = $TARGET_SIDE$
 	}
+
+	# Retaliate on any resolved attack - hit, evasion, or immunity. MUST stay
+	# last: its condition trigger reads pod_combat_last_retal_fired, which the
+	# two calls above set, so a specific charge answers this attack and the
+	# generic one is held rather than spent.
+	pod_combat_apply_reaction_if_triggered_effect = {
+		TRIGGER_VAR       = pod_combat_$TARGET_SIDE$_retaliate_any
+		KIND_VAR          = pod_combat_$TARGET_SIDE$_retaliate_any_kind
+		MORALE_FLAG_VAR   = pod_combat_$TARGET_SIDE$_retaliate_any_morale
+		CONDITION_TRIGGER = pod_combat_reaction_any_condition_trigger
+		ACTOR_SIDE        = $ACTOR_SIDE$
+		RETALIATOR_SIDE   = $TARGET_SIDE$
+	}
 }
 
 pod_combat_apply_retaliation_effect = {
@@ -207,6 +222,28 @@ pod_combat_apply_retaliation_effect = {
 		save_scope_value_as = {
 			name  = retaliation_amount
 			value = var:$AMOUNT_VAR$
+		}
+
+		# Weapon-retype waste guard, deferred-fire edition. The kind was stamped
+		# at ARM time from the counter owner's weapon; only now is the victim
+		# known. Strip a weapon-derived elemental kind the victim is immune to so
+		# the plain branch below runs: the retype replaced plain duel damage, so
+		# letting immunity zero it leaves the weapon strictly worse than none
+		# (mirrors the direct-hit guard in pod_combat_apply_single_hp_damage_effect).
+		# Only weapon-derived kinds stand down - an AUTHORED elemental counter is
+		# the move's identity and may legitimately read immune. The live profile is
+		# useless here: at fire time var:pod_combat_weapon_class belongs to the
+		# attacker, not to whoever armed this counter.
+		if = {
+			limit = {
+				has_variable = $KIND_VAR$_from_weapon
+				pod_combat_stamped_type_is_wasted_trigger = {
+					KIND_VAR = $KIND_VAR$
+					VICTIM   = var:pod_combat_$ACTOR_SIDE$_char
+				}
+			}
+			remove_variable = $KIND_VAR$
+			remove_variable = $KIND_VAR$_from_weapon
 		}
 
 		# Dispatch on the counter kind: morale > typed (aggravated or an
@@ -915,8 +952,14 @@ pod_combat_resolve_contact_effect = {
 	}
 	else = {
 		# 2. Stance consume (capability-driven)
+		# An undodgeable weapon makes its moves ignore the stance the way an
+		# authored move without checks_stance does: the guard/dodge is stepped
+		# around, not spent, so it still stands against the next attacker.
 		if = {
-			limit = { scope:current_move = { has_variable = checks_stance } }
+			limit = {
+				scope:current_move = { has_variable = checks_stance }
+				NOT = { has_variable = pod_combat_weapon_undodgeable }
+			}
 			pod_combat_consume_target_stance_effect = { TARGET_SIDE = $TARGET_SIDE$ }
 		}
 		else = {
@@ -1072,12 +1115,26 @@ pod_combat_restore_morale_effect = {
 		name = old_morale
 		value = var:pod_combat_$SIDE$_morale
 	}
+	# The cap is per-character (wound-track derived), so it has to come off THIS
+	# side's combatant rather than a flat constant. Staged into a scope value
+	# because a $SIDE$ splice belongs in a variable name, not an SV identifier -
+	# pod_combat_actor_max_morale_value / _target_ would stop being greppable.
+	save_scope_value_as = {
+		name = side_max_morale
+		value = {
+			value = pod_combat_max_morale_base
+			if = {
+				limit = { has_variable = pod_combat_$SIDE$_char }
+				value = var:pod_combat_$SIDE$_char.pod_combat_char_max_morale_value
+			}
+		}
+	}
 	save_scope_value_as = {
 		name = new_morale
 		value = {
 			value = scope:old_morale
 			add = $AMOUNT$
-			max = pod_combat_max_morale
+			max = scope:side_max_morale
 		}
 	}
 	set_variable = { name = pod_combat_$SIDE$_morale value = scope:new_morale }
@@ -1464,6 +1521,10 @@ pod_combat_push_log_effect = {
 			limit = { scope:combat_host = { has_variable = pod_combat_last_energy_drain } }
 			set_variable = { name = energy_drain value = scope:combat_host.var:pod_combat_last_energy_drain }
 		}
+		if = {
+			limit = { scope:combat_host = { has_variable = pod_combat_last_ap_refund } }
+			set_variable = { name = ap_refund value = scope:combat_host.var:pod_combat_last_ap_refund }
+		}
 		# Retaliation damage, in its own var so the counter renders even
 		# when the original attack was blocked / soaked (entry.damage = 0).
 		if = {
@@ -1741,6 +1802,7 @@ pod_combat_push_log_effect = {
 					OR = {
 						has_variable = retaliate_if_hit
 						has_variable = retaliate_if_missed
+						has_variable = retaliate_if_attacked
 					}
 				}
 				pod_combat_log_seg_burst_gate_trigger = yes
@@ -1820,6 +1882,38 @@ pod_combat_push_log_effect = {
 			if = {
 				limit = { var:seg_bake_prior > 0 }
 				set_variable = { name = seg_energy_drain_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		# AP refund (outcome-style, same reasoning as the energy pair above:
+		# keyed on the entry var mirrored from the §14 lift, so it renders only
+		# when the bonus condition actually held, and not burst-gated because
+		# §14 runs after the per-target pushes).
+		if = {
+			limit = {
+				has_variable = ap_refund
+				var:ap_refund > 0
+			}
+			set_variable = { name = seg_ap_refund_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_ap_refund_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		# Marker modifier (intent-style, like the ap_gain/ap_drain segments):
+		# read off the move, since applying it is unconditional once the move
+		# resolves, so there is no outcome to mirror.
+		if = {
+			limit = {
+				has_variable = move
+				var:move = { has_variable = marker_modifier }
+				pod_combat_log_seg_burst_gate_trigger = yes
+			}
+			set_variable = { name = seg_marker_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_marker_sep value = 1 }
 			}
 			# Kept on the last segment too: appending a new segment stays a
 			# pure block copy.
@@ -2054,6 +2148,26 @@ pod_combat_route_to_pod_heal_effect = {
 	pod_combat_set_outcome_if_unset_effect = { CODE = heal }
 }
 
+# Converts a splat-agnostic energy amount into the points $CHARACTER$ will
+# actually gain or lose, and saves it as scope:pod_combat_scaled_energy.
+# Mirrors POD_scale_energy_count_to, which the splat-agnostic energy helpers
+# use internally but do not expose - including its ceiling, so 2 agnostic is
+# 1 Blood on a 5-point pool rather than 0.9 of one. The log lifts run this so
+# the row can name a real resource and a real number; loc cannot ceiling.
+pod_combat_scale_energy_to_splat_effect = {
+	$CHARACTER$ = {
+		save_scope_value_as = {
+			name = pod_combat_scaled_energy
+			value = {
+				value    = $COUNT$
+				multiply = maximum_splat_energy
+				divide   = maximum_splat_agnostic_energy
+				ceiling  = yes
+			}
+		}
+	}
+}
+
 pod_combat_restore_hp_superficial_effect = {
 	# $SIDE$ = "actor" or "target"
 	# $AMOUNT$ = superficial HP to restore (aggravated untouched; PoD
@@ -2079,7 +2193,7 @@ pod_combat_restore_hp_aggravated_effect = {
 # ─── END COMBAT (INLINE) ──────────────────────────────────────────
 # Morale -> Mental Strain, batched to ONE pass at combat end. For each 
 # alive combatant, inflict POD_static_stress_gain from the FINAL morale deficit
-# (pod_combat_max_morale - slot_morale, x the stress multiplier). POD_static_stress_gain is
+# (pod_combat_slot_max_morale_value - slot_morale, x the stress multiplier). POD_static_stress_gain is
 # heavy (per-iteration force_character_skill_recalculation), so calling it per morale event
 # caused lag spikes; this runs it once per combatant, off the interactive turn loop. Host
 # scope (the slot list lives on the host).
@@ -2090,7 +2204,7 @@ pod_combat_apply_morale_strain_effect = {
 		save_scope_value_as = {
 			name = morale_strain
 			value = {
-				value = pod_combat_max_morale
+				value = pod_combat_slot_max_morale_value
 				subtract = var:slot_morale
 				multiply = pod_combat_morale_stress_multiplier
 				min = 0
@@ -2187,10 +2301,13 @@ pod_combat_end_combat_effect = {
 #   1. Strip discipline battle modifiers added by
 #      POD_{enemy,ally}_knight_set_discipline_battle_effect at init,
 #      so discipline bonuses don't leak outside of the duel.
-#   2. Remove the pod_combat_duel_active state marker so other
-#      systems (feeding, schemes, travel) stop deferring on this
-#      character. The modifier has a safety-net 30-day expiry, but
-#      the explicit removal keeps state clean.
+#   2. Remove the marker character modifiers: pod_combat_duel_active,
+#      so other systems (feeding, schemes, travel) stop deferring on
+#      this character, plus every move-applied marker from
+#      common/modifiers/pod_combat_modifiers.txt. Each carries a
+#      safety-net 30-day expiry, but the explicit removal keeps state
+#      clean. Mirrored in pod_combat_host_died_release_effect; a new
+#      marker key adds a line to both.
 #
 # Submods wanting to extend can override this scripted effect via
 # load order, or wrap it with their own pre/post effects.
@@ -2202,6 +2319,7 @@ pod_combat_duel_end_effect = {
 		var:slot_char = {
 			POD_clear_discipline_battle_effect = yes
 			remove_character_modifier = pod_combat_duel_active
+			remove_character_modifier = pod_combat_anima_flare
 		}
 	}
 
@@ -2242,6 +2360,7 @@ pod_combat_host_died_release_effect = {
 		var:slot_char = {
 			POD_clear_discipline_battle_effect = yes
 			remove_character_modifier = pod_combat_duel_active
+			remove_character_modifier = pod_combat_anima_flare
 			remove_character_flag = pod_combat_nonfatal_active
 			remove_character_flag = pod_combat_practice_active
 			remove_variable = engaged_in_single_combat
@@ -2319,6 +2438,9 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_target_is_guarding
 	remove_variable = pod_combat_winner
 	remove_variable = pod_combat_loser
+	# Weapon profile: §17 clears it after every action, so this is only
+	# insurance against a fight ending mid-action.
+	pod_combat_clear_actor_weapon_profile_effect = yes
 	# (ai_last_move / _prev_move / _prev2_move live on the AI char, not
 	# the host; cleared by group_cleanup + slot-init.)
 	remove_variable = pod_combat_ai_saved_enemy_target_team
@@ -2444,6 +2566,18 @@ pod_combat_cleanup_effect = {
 	remove_variable = pod_combat_target_retaliate_hit_morale
 	remove_variable = pod_combat_actor_retaliate_miss_morale
 	remove_variable = pod_combat_target_retaliate_miss_morale
+	remove_variable = pod_combat_actor_retaliate_any
+	remove_variable = pod_combat_target_retaliate_any
+	remove_variable = pod_combat_actor_retaliate_any_kind
+	remove_variable = pod_combat_target_retaliate_any_kind
+	remove_variable = pod_combat_actor_retaliate_hit_kind_from_weapon
+	remove_variable = pod_combat_target_retaliate_hit_kind_from_weapon
+	remove_variable = pod_combat_actor_retaliate_miss_kind_from_weapon
+	remove_variable = pod_combat_target_retaliate_miss_kind_from_weapon
+	remove_variable = pod_combat_actor_retaliate_any_kind_from_weapon
+	remove_variable = pod_combat_target_retaliate_any_kind_from_weapon
+	remove_variable = pod_combat_actor_retaliate_any_morale
+	remove_variable = pod_combat_target_retaliate_any_morale
 	remove_variable = pod_combat_actor_prowess
 	remove_variable = pod_combat_target_prowess
 	remove_variable = pod_combat_actor_hit_chance

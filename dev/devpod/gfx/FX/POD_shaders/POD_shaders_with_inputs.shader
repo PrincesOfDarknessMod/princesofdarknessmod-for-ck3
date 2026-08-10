@@ -778,6 +778,313 @@ PixelShader =
 			}
 		]]
 	}
+
+	MainCode PS_PODLineSegment
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			float2x2 rot_degrees(in float degree) {
+				float rad = radians(degree);
+				float c = cos(rad);
+				float s = sin(rad);
+				return float2x2(float2(c, s), float2(-s, c));
+			}
+
+			// hash without sine, by dave hoskins https://www.shadertoy.com/view/4djSRW
+			// because the trig-based hash functions cause issues on vulkan
+			float2 hash(float2 p) {
+				float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+				p3 += dot(p3, p3.yzx+33.33);
+				return frac((p3.xx+p3.yz)*p3.zy);
+			}
+
+			// iq's simplex noise
+			// https://www.shadertoy.com/view/Msf3WH
+			float noise( in float2 p ) {
+				const float K1 = 0.366025404; // (sqrt(3)-1)/2;
+				const float K2 = 0.211324865; // (3-sqrt(3))/6;
+
+				float2 i = floor( p + (p.x+p.y)*K1 );
+				float2 a = p - i + (i.x+i.y)*K2;
+				float  m = step(a.y,a.x); 
+				float2 o = float2(m,1.0-m);
+				float2 b = a - o + K2;
+				float2 c = a - 1.0 + 2.0*K2;
+				float3 h = max( 0.5-float3(dot(a,a), dot(b,b), dot(c,c) ), 0.0 );
+				float3 n = h*h*h*h*float3( dot(a,hash(i+0.0)), dot(b,hash(i+o)), dot(c,hash(i+1.0)));
+				return dot( n, float3(70.0,70.0,70.0) );
+			}
+
+			float fbm( in float2 p ) {
+				float2x2 rot = rot_degrees(27.5);
+				float d = noise(p); p = mul(p,rot);
+				d += .5 * noise(p); p = mul(p,rot);
+				d += .25 * noise(p); p = mul(p,rot);
+				d += .125 * noise(p); p = mul(p,rot);
+				d += .0625 * noise(p);
+				d /= (1. + .5 + .25 + .125 + .0625);
+				return .5 + .5*d;
+			}
+
+			float warp( in float2 p ) {
+				float2 q = float2( fbm( p + float2(0.0,0.0) ),
+				                   fbm( p + float2(5.2,1.3) ) );
+
+				return fbm( p + 2.5*q );
+			}
+			
+			// https://www.shadertoy.com/view/3tdSDj
+			float sdf_linesegment( in float2 p, in float2 a, in float2 b, in float r ) {
+				float2 ba = b-a;
+				float2 pa = p-a;
+				float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+				return length(pa-h*ba)-r;
+			}
+			
+			// https://www.shadertoy.com/view/3ltSW2
+			float sdf_circle( float2 p, float r ) {
+				return length(p) - r;
+			}
+			
+			float2 map_uv( in float2 uv, in float2 fullsize ) {
+				float2 mapped_uv = uv;
+				//mapped_uv = mapped_uv * 2. - 1.;
+				mapped_uv.x *= fullsize.x / fullsize.y;
+				mapped_uv.y *= -1.;
+				return mapped_uv;
+			}
+			
+			float3 blend_color( in float val, in float3 blend ) {
+				return float3( pow(val, lerp(5.0,1.0,blend.x)),
+				               pow(val, lerp(5.0,1.0,blend.y)),
+				               pow(val, lerp(5.0,1.0,blend.z))  );
+			}
+
+			PDX_MAIN {
+				float2 top_left_pixel_pos = SpriteBorder[0].zw;
+				float2 full_size = SpriteBorder[0].xy; // 1300x600
+				
+				float2 internal_uv = Input.UV0;
+				float2 internal_fragCoord = Input.UV0 * SpriteSize.xy;
+				
+				float2 full_fragCoord = internal_fragCoord + top_left_pixel_pos;
+				float2 full_uv = full_fragCoord / full_size;
+				float2 uv = map_uv( full_uv, full_size );
+				
+				float2 line1_coord = SpriteBorder[1].xy;
+				float2 line2_coord = SpriteBorder[1].zw;
+				float2 line1_uv = map_uv( line1_coord / full_size, full_size );
+				float2 line2_uv = map_uv( line2_coord / full_size, full_size );
+				
+				float isHovered = 1.0 - SpriteTranslateRotateUVAndAlpha[2].w;
+				//float2 hover_uv = float2( 0., isHovered * 0.5 );
+				float2 hover_uv = float2( 0., isHovered * 0.3 );
+				
+				#ifdef CIRCLE
+					float warpfactor = 0.45;
+					//float warpfactor = 0.45 + isHovered * 0.15;
+				#else
+					float maxwarpfactor = length( line1_uv - line2_uv );
+					float distToLine1 = length( uv - line1_uv );
+					float distToLine2 = length( uv - line2_uv );
+					float warpfactor = min( distToLine1, distToLine2 ) / maxwarpfactor;
+					warpfactor = min( warpfactor, 1.0 );
+				#endif
+				
+				float2 time = float2(0.1,0.1) * GuiTime;
+				//float2 time = ( float2(0.1,0.1) + isHovered * 0.2 ) * GuiTime;
+
+				float2 uvwarp = float2( 0.0, 0.5 - warp( uv * 4.0 + hover_uv + time ) );
+				uv += uvwarp * warpfactor * 0.1 * (1.0 + isHovered);
+				
+				#ifdef CIRCLE
+					float sdf = sdf_circle( line1_uv-uv, length( line1_uv - line2_uv ) );
+				#else
+					float sdf = sdf_linesegment( uv, line1_uv, line2_uv, 0.0 );
+				#endif
+				
+				float d3 = abs( sdf / ( sdf + warp( uv * 8.0 + hover_uv - time ) ) );
+				
+				float lmid = 0.005 + ( warpfactor * 0.05 ) + isHovered * 0.006;
+				float lfth = 0.0 + ( warpfactor * 0.06 ) + isHovered * 0.003;
+				
+				float val = smoothstep(lmid+lfth, lmid-lfth, d3);
+				
+				float3 basecol1 = SpriteModifyTexturesColors[1].rgb;
+				float3 basecol2 = SpriteModifyTexturesColors[2].rgb;
+				
+				// #ifdef CIRCLE
+				// 	float blendfactor = 0.0;
+				// #else
+				// 	float blendfactor = distToLine1 / (distToLine1 + distToLine2);
+				// #endif
+				
+				#ifdef DISABLED
+					// brightness 1.0 for default white line with colored fringes
+					// 0.8 or 0.75 for non-highlighted line with just the color
+					float brightness = 0.8;
+				#else
+					// placeholder (sideways sine wave)
+					float brightness = 0.5 + 0.5*cos(full_uv.y*4.0+GuiTime*2.0);
+					brightness = lerp(0.6,0.8,brightness);
+					brightness = lerp(brightness,1.0,isHovered);
+				#endif
+					//brightness = 1.0;
+				
+				float3 col1 = blend_color( val*brightness, basecol1 );
+				float3 col2 = blend_color( val*brightness, basecol2 );
+				
+				float3 col = lerp(col1, col2, full_uv.x);
+				//float3 col = lerp(col1, col2, blendfactor);
+				
+				return float4( col, val );
+			}
+		]]
+	}
+
+	MainCode PS_PODOrb
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			// based on https://www.shadertoy.com/view/WftcWs
+			
+			#define ZOOM 0.77
+			#define BASE_OPACITY 0.95
+			
+			float2 rot2d(in float2 coord, in float angle) {
+				float c = cos(angle);
+				float s = sin(angle);
+				return mul( coord, float2x2(c, -s, s, c) );
+			}
+			
+			PDX_MAIN {
+				//Raymarch iterator
+				float i = 0.,
+				//Depth
+				d = 0.,
+				//Raymarch step distance
+				s = 0.,
+				// SDF
+				sd = 0.,
+				// Noise iterator
+				n = 0.,
+				// Brightness
+				m = 1.,
+				//Orb
+				l = 0.;
+
+				// 3D sample point
+				float3 p,
+				k, r = float3(SpriteSize.xy,0.0);
+				
+				float2 uv = Input.UV0;
+				uv.y = 1.0 - uv.y;
+				float2 I = SpriteSize.xy * uv;
+				
+				float4 O = float4(0.,0.,0.,0.);
+				
+				float2 top_left_pixel_pos = SpriteBorder[0].zw;
+				float2 full_size = SpriteBorder[0].xy; // 1300x600
+				
+				float2 full_fragCoord = I + top_left_pixel_pos;
+				float2 full_uv = full_fragCoord / full_size;
+				
+				float4 colorLeft  = SpriteModifyTexturesColors[1];
+				float4 colorRight = SpriteModifyTexturesColors[2];
+				float4 colorGrad  = lerp(colorLeft,colorRight,full_uv.x);
+				
+				#ifdef DISABLED
+					colorGrad.rgb = lerp( colorGrad.rgb, DisableColor( colorGrad.rgb ), 0.8 );
+				#endif
+				
+				float isUnhovered = SpriteTranslateRotateUVAndAlpha[3].w;
+				float spin = SpriteTranslateRotateUVAndAlpha[4].w;
+				
+				float4 glowColor = lerp( float4( colorGrad*2. ), float4(1.,1.,1.,1.), 1.0 - uv.y );
+				float4 colorMix = lerp(glowColor,colorGrad,isUnhovered);
+				
+				// Time
+				float t = (GuiTime * 0.25) + top_left_pixel_pos.x;
+
+				// Rotation matrix by pi/4
+				float2x2 R = float2x2(cos(sin(t/2.)*.785 +float4(0,33,11,0)));
+
+				// Raymarch loop. Clear fragColor and raymarch 100 steps
+				for(O*=i; i++<1e2;){
+
+					//Raymarch sample point --> scaled uvs + camera depth
+					p = float3((I+I-r.xy)/r.y*ZOOM, d-10.);
+					
+					//Orb
+					//l = length(p.xy-float2(.2+sin(t)/4.,.3+sin(t+t)/6.));
+					//l = length(p.xy);
+					l = 1.0;
+					
+					p.xy*=d;
+					
+					//Improving performance
+					if(abs(p.x)>6.) break;
+
+					//Rotate about y-axis
+					//p.xz = mul(p.xz,R);
+					p.yz = rot2d(p.yz,lerp(PI*2.,0.,spin));
+
+					//Save sample point
+					k=p;
+					//Scale
+					//p*=0.3;
+					p *= lerp(0.25,0.1,isUnhovered);
+					float noiseOffset = lerp(1.02,1.1,isUnhovered);
+					//Turbulence loop (3D noise)
+					for(n = .01; n < 1.; n += n){
+
+						//Accumulate noise on p.y 
+						//p.y += .9+abs(dot(sin(p.x + 2.*t+p/n),  .2+p-p )) * n;
+						p.y += noiseOffset+abs(dot(sin(p.x + 2.*t+p/n),  .2+p-p )) * n;
+					}
+					//SDF mix
+					sd = lerp(
+							//Bottom half texture
+							sin(length(ceil(k*8.).x+k)), 
+							//Upper half water/clouds noise + orb
+							lerp(sin(length(p)-.2),l,.3-l),
+							//Blend
+							//smoothstep(5.5, 6., p.y));
+							1.0);
+
+					//Step distance to object
+					d += s =.012+.08*abs(max(sd,length(k)-5.)-i/150.);
+					
+					// Uncomment section for ocean variant
+					float4 ir = sin(float4(1,2,3,1)+i*.5)*1.5/s + float4(1,2,3,1)*.04/l; //iridescence + orb
+					//float4 c = float4(4,2,1,1) * .12/s; //water 
+					float4 c = colorMix * 3.0 * .12/s; //water 
+
+					O += max(lerp(ir,lerp(c, ir, smoothstep(7.5, 8.5, p.y)),smoothstep(5.2, 6.5, p.y)), -length(k*k));
+					
+					//Color accumulation, using i iterator for iridescence. Attenuating with distance s and shading.
+					//O += max(sin(float4(1,2,3,1)+i*.5)*1.5/s+float4(1,2,3,1)*.04/l,-length(k*k));
+					//O += -length(k*k);
+
+				}
+				//Tanh tonemap and brightness multiplier
+				O = tanh(O*O/8e5)*m;  
+				float2 pa = (I+I-r.xy)/r.y*ZOOM;
+				O.a = 1.0 - smoothstep( 0.67, 0.8, length(pa) );
+				O.a *= lerp(1.0,BASE_OPACITY,isUnhovered);
+				
+				#ifdef DISABLED
+					O.rgb = lerp( O.rgb, DisableColor( O.rgb ), 0.5 );
+				#endif
+				
+				return O;
+			}
+		]]
+	}
 }
 
 BlendState BlendState
@@ -950,5 +1257,46 @@ Effect PODHeartbloodDisabled
 {
 	VertexShader = "VS_Default"
 	PixelShader = "PS_PODHeartblood"
+	Defines = { "DISABLED" }
+}
+
+Effect PODLineSegment
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODLineSegment"
+}
+
+Effect PODLineSegmentDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODLineSegment"
+	Defines = { "DISABLED" }
+}
+
+Effect PODWarpedCircle
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODLineSegment"
+	Defines = { "CIRCLE" }
+}
+
+Effect PODWarpedCircleDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODLineSegment"
+	Defines = { "CIRCLE" "DISABLED" }
+}
+
+Effect PODOrb
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODOrb"
+}
+
+# TODO UQ: proper disabled version (greyscale)
+Effect PODOrbDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODOrb"
 	Defines = { "DISABLED" }
 }

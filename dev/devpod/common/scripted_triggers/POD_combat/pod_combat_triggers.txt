@@ -70,6 +70,20 @@ pod_combat_pc_has_acted_this_round_trigger = {
 	var:pod_combat_pc_slot = { var:slot_has_acted = 1 }
 }
 
+###### FLAVORIZATION ######
+
+pod_combat_has_custom_title = {
+	var:pod_combat_sc_context ?= { has_variable = custom_title }
+}
+
+pod_combat_has_custom_player_team_name = {
+	var:pod_combat_sc_context ?= { has_variable = player_team_name }
+}
+
+pod_combat_has_custom_enemy_team_name = {
+	var:pod_combat_sc_context ?= { has_variable = enemy_team_name }
+}
+
 ###### AP AFFORDABILITY TRIGGER ######
 
 pod_combat_can_afford_ap_trigger = {
@@ -353,7 +367,7 @@ pod_combat_ai_move_admissible_trigger = {
 			# Morale heal - useful below cap.
 			AND = {
 				scope:ai_candidate_move = { has_variable = morale_heal }
-				var:pod_combat_actor_morale < pod_combat_max_morale
+				var:pod_combat_actor_morale < pod_combat_actor_max_morale_value
 			}
 		}
 	}
@@ -394,9 +408,7 @@ pod_combat_ai_move_admissible_trigger = {
 	# here (inside pod_combat_ai_move_admissible_trigger - living in a trigger rather
 	# than inline in the roll is what lets the scoring walk share this ladder
 	# instead of adding a fourth copy), the counter fold in
-	# pod_combat_ai_fold_usable_move_effect, and
-	# scripts/python/POD-Combat/verify_intent_membership.py (which proves no costed
-	# move is orphaned by all four).
+	# pod_combat_ai_fold_usable_move_effect.
 	#
 	# The two control payloads are listed PLAIN here, unlike in the fold:
 	# the roll already drops a useless mind_control / ap_drain through the
@@ -462,6 +474,7 @@ pod_combat_ai_move_admissible_trigger = {
 				has_variable = steal_gold
 				has_variable = gain_dread
 				has_variable = bonus_effect
+				has_variable = marker_modifier
 				has_variable = retaliate_damage
 				has_variable = retaliate_morale
 			}
@@ -491,14 +504,16 @@ pod_combat_ai_move_admissible_trigger = {
 }
 
 # True for a candidate whose effect reaches the loaded workspace target:
-# single_enemy always, and team_enemy (the selected slot is a guaranteed member
-# of the burst, so its loaded state is a valid weight proxy). Lets the
-# target-aware offensive weights credit AoE the same as a single-target hit.
+# single_enemy always, plus team_enemy and team_all (the selected slot is a
+# guaranteed member of either burst, so its loaded state is a valid weight
+# proxy). Lets the target-aware offensive weights credit AoE the same as a
+# single-target hit.
 # Evaluated in the candidate-move scope, where var:targeting resolves.
 pod_combat_ai_candidate_targets_enemy_trigger = {
 	OR = {
 		var:targeting = flag:single_enemy
 		var:targeting = flag:team_enemy
+		var:targeting = flag:team_all
 	}
 }
 
@@ -569,7 +584,7 @@ pod_combat_slot_heal_is_useful_trigger = {
 		# Morale heal, useful below the morale cap.
 		AND = {
 			$STORY$ = { has_variable = morale_heal }
-			$SLOT$ = { var:slot_morale < pod_combat_max_morale }
+			$SLOT$ = { var:slot_morale < pod_combat_slot_max_morale_value }
 		}
 	}
 }
@@ -974,15 +989,18 @@ pod_combat_move_class_is_elemental_trigger = {
 
 # Classes that land aggravated against the TYPICAL target - an AI soak-bypass /
 # brutality heuristic and pre-landing log-box guess, NOT the authoritative verdict
-# (that is PoD core's per-victim POD_damage_type_is_aggravated). aggravated is
-# universal; fire and balefire spare only the incorporeal (fire: wraith/spirit;
-# balefire: wraith). The splat-gated classes (lightning/cold/sun/silver/gold/holy/
-# poison/cold_iron) are aggravated only against specific splats, so they stay out.
+# (that is PoD core's per-victim POD_damage_type_is_aggravated). aggravated,
+# lightning and balefire are aggravated against every splat, so for those three the
+# target-blindness here is exact. Fire is the one approximation: it spares the
+# incorporeal (wraith/spirit), so it over-credits against those two. The splat-gated
+# classes (cold/sun/silver/gold/holy/poison/cold_iron) are aggravated only against
+# specific splats, so they stay out.
 pod_combat_class_always_aggravated_trigger = {
 	has_variable = damage_type
 	OR = {
 		var:damage_type = flag:aggravated
 		var:damage_type = flag:fire
+		var:damage_type = flag:lightning
 		var:damage_type = flag:balefire
 	}
 }
@@ -1039,6 +1057,59 @@ pod_combat_sheet_sorted_stat_absent_trigger = {
 	}
 }
 
+# Does $ACTOR$ belong to the splat family that can ever hold this move?
+# Enclosing scope is the move story. This is a DISPLAY filter for show-all
+# only - the real unlock gate is pod_combat_actor_unlocks_move_trigger, which
+# this never substitutes for.
+#
+# Every branch body scope-switches into $ACTOR$: a bare splat check would
+# evaluate against the move story and fail for every viewer, silently
+# emptying the filtered list. The group var is written by
+# POD_init_combat_move from the generator's config_section classifier.
+#
+# Fails open twice over, because showing a move nobody can take is a
+# cosmetic miss while hiding one a player could take is a bug: an
+# unclassified group matches everyone, and so does a move story built
+# before the var existed (a save predating this feature, until the next
+# POD_reload_combat_moves).
+pod_combat_move_group_matches_actor_trigger = {
+	trigger_if = {
+		limit = { has_variable = move_unlock_group }
+		switch = {
+			trigger = var:move_unlock_group
+			flag:universal = { always = yes }
+			# Blood family, not just vampires: ghouls, revenants and dhampirs
+			# all learn disciplines.
+			flag:vampire   = { $ACTOR$ = { has_POD_vamp_blood_trigger = yes } }
+			flag:werewolf  = { $ACTOR$ = { POD_is_werewolf_trigger = yes } }
+			flag:bastet    = { $ACTOR$ = { POD_is_bastet_trigger = yes } }
+			flag:mokole    = { $ACTOR$ = { POD_is_mokole_trigger = yes } }
+			flag:fera      = { $ACTOR$ = { POD_is_fera_trigger = yes } }
+			# Glamour-holders, so kinain keep the Arts they can hold.
+			flag:fae       = { $ACTOR$ = { POD_splat_has_glamour_trigger = yes } }
+			flag:demon     = { $ACTOR$ = { POD_is_demon_trigger = yes } }
+			flag:wraith    = {
+				$ACTOR$ = {
+					OR = {
+						POD_is_wraith_trigger = yes
+						POD_is_spirit_trigger = yes
+					}
+				}
+			}
+			flag:mummy     = { $ACTOR$ = { POD_is_mummy_trigger = yes } }
+			flag:kueijin   = { $ACTOR$ = { is_kueijin_trigger = yes } }
+			flag:hunter    = { $ACTOR$ = { POD_is_supehunter_trigger = yes } }
+			# Numina are open to anyone who took the trait, splat regardless.
+			flag:sorcerer  = { $ACTOR$ = { is_sorcerer_trigger = yes } }
+			flag:psychic   = { $ACTOR$ = { has_trait = psychic } }
+			flag:theurgy   = { $ACTOR$ = { has_trait = theurgist } }
+			flag:truefaith = { $ACTOR$ = { POD_has_true_faith_trigger = yes } }
+			fallback = { always = yes }
+		}
+	}
+	trigger_else = { always = yes }
+}
+
 # The sheet's whole filter set. Filtering happens HERE at list-build time,
 # never in per-row GUI visible gates.
 pod_combat_sheet_row_match_trigger = {
@@ -1051,6 +1122,25 @@ pod_combat_sheet_row_match_trigger = {
 			}
 		}
 		scope:pod_combat_sheet_owner = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = prev } }
+	}
+	trigger_else_if = {
+		# Show-all on its own is own-splat-only: the full catalogue is ~570
+		# rows of mostly unobtainable moves and the sheet renders every one.
+		# Unlocked moves ride along unconditionally so a multi-splat PC never
+		# loses sight of powers they already hold.
+		limit = {
+			scope:pod_combat_sheet_owner = {
+				NOT = { has_variable = pod_combat_show_other_splats }
+			}
+		}
+		OR = {
+			scope:pod_combat_sheet_owner = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = prev } }
+			pod_combat_move_group_matches_actor_trigger = { ACTOR = scope:pod_combat_sheet_owner }
+		}
+	}
+	trigger_else = {
+		# Show-all + Show other splats: the whole catalogue, slow by choice.
+		always = yes
 	}
 	# Category filters - same semantics as pod_combat_loadout_category_match:
 	# none set = everything, else the move's category must match a set flag.
@@ -1128,5 +1218,69 @@ pod_combat_sheet_row_match_trigger = {
 		}
 		# cond_mode is the conditional-move anchor var (gate or bonus).
 		has_variable = cond_mode
+	}
+}
+
+######################################################
+###### BRIDGE TRIGGER (called from the AI scoring walk)
+######################################################
+# Returns yes when the candidate move's elemental damage class matches
+# a weakness of the AI's current workspace target.
+#
+# Called from a scoring arm in pod_combat_ai_score_candidate_effect.
+# The implicit scope at the call site is the iterated candidate move
+# story_cycle (also bound as scope:ai_candidate_move), so
+# `var:damage_type` reads directly off the move. The target
+# character is reached via scope:combat_host.var:pod_combat_target_char.
+#
+# To add a new class -> weakness mapping: define the weakness as a
+# POD_weak_to_<class>_trigger alongside the rest of the family in
+# POD_health_track_triggers.txt, then add one AND branch to the OR below
+# pairing the damage-class flag with it.
+pod_combat_move_exploits_target_weakness_trigger = {
+	has_variable = damage_type
+	OR = {
+		AND = {
+			var:damage_type = flag:silver
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_silver_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:gold
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_gold_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:sun
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_sun_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:fire
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_fire_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:holy
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_holy_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:poison
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_poison_trigger = yes
+			}
+		}
+		AND = {
+			var:damage_type = flag:cold_iron
+			scope:combat_host.var:pod_combat_target_char = {
+				POD_weak_to_cold_iron_trigger = yes
+			}
+		}
 	}
 }
