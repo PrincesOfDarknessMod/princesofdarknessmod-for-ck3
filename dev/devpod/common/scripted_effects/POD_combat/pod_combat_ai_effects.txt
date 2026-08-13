@@ -892,6 +892,10 @@ pod_combat_ai_retry_alternate_target_effect = {
 # scope-switches, which prev/this would NOT in a weight modifier.
 # The move story is shared, but AI turns are sequential and the loop refreshes
 # every bonus move right before that actor scores, so no stale cross-actor read.
+# Also derives the effective AP drain from that met-status, for the same reason
+# the tier cache is precomputed: the drain branches compare inside a host scope
+# switch, where the candidate's own vars are out of reach and a trigger cannot
+# do the base + bonus arithmetic anyway.
 pod_combat_ai_precompute_bonus_met_effect = {
 	# this = a bonus-mode POD_combat_move; HOST = combat host, ACTOR = acting AI.
 	save_temporary_scope_as = precompute_bonus_move
@@ -905,6 +909,30 @@ pod_combat_ai_precompute_bonus_met_effect = {
 	}
 	else = {
 		remove_variable = pod_combat_ai_bonus_met
+	}
+	# Written for every ap_drain-bonus move whether or not the condition holds:
+	# an unmet bonus stamps the base drain alone, which is what the branches
+	# should then score. Its presence is what tells them to prefer it over the
+	# raw ap_drain var, so it must not be conditional on the met flag.
+	# No clear twin, unlike the flag above: bonus_effect is fixed when the
+	# registry is built, so a move either takes this branch on every pass or
+	# never takes it, and a value can only go stale on a move nobody scores.
+	if = {
+		limit = {
+			trigger_if = {
+				limit = { has_variable = bonus_effect }
+				var:bonus_effect = flag:ap_drain
+			}
+			trigger_else = { always = no }
+		}
+		set_variable = {
+			name = pod_combat_ai_eff_ap_drain
+			value = {
+				value = 0
+				if = { limit = { has_variable = ap_drain } add = var:ap_drain }
+				if = { limit = { has_variable = pod_combat_ai_bonus_met } add = var:bonus_value }
+			}
+		}
 	}
 }
 
@@ -2462,31 +2490,60 @@ pod_combat_ai_score_candidate_effect = {
 		# Full stun: the candidate drain reaches the victim's projected next-turn AP
 		# budget AND improves on any pending drain. No is_ai gate - the player loses a
 		# turn too (only mind control is player-immune).
+		# All three branches read pod_combat_ai_eff_ap_drain where the precompute
+		# wrote one (base + a bonus drain whose condition holds), falling back to the
+		# raw var for the base-only moves it never visits. The threshold is the
+		# per-action projected-cap snapshot, NOT pod_combat_base_ap - the log's stun
+		# wording uses that one and the two must not be conflated.
 		if = {
 			limit = {
-				has_variable = ap_drain
+				trigger_if = {
+					limit = { has_variable = pod_combat_ai_eff_ap_drain }
+					var:pod_combat_ai_eff_ap_drain >= scope:combat_host.var:pod_combat_ai_stun_threshold
+					var:pod_combat_ai_eff_ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
+				}
+				trigger_else_if = {
+					limit = { has_variable = ap_drain }
+					var:ap_drain >= scope:combat_host.var:pod_combat_ai_stun_threshold
+					var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
+				}
+				trigger_else = { always = no }
 				var:targeting = flag:single_enemy
-				var:ap_drain >= scope:combat_host.var:pod_combat_ai_stun_threshold
-				var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_stun_value }
 		}
 		# Partial drain that still improves on the pending drain.
 		if = {
 			limit = {
-				has_variable = ap_drain
+				trigger_if = {
+					limit = { has_variable = pod_combat_ai_eff_ap_drain }
+					var:pod_combat_ai_eff_ap_drain < scope:combat_host.var:pod_combat_ai_stun_threshold
+					var:pod_combat_ai_eff_ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
+				}
+				trigger_else_if = {
+					limit = { has_variable = ap_drain }
+					var:ap_drain < scope:combat_host.var:pod_combat_ai_stun_threshold
+					var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
+				}
+				trigger_else = { always = no }
 				var:targeting = flag:single_enemy
-				var:ap_drain < scope:combat_host.var:pod_combat_ai_stun_threshold
-				var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_ap_drain_value }
 		}
-		# Draining a target already drained >= this candidate adds nothing.
+		# Draining a target already drained >= this candidate adds nothing. Gated on
+		# the base var: a move whose drain is only a conditional rider was picked for
+		# its main payload, so a redundant rider is not a wasted turn.
 		if = {
 			limit = {
 				has_variable = ap_drain
 				var:targeting = flag:single_enemy
-				NOT = { var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain }
+				trigger_if = {
+					limit = { has_variable = pod_combat_ai_eff_ap_drain }
+					NOT = { var:pod_combat_ai_eff_ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain }
+				}
+				trigger_else = {
+					NOT = { var:ap_drain > scope:combat_host.var:pod_combat_ai_tgt_ap_drain }
+				}
 			}
 			change_variable = { name = pod_combat_ai_score  add = @ai_control_wasted }
 		}
