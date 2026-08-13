@@ -37,6 +37,38 @@ pod_combat_seed_kind_from_class_effect = {
 	}
 }
 
+# Re-stamps $KIND_VAR$ on the CURRENT scope from a FIRED change_class
+# conversion, so the counter and burn a converted action leaves behind match
+# the element it actually struck with. Same literal-chain reason as above.
+# Self-guarding: a no-op unless the latch is set and this move is the
+# change_class bonus, so call sites need no gate of their own.
+pod_combat_override_kind_from_bonus_class_effect = {
+	if = {
+		limit = {
+			scope:combat_host ?= { has_variable = pod_combat_bonus_active }
+			$STORY$ = {
+				# Guarded chain, not a bare AND: CK3 boolean blocks do not
+				# short-circuit, and almost no move declares a bonus at all.
+				trigger_if = {
+					limit = { has_variable = bonus_effect  has_variable = bonus_param }
+					var:bonus_effect = flag:change_class
+				}
+				trigger_else = { always = no }
+			}
+		}
+		if = { limit = { $STORY$ = { var:bonus_param = flag:fire } }      set_variable = { name = $KIND_VAR$ value = flag:fire } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:cold } }      set_variable = { name = $KIND_VAR$ value = flag:cold } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:lightning } } set_variable = { name = $KIND_VAR$ value = flag:lightning } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:sun } }       set_variable = { name = $KIND_VAR$ value = flag:sun } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:silver } }    set_variable = { name = $KIND_VAR$ value = flag:silver } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:gold } }      set_variable = { name = $KIND_VAR$ value = flag:gold } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:holy } }      set_variable = { name = $KIND_VAR$ value = flag:holy } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:balefire } }  set_variable = { name = $KIND_VAR$ value = flag:balefire } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:poison } }    set_variable = { name = $KIND_VAR$ value = flag:poison } }
+		if = { limit = { $STORY$ = { var:bonus_param = flag:cold_iron } } set_variable = { name = $KIND_VAR$ value = flag:cold_iron } }
+	}
+}
+
 
 ######################################################
 ###### MAIN ENTRY POINT
@@ -118,6 +150,8 @@ POD_execute_combat_move = {
 	# transients the damage phases read. Unconditional set-or-clear, so an
 	# unarmed actor or a non-weapon move actively clears the previous
 	# action's profile rather than inheriting it.
+	# Runs after 2b on purpose: the uses_weapon conditional bonus grants the
+	# swing through the latch set there, so the seeder's gate needs it decided.
 	pod_combat_seed_actor_weapon_profile_effect = { STORY = $STORY$ }
 
 	# ── 3. Energy cost (splat-agnostic) ──────────────────────────
@@ -475,7 +509,7 @@ POD_execute_combat_move = {
 		}
 	}
 
-	# ── 9b. Conditional bonus heals / energy ────────────────────
+	# ── 9b. Conditional bonus heals / morale / energy ───────────
 	# Bonus heal when the move's condition held (set §2b). Independent of the
 	# base hp_heal gate; superficial. self_heal -> actor, heal_target -> target.
 	if = {
@@ -485,6 +519,16 @@ POD_execute_combat_move = {
 	if = {
 		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:heal_target } }
 		pod_combat_restore_hp_superficial_effect = { SIDE = target AMOUNT = $STORY$.var:bonus_value }
+	}
+	# Bonus morale heal, actor only - there is deliberately no target twin (the
+	# unconditional morale_heal column already covers allies). The primitive
+	# caps at the actor's own max and writes the ACTUAL delta to
+	# pod_combat_last_morale_heal_amount, which the log entry capture, the
+	# segment bake and the §16 wrap-up gate already read, so this needs no log
+	# work of its own.
+	if = {
+		limit = { has_variable = pod_combat_bonus_active  $STORY$ = { var:bonus_effect = flag:self_morale_heal } }
+		pod_combat_restore_morale_effect = { SIDE = actor AMOUNT = $STORY$.var:bonus_value }
 	}
 
 	# Bonus energy: restore to the actor (energy_gain) or drain the target
@@ -726,6 +770,28 @@ POD_execute_combat_move = {
 			pod_combat_push_dot_applied_log_effect = { MESSAGE_KEY = dot_applied }
 		}
 	}
+	# ── 13b-bonus-morale. Conditional bonus morale DoT ───────────
+	# As 13b-bonus, but the burn erodes will rather than flesh. The kind force
+	# lives inside pod_combat_seed_dot_on_slot_effect (a $STORY$ read, ordered
+	# after the weapon retype like the base dot_morale flag) rather than a slot
+	# write here, which the seed effect's contract rules out. The generator
+	# forbids pairing this with a base DoT, so the two never race for the one
+	# slot_dot_* slot.
+	if = {
+		limit = {
+			has_variable = pod_combat_bonus_active
+			$STORY$ = { var:bonus_effect = flag:morale_dot }
+			has_variable = pod_combat_target_char
+			# Same delivery gate as §13b (see there).
+			NOT = { pod_combat_result_code_indicates_miss_trigger = yes }
+		}
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { var:slot_char = { this = scope:combat_host.var:pod_combat_target_char }  NOT = { pod_combat_slot_should_be_marked_ko_trigger = yes } }
+			pod_combat_seed_dot_on_slot_effect = { STORY = $STORY$ AMOUNT = $STORY$.var:bonus_value ROUNDS = pod_combat_bonus_dot_rounds CASTER = scope:combat_host.var:pod_combat_actor_char }
+			pod_combat_push_dot_applied_log_effect = { MESSAGE_KEY = dot_applied_morale }
+		}
+	}
 	# ── 13c. Mind control application ───────────────────────────
 	# Dispatched on the mind_control move flag: marks the target slot
 	# controlled, stealing their next turn (pod_combat_execute_ai_turn_effect
@@ -826,6 +892,14 @@ POD_execute_combat_move = {
 			limit = { var:pod_combat_target_ap_drain < scope:effective_ap_drain }
 			set_variable = { name = pod_combat_target_ap_drain value = scope:effective_ap_drain }
 		}
+		# The refund lift's outcome-style twin, carrying the EFFECTIVE total so the
+		# log segment's stun arm can label a base+bonus stack the base alone would
+		# read as a partial daze. Must stay inside this block's control-failure
+		# limit: a resisted pure-control move drains nothing and must log nothing.
+		if = {
+			limit = { scope:effective_ap_drain > 0 }
+			set_variable = { name = pod_combat_last_ap_drain value = scope:effective_ap_drain }
+		}
 	}
 	if = {
 		limit = {
@@ -897,6 +971,10 @@ POD_execute_combat_move = {
 				# Same for the §14 AP refund - without this an AoE move's refund
 				# would land after the last per-target row and never be shown.
 				has_variable = pod_combat_last_ap_refund
+				# The §14 AP drain lands there too. Inert while every drain move is
+				# single-enemy (those never set the tripwire), so this only matters
+				# the day one is authored as AoE.
+				has_variable = pod_combat_last_ap_drain
 			}
 		}
 		pod_combat_push_log_effect = { MOVE_STORY = $STORY$ }
@@ -955,10 +1033,15 @@ pod_combat_apply_single_hp_damage_effect = {
 	# POD_combat_move_set_damage_class): an element rides its REASON into
 	# PoD core so immunities / downgrades / splat multipliers apply per
 	# target; `aggravated` forces duel_aggravated; superficial = duel.
-	# The switch's kind table is mirrored by the weapon-retype switch just
-	# below it, the retaliation dispatcher
+	# The switch's kind table is mirrored by the change_class and weapon-retype
+	# switches just below it, the retaliation dispatcher
 	# (pod_combat_deal_typed_retal_damage_effect) and the DoT tick switch
-	# (pod_combat_deal_dot_tick_from_host_effect) - keep the four in step.
+	# (pod_combat_deal_dot_tick_from_host_effect) - keep the five in step.
+	#
+	# The change_class bonus (move story bonus_param) converts a superficial
+	# move's damage to a named element for one action when its condition held.
+	# It outranks the weapon retype and, like it, declines against a victim
+	# immune to the converted element rather than dealing nothing.
 	#
 	# The change_type bonus (host pod_combat_bonus_aggravated):
 	#   - on a superficial move it upgrades the REASON to duel_aggravated;
@@ -987,9 +1070,11 @@ pod_combat_apply_single_hp_damage_effect = {
 	# any equipped artifact with no slot or can_benefit filter (see
 	# pod_combat_weapon_triggers.txt), so without it a bare-handed swing would
 	# still be aggravated by a bane trinket the bearer cannot even wield.
+	# The swing test runs inside scope:combat_host because the latch the
+	# conditional arm reads is a host var and this effect runs per victim.
 	if = {
 		limit = {
-			scope:current_move = { has_variable = uses_weapon }
+			scope:combat_host = { pod_combat_move_swings_weapon_trigger = { STORY = scope:current_move } }
 			scope:combat_host.var:pod_combat_actor_char ?= { pod_combat_actor_is_armed_trigger = yes }
 		}
 		scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_weapon_attack }
@@ -1032,12 +1117,55 @@ pod_combat_apply_single_hp_damage_effect = {
 			}
 			scope:combat_host.var:pod_combat_actor_char ?= { set_variable = pod_combat_force_agg }
 		}
+		# change_class: the fired condition converts this action's damage to the
+		# element the move names in bonus_param. Read in place off the move
+		# story - copying a flag into a host var degrades it to a plain value.
+		# Ordered above the weapon retype because a granted element is this
+		# action's identity; the generator also forbids the pairing, so this
+		# ordering is only the runtime tiebreak if invalid data slips through.
+		# Per victim, same waste rule as the retype: a conversion the target is
+		# IMMUNE to falls through to the authored (superficial) switch rather
+		# than dealing nothing, so the bonus never makes the move worse.
+		if = {
+			limit = {
+				scope:combat_host = { has_variable = pod_combat_bonus_active }
+				scope:current_move = {
+					# Guarded chain, not a bare AND: boolean blocks do not
+					# short-circuit and almost no move declares a bonus.
+					trigger_if = {
+						limit = { has_variable = bonus_effect  has_variable = bonus_param }
+						var:bonus_effect = flag:change_class
+						NOT = {
+							pod_combat_stamped_type_is_wasted_trigger = {
+								KIND_VAR = bonus_param
+								VICTIM   = scope:combat_host.var:pod_combat_$TARGET_SIDE$_char
+							}
+						}
+					}
+					trigger_else = { always = no }
+				}
+			}
+			switch = {
+				trigger = scope:current_move.var:bonus_param
+				flag:fire      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = fire } }
+				flag:cold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold } }
+				flag:lightning = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = lightning } }
+				flag:sun       = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = sun } }
+				flag:silver    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = silver } }
+				flag:gold      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = gold } }
+				flag:holy      = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = true_faith } }
+				flag:balefire  = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = balefire } }
+				flag:poison    = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = poison } }
+				flag:cold_iron = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = cold_iron } }
+				fallback = { pod_combat_dispatch_damage_pipeline_effect = { STORY = $STORY$ TARGET_SIDE = $TARGET_SIDE$ REASON = duel } }
+			}
+		}
 		# The weapon retype only ever holds a class when the move's own class is
 		# superficial (seeded in §2c), so this never fights an authored element.
 		# Evaluated per victim: a retype the target is IMMUNE to would deal
 		# nothing at all, so it falls back to the move's own damage rather than
 		# leaving the bearer worse off than unarmed.
-		if = {
+		else_if = {
 			limit = {
 				scope:combat_host = {
 					has_variable = pod_combat_weapon_class
@@ -1270,6 +1398,10 @@ pod_combat_apply_team_all_hp_damage_effect = {
 	pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_team_all_self_kind }
 	# Same swing, same instant: a weapon retype covers the caster's own share too.
 	pod_combat_override_kind_from_weapon_effect = { KIND_VAR = pod_combat_team_all_self_kind }
+	# As does a granted change_class conversion, which outranks it. No waste
+	# guard here, deliberately, matching the retype above: a caster immune to
+	# its own blast shrugging it off is a benefit, not a wasted conversion.
+	pod_combat_override_kind_from_bonus_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_team_all_self_kind }
 	pod_combat_deal_typed_retal_damage_effect = {
 		TARGET_SIDE = actor
 		AMOUNT      = $STORY$.var:hp_damage
@@ -1298,32 +1430,53 @@ pod_combat_apply_team_all_hp_damage_effect = {
 # $WHEN$ = hit | miss | any (the pod_combat_actor_retaliate_<WHEN>* var family).
 # Take-strongest compares within one family only, so an `any` charge never
 # displaces - nor is displaced by - an armed hit/miss charge.
-# Amount fallback: retaliate_damage -> hp_damage -> 1; the final 1 covers a
-# move arming with neither var, else the workspace var stays unset and the
-# §15 has_variable gate silently swallows the reaction. Kind precedence:
-# morale > retaliate_agg > the move's damage class element > plain duel.
+# Amount fallback: retaliate_damage -> hp_damage -> 1, staged into
+# pod_combat_retal_arm_candidate so the take-strongest test and the write agree
+# by construction, then boosted by a fired retaliate_boost bonus. Kind
+# precedence: morale > retaliate_agg > the move's damage class element >
+# a granted change_class element > the live weapon retype > plain duel.
 # The extra _morale presence flag feeds the stance tooltip (a bare
 # flag-compare on the slot-story custom-loc root never matches, so the
 # dispatcher reads this).
 pod_combat_arm_retaliation_effect = {
+	# Stage the candidate amount ONCE, then compare and write from it. The
+	# fallback used to be spelled out twice (in the take-strongest test and
+	# again in the writes); staging is what keeps the retaliate_boost term
+	# below in both, so a boosted charge cannot lose a comparison it should win.
+	if = {
+		limit = { $STORY$ = { has_variable = retaliate_damage } }
+		set_variable = { name = pod_combat_retal_arm_candidate value = $STORY$.var:retaliate_damage }
+	}
+	else_if = {
+		limit = { $STORY$ = { has_variable = hp_damage } }
+		set_variable = { name = pod_combat_retal_arm_candidate value = $STORY$.var:hp_damage }
+	}
+	else = {
+		# Covers a move arming with neither var: without this the workspace var
+		# stays unset and the §15 has_variable gate silently swallows the reaction.
+		set_variable = { name = pod_combat_retal_arm_candidate value = 1 }
+	}
+	# retaliate_boost: the fired condition makes the counter this move arms hit
+	# harder. Folded in before the comparison, so it is the boosted number that
+	# contends for the slot. A move arming several charges boosts each of them
+	# (this effect restages per WHEN).
+	if = {
+		limit = {
+			has_variable = pod_combat_bonus_active
+			$STORY$ = { var:bonus_effect = flag:retaliate_boost }
+		}
+		change_variable = { name = pod_combat_retal_arm_candidate add = $STORY$.var:bonus_value }
+	}
 	# Take-strongest: arm only when unarmed, or the incoming counter is strictly
-	# stronger by amount (the same precedence the writes use: retaliate_damage ->
-	# hp_damage -> 1). Equal or weaker keeps the incumbent, so the payload-redundancy
-	# gate can admit a move whose retaliation rider is redundant without DOWNGRADING
-	# an armed stronger counter. Kind is not compared (amount-only).
+	# stronger by amount. Equal or weaker keeps the incumbent, so the
+	# payload-redundancy gate can admit a move whose retaliation rider is
+	# redundant without DOWNGRADING an armed stronger counter. Kind is not
+	# compared (amount-only).
 	if = {
 		limit = {
 			trigger_if = {
 				limit = { has_variable = pod_combat_actor_retaliate_$WHEN$ }
-				trigger_if = {
-					limit = { $STORY$ = { has_variable = retaliate_damage } }
-					var:pod_combat_actor_retaliate_$WHEN$ < $STORY$.var:retaliate_damage
-				}
-				trigger_else_if = {
-					limit = { $STORY$ = { has_variable = hp_damage } }
-					var:pod_combat_actor_retaliate_$WHEN$ < $STORY$.var:hp_damage
-				}
-				trigger_else = { var:pod_combat_actor_retaliate_$WHEN$ < 1 }
+				var:pod_combat_actor_retaliate_$WHEN$ < var:pod_combat_retal_arm_candidate
 			}
 			trigger_else = { always = yes }
 		}
@@ -1333,17 +1486,7 @@ pod_combat_arm_retaliation_effect = {
 		remove_variable = pod_combat_actor_retaliate_$WHEN$_kind
 		remove_variable = pod_combat_actor_retaliate_$WHEN$_kind_from_weapon
 		remove_variable = pod_combat_actor_retaliate_$WHEN$_morale
-		if = {
-			limit = { $STORY$ = { has_variable = retaliate_damage } }
-			set_variable = { name = pod_combat_actor_retaliate_$WHEN$ value = $STORY$.var:retaliate_damage }
-		}
-		else_if = {
-			limit = { $STORY$ = { has_variable = hp_damage } }
-			set_variable = { name = pod_combat_actor_retaliate_$WHEN$ value = $STORY$.var:hp_damage }
-		}
-		else = {
-			set_variable = { name = pod_combat_actor_retaliate_$WHEN$ value = 1 }
-		}
+		set_variable = { name = pod_combat_actor_retaliate_$WHEN$ value = var:pod_combat_retal_arm_candidate }
 		if = {
 			limit = { $STORY$ = { has_variable = retaliate_morale } }
 			set_variable = { name = pod_combat_actor_retaliate_$WHEN$_kind value = flag:morale }
@@ -1359,6 +1502,20 @@ pod_combat_arm_retaliation_effect = {
 			pod_combat_seed_kind_from_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_actor_retaliate_$WHEN$_kind }
 		}
 		else_if = {
+			# A change_class conversion the condition granted carries into the
+			# counter it armed. Ranks below an authored class (which the
+			# generator anyway forbids pairing with it) and above the weapon.
+			limit = {
+				has_variable = pod_combat_bonus_active
+				$STORY$ = { var:bonus_effect = flag:change_class }
+			}
+			pod_combat_override_kind_from_bonus_class_effect = { STORY = $STORY$ KIND_VAR = pod_combat_actor_retaliate_$WHEN$_kind }
+			# Same provenance marker as the weapon arm below: the name is
+			# historical, what it means downstream is "transient-source kind, so
+			# stand down against an immune victim rather than counter for zero".
+			set_variable = { name = pod_combat_actor_retaliate_$WHEN$_kind_from_weapon value = yes }
+		}
+		else_if = {
 			# A counter armed while holding a typed weapon strikes back with it.
 			# Ranks below an authored class, which is the move's own identity.
 			limit = { scope:combat_host ?= { has_variable = pod_combat_weapon_class } }
@@ -1371,6 +1528,7 @@ pod_combat_arm_retaliation_effect = {
 			set_variable = { name = pod_combat_actor_retaliate_$WHEN$_kind_from_weapon value = yes }
 		}
 	}
+	remove_variable = pod_combat_retal_arm_candidate
 }
 
 pod_combat_apply_team_enemy_morale_damage_effect = {
@@ -1533,9 +1691,32 @@ pod_combat_seed_dot_on_slot_effect = {
 		}
 		pod_combat_override_kind_from_weapon_effect = { KIND_VAR = slot_dot_kind }
 	}
-	# Morale wins over the damage class (matches the counter-damage precedence).
+	# A fired change_class conversion outranks the weapon retype (it is the
+	# move's granted identity for this action), so it lands after it. Same
+	# waste rule: a burn the victim is immune to would tick zero for its whole
+	# duration. Invoked in $STORY$ scope because bonus_param lives on the move.
 	if = {
-		limit = { $STORY$ = { has_variable = dot_morale } }
+		limit = {
+			$STORY$ = {
+				NOT = { pod_combat_stamped_type_is_wasted_trigger = { KIND_VAR = bonus_param VICTIM = scope:dot_applied_victim } }
+			}
+		}
+		pod_combat_override_kind_from_bonus_class_effect = { STORY = $STORY$ KIND_VAR = slot_dot_kind }
+	}
+	# Morale wins over the damage class (matches the counter-damage precedence).
+	# The morale_dot bonus forces it the same way the static flag does; a
+	# $STORY$ read is the one channel this effect's contract allows here.
+	if = {
+		limit = {
+			$STORY$ = {
+				trigger_if = { limit = { has_variable = dot_morale }  always = yes }
+				trigger_else_if = {
+					limit = { has_variable = bonus_effect }
+					var:bonus_effect = flag:morale_dot
+				}
+				trigger_else = { always = no }
+			}
+		}
 		set_variable = { name = slot_dot_kind value = flag:morale }
 	}
 	save_scope_value_as = { name = dot_applied_amount value = $AMOUNT$ }
