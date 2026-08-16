@@ -3,32 +3,18 @@
 #
 # Slot identity = (combat_team flag:player/enemy, team_position int 0+,
 # 0 = leader). No flat slot_index. Addressing is by ITERATION over the
-# single host list pod_combat_active_slots - no per-position pointers and no
-# fixed positional cap; team size is guarded by pod_combat_max_team_size.
-# The only pointer vars are the two leaders
+# fight's pod_combat_active_slots - no per-position pointers and no fixed
+# positional cap; team size is guarded by pod_combat_max_team_size.
+# The only pointer vars are the two leaders, which live on the fight too
 # (pod_combat_pc_slot = player/0, pod_combat_enemy_leader_slot = enemy/0),
 # derived once at finalize for the many direct-leader call sites.
+#
+# No teardown effect lives here any more: the fight story's on_end cascade
+# ends every slot it holds, and the two pointers die with that story.
 #
 # Field catalogue / init defaults / absence-as-signal list: COMBAT_REFERENCE.info §3.
 
 
-###################
-###### CLEANUP
-###################
-
-# end_story frees the slot stories from Charon's owned-stories list (same
-# teardown as log entries / sc_context). The leader-pointer removes are
-# no-ops if a fight never set them. Caller must be in host scope.
-pod_combat_clear_slot_stories_effect = {
-	every_in_list = {
-		variable = pod_combat_active_slots
-		end_story = yes
-	}
-	clear_variable_list = pod_combat_active_slots
-	clear_variable_list = pod_combat_turn_order_list
-	remove_variable = pod_combat_pc_slot
-	remove_variable = pod_combat_enemy_leader_slot
-}
 
 
 ###################
@@ -36,7 +22,7 @@ pod_combat_clear_slot_stories_effect = {
 ###################
 # Write helpers operating on the CURRENT slot story. Callers are either
 # inside an `every_in_list = pod_combat_active_slots` loop, or have
-# scope-switched into a leader pointer via `var:pod_combat_pc_slot = { ... }`
+# scope-switched into a leader pointer via `var:pod_combat_session.var:pod_combat_pc_slot ?= { ... }`
 # - the `var:` prefix is mandatory; without it CK3 reads the pointer name as
 # an effect and silently drops the block.
 
@@ -62,6 +48,59 @@ pod_combat_set_slot_var_effect = {
 #   $NAME$ = field short name (is_guarding, retaliate_hit, init_bonus, ...)
 pod_combat_remove_slot_var_effect = {
 	remove_variable = slot_$NAME$
+}
+
+# Mark a seated slot as human-driven. Call it after the seat exists; the builder
+# decides which seats are played rather than the engine inferring it from a board
+# position, which is the whole point of the marker.
+#   $TEAM$       = player | enemy  (parse-time literal)
+#   $POSITION$   = team_position of the seat to mark
+#   $CONTROLLER$ = the character driving it
+#
+# $CONTROLLER$ NEED NOT BE SEATED IN THE FIGHT. That is deliberate: a proxy
+# launcher marks combatants it is not, and nothing here or downstream requires
+# the controller to hold a slot. (It does need pod_combat_session to reach the
+# fight from the GUI - a separate seat-versus-reach question, unsolved.)
+#
+# Marking more than one seat is supported by construction: the read side is a
+# roster quantifier, the drain stops at each marked slot in turn, and the round
+# router waits for all of them. Caller scope = a character holding the session
+# pointer (the host, during the build).
+#
+# CALL BEFORE POD_combat_finalize_duel_effect. The unlock bake there is one-shot
+# and walks marked slots, so a seat marked afterwards has no
+# pod_combat_unlocked_moves and renders a full move bar with every button dead
+# (the proof fails closed). A late mark must call
+# pod_combat_bake_pc_loadout_unlocks_effect on its occupant itself. The standing
+# target and the display pointer need nothing - the first hand-off supplies both.
+#
+# $POSITION$ IS THE POSITION THE SEAT ALREADY HOLDS. Do not copy the chained
+# read POD_combat_duel_add_ally_effect uses: that effect seats at the CURRENT
+# pod_combat_player_team_size and bumps it afterwards, so reading the counter
+# after the add is off by one, matches no slot, and marks nothing - silently,
+# with no error and no tooltip. With the host at player/0 the first ally is
+# player/1. Snapshot before the add if you need it computed, the way
+# pod_combat_add_ally_midfight_effect does.
+#
+# The inverse is pod_combat_remove_slot_var_effect = { NAME = human_controller }
+# (there is no literal `remove_variable = slot_human_controller` to grep for).
+pod_combat_mark_slot_controlled_effect = {
+	# Both args captured in the caller's scope BEFORE the iteration flips into
+	# each slot story, for the reason pod_combat_set_slot_char_effect documents:
+	# a scope: or var: argument re-evaluated from slot scope resolves against the
+	# wrong object.
+	save_scope_value_as = { name = pod_mark_slot_pos value = $POSITION$ }
+	$CONTROLLER$ = { save_scope_as = pod_mark_controller }
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				var:combat_team = flag:$TEAM$
+				var:team_position = scope:pod_mark_slot_pos
+			}
+			set_variable = { name = slot_human_controller value = scope:pod_mark_controller }
+		}
+	}
 }
 
 # Create a fresh slot story for one combatant and append it to the host's
@@ -116,12 +155,43 @@ pod_combat_set_slot_char_effect = {
 			set_variable = { name = slot_has_acted   value = 0 }
 		}
 
-		# Register on the host - scope inside the wrap is still the caller.
-		# Iterated by the GUI datamodel and every dispatch loop; cleared in
-		# pod_combat_clear_slot_stories_effect.
-		add_to_variable_list = {
-			name = pod_combat_active_slots
-			target = scope:new_slot
+		# Register the slot on the FIGHT, and give the slot a back-pointer to it.
+		# Both need the fight in hand, so they share one guarded bind: the roster
+		# is iterated by every dispatch loop and by the GUI datamodel, and the
+		# back-pointer is how slot-scoped code reaches fight state without the
+		# caller having saved a host scope first. Read off the host rather than a
+		# builder scope name: mid-fight seats arrive from chains that never saw
+		# the builder. Gated because tooltip-build has no fight - and no slot
+		# stories either, so an empty roster there is correct.
+		if = {
+			limit = { has_variable = pod_combat_session }
+			var:pod_combat_session = { save_temporary_scope_as = pod_fight }
+			scope:pod_fight = {
+				add_to_variable_list = {
+					name = pod_combat_active_slots
+					target = scope:new_slot
+				}
+			}
+			scope:new_slot = {
+				set_variable = { name = fight value = scope:pod_fight }
+			}
+			# Every participant points at the fight, not just the host. This makes
+			# "am I in a fight" a property of a CHARACTER rather than of the one
+			# seated human: the launcher busy-gate, the loadout decision and the
+			# debug courtier picks all ask pod_combat_is_active_trigger, so a
+			# combatant already fighting now correctly reads as busy. It is also the
+			# participant claim multiplayer needs, and the prerequisite for a seated
+			# non-host human's window binding at all - PODCombatFight resolves from
+			# the VIEWER's own pointer, so without this only the host has one.
+			#
+			# Re-seating a character who already holds it rewrites the same value.
+			# Released by the living-combatant loops in pod_combat_duel_end_effect
+			# and pod_combat_host_died_release_effect; a corpse keeps a pointer at
+			# an ended story, which is inert (?= reads false) and cannot be removed
+			# from a dead character anyway.
+			$CHARACTER$ = {
+				set_variable = { name = pod_combat_session value = scope:pod_fight }
+			}
 		}
 	}
 }

@@ -18,21 +18,47 @@
 # stories before the next turn evaluates.
 pod_combat_execute_move = {
 	scope = character
-	saved_scopes = { story }
+	# root  = the CLICKING client, which is who may command.
+	# actor = the combatant they are driving, which is who acts. Those are the
+	#         same character only while the one controlled slot is the host's own,
+	#         and the two questions have to be asked of different characters.
+	saved_scopes = { story actor }
 
 	is_shown = {
 		exists = scope:story
-		has_variable = pod_combat_active
-		NOT = { has_variable = pod_combat_is_over }
+		pod_combat_is_active_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
 	}
 
 	is_valid = {
 		pod_combat_is_active_trigger = yes
-		pod_combat_is_player_turn_trigger = yes
-		POD_can_execute_combat_move_trigger = {
-			STORY = scope:story
-			ACTOR = root
+		# Authority, not mode: this is a command surface, so it must ask whether the
+		# live turn belongs to the CLICKING client. Identical answer today.
+		pod_combat_is_my_turn_trigger = yes
+		# The unlock proof inside this trigger fails CLOSED, so the actor must be a
+		# character whose pod_combat_unlocked_moves has been baked - see the bake
+		# loop in POD_combat_finalize_duel_effect, which now covers every marked
+		# slot for exactly this reason. A saved scope, not a var chain: the
+		# validator re-splices $ACTOR$ into a scope switch and again into
+		# pod_combat_move_dynamic_gates_trigger.
+		#
+		# trigger_if, not sibling exists checks: CK3 trigger siblings do not
+		# short-circuit, so a plain `exists` next to the call READS like a guard
+		# while gating nothing. Harmless from the four move-bar buttons (their
+		# datamodel is the same actor chain, so a broken link yields zero buttons
+		# rather than one with an unresolved scope) - but the first caller that is
+		# not a datamodel item would splice both scopes unresolved into ~40 derefs.
+		trigger_if = {
+			limit = {
+				exists = scope:story
+				exists = scope:actor
+			}
+			POD_can_execute_combat_move_trigger = {
+				STORY = scope:story
+				ACTOR = scope:actor
+			}
 		}
+		trigger_else = { always = no }
 	}
 
 	effect = {
@@ -65,13 +91,15 @@ pod_combat_end_turn = {
 	scope = character
 
 	is_shown = {
-		has_variable = pod_combat_active
+		pod_combat_is_active_trigger = yes
 	}
 
 	is_valid = {
 		pod_combat_is_active_trigger = yes
-		pod_combat_is_player_turn_trigger = yes
-		NOT = { has_variable = pod_combat_is_over }
+		# Authority, not mode: this is a command surface, so it must ask whether the
+		# live turn belongs to the CLICKING client. Identical answer today.
+		pod_combat_is_my_turn_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
 	}
 
 	effect = {
@@ -87,13 +115,13 @@ pod_combat_end_combat = {
 	scope = character
 
 	is_shown = {
-		has_variable = pod_combat_active
-		has_variable = pod_combat_is_over
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_over_trigger = yes
 	}
 
 	is_valid = {
-		has_variable = pod_combat_active
-		has_variable = pod_combat_is_over
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_over_trigger = yes
 	}
 
 	effect = {
@@ -109,12 +137,12 @@ pod_combat_auto_resolve = {
 	scope = character
 
 	is_shown = {
-		has_variable = pod_combat_active
+		pod_combat_is_active_trigger = yes
 	}
 
 	is_valid = {
 		pod_combat_is_active_trigger = yes
-		NOT = { has_variable = pod_combat_is_over }
+		NOT = { pod_combat_is_over_trigger = yes }
 	}
 
 	effect = {
@@ -146,7 +174,7 @@ pod_combat_toggle_auto_advance = {
 	scope = character
 
 	is_shown = {
-		has_variable = pod_combat_active
+		pod_combat_is_active_trigger = yes
 	}
 
 	is_valid = {
@@ -164,10 +192,10 @@ pod_combat_toggle_auto_advance = {
 		# Re-seed the live fight's step_mode from the now-updated pref.
 		if = {
 			limit = { has_variable = pod_combat_manual_step_pref }
-			set_variable = { name = pod_combat_step_mode value = yes }
+			var:pod_combat_session ?= { set_variable = { name = pod_combat_step_mode value = yes } }
 		}
 		else = {
-			remove_variable = pod_combat_step_mode
+			var:pod_combat_session ?= { remove_variable = pod_combat_step_mode }
 		}
 	}
 }
@@ -183,7 +211,7 @@ pod_combat_advance_turn = {
 	scope = character
 
 	is_shown = {
-		has_variable = pod_combat_active
+		pod_combat_is_active_trigger = yes
 	}
 
 	is_valid = {
@@ -192,7 +220,7 @@ pod_combat_advance_turn = {
 
 	effect = {
 		if = {
-			limit = { has_variable = pod_combat_step_mode }
+			limit = { var:pod_combat_session ?= { has_variable = pod_combat_step_mode } }
 			pod_combat_advance_one_ai_turn_effect = yes
 			if = {
 				limit = { pod_combat_pc_has_acted_this_round_trigger = yes }
@@ -204,18 +232,24 @@ pod_combat_advance_turn = {
 		}
 		else = {
 			# AUTO. Route on pc_has_acted exactly like the STEP branch above and
-			# pod_combat_process_group_turns_effect: PC already committed -> drain
-			# the remaining post-PC AI, then end the round; PC NOT yet acted
-			# (pre-PC phase, e.g. auto-advance toggled on while an AI leads off) ->
-			# walk the AI up to the PC via the PC-stopping drain (which runs
-			# setup_pc_turn inline). Calling run_remaining with the PC unacted hangs:
-			# its while-limit stays true on the alive+unacted PC, which
-			# advance_one_ai_turn skips without ever marking acted.
+			# pod_combat_process_group_turns_effect: already committed -> drain the
+			# remaining post-PC AI, then end the round; NOT yet acted (pre-PC phase,
+			# e.g. auto-advance toggled on while an AI leads off) -> walk the AI up
+			# to the controlled slot via the pre-PC pump, which runs setup_pc_turn
+			# inline.
+			#
+			# The split must stay. Both pumps now stop at a controlled slot, but the
+			# pre-PC state is one where setup_pc_turn has ALREADY run and the turn is
+			# live: run_remaining there would stop on pass 0 and re-run setup on a
+			# turn already in progress, re-seeding AP and stripping round buffs.
 			if = {
 				limit = { pod_combat_pc_has_acted_this_round_trigger = yes }
 				pod_combat_run_remaining_ai_turns_effect = yes
 				if = {
-					limit = { NOT = { has_variable = pod_combat_is_over } }
+					limit = {
+						NOT = { pod_combat_current_actor_is_controlled_trigger = yes }
+						NOT = { pod_combat_is_over_trigger = yes }
+					}
 					pod_combat_group_end_round_effect = yes
 				}
 			}
