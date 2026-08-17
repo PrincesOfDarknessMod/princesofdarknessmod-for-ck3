@@ -131,6 +131,60 @@ PixelShader =
 			}
 		]]
 	}
+	
+	MainCode PS_ColorDisplay
+	{	
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			PDX_MAIN
+			{
+				float a = SampleImageSprite( Texture, Input.UV0 ).a;
+
+				float input_r = SpriteTranslateRotateUVAndAlpha[1].w;
+				float input_g = SpriteTranslateRotateUVAndAlpha[2].w;
+				float input_b = SpriteTranslateRotateUVAndAlpha[3].w;
+
+				float3 input_rgb = float3(input_r,input_g,input_b);
+				float3 output_rgb;
+				
+				#if defined(HUE_GRADIENT)
+					float3 input_hsv = RGBtoHSV(input_rgb);
+					input_hsv.r = Input.UV0.x;
+					output_rgb = HSVtoRGB(input_hsv);
+				#elif defined(SATURATION_GRADIENT)
+					float3 input_hsv = RGBtoHSV(input_rgb);
+					input_hsv.g = Input.UV0.x;
+					output_rgb = HSVtoRGB(input_hsv);
+				#elif defined(VALUE_GRADIENT)
+					float3 input_hsv = RGBtoHSV(input_rgb);
+					input_hsv.b = Input.UV0.x;
+					output_rgb = HSVtoRGB(input_hsv);
+				#else
+					#ifdef RED_GRADIENT
+						output_rgb.r = Input.UV0.x;
+					#else
+						output_rgb.r = input_r;
+					#endif
+					
+					#ifdef GREEN_GRADIENT
+						output_rgb.g = Input.UV0.x;
+					#else
+						output_rgb.g = input_g;
+					#endif
+					
+					#ifdef BLUE_GRADIENT
+						output_rgb.b = Input.UV0.x;
+					#else
+						output_rgb.b = input_b;
+					#endif
+				#endif
+				
+				return float4(output_rgb,a);
+			}
+		]]
+	}
 
 	MainCode PS_PODTernaryGraph
 	{
@@ -1165,6 +1219,109 @@ Effect PODFBMDisabled
 	VertexShader = "VS_Default"
 	PixelShader = "PS_PODFBM"
 	Defines = { "DISABLED" }
+}
+
+Effect ColorDisplay
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+}
+Effect ColorDisplayDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "DISABLED" }
+}
+
+Effect ColorDisplayRedGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "RED_GRADIENT" }
+}
+Effect ColorDisplayRedGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "RED_GRADIENT" "DISABLED" }
+}
+
+Effect ColorDisplayGreenGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "GREEN_GRADIENT" }
+}
+Effect ColorDisplayGreenGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "GREEN_GRADIENT" "DISABLED" }
+}
+
+Effect ColorDisplayBlueGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "BLUE_GRADIENT" }
+}
+Effect ColorDisplayBlueGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "BLUE_GRADIENT" "DISABLED" }
+}
+
+Effect ColorDisplayHueGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "HUE_GRADIENT" }
+}
+Effect ColorDisplayHueGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "HUE_GRADIENT" "DISABLED" }
+}
+
+Effect ColorDisplaySaturationGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "SATURATION_GRADIENT" }
+}
+Effect ColorDisplaySaturationGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "SATURATION_GRADIENT" "DISABLED" }
+}
+
+Effect ColorDisplayValueGradient
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "VALUE_GRADIENT" }
+}
+Effect ColorDisplayValueGradientDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_ColorDisplay"
+	
+	Defines = { "VALUE_GRADIENT" "DISABLED" }
 }
 
 Effect PODTernaryGraph
