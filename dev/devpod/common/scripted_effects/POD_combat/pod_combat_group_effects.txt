@@ -875,8 +875,12 @@ pod_combat_save_workspace_effect = {
 # battery that opens slot init can kill the occupant) and group cleanup
 # (nothing leaks into save data or the NPC's next fight). Adding a new
 # per-fight AI char var = one line here.
+# Character scope. The AI's per-fight MEMORY only - the loadout is deliberately
+# NOT cleared here. A human-driven body reads is_ai = yes but never ran the
+# selector, so it has nothing to remember and everything to lose: wiping its
+# loadout would leave the driver with whatever the AI seed happened to give it.
+# Callers that do want the loadout gone clear it themselves.
 pod_combat_clear_ai_scratch_effect = {
-	clear_variable_list = pod_combat_loadout
 	remove_variable = pod_combat_ai_last_move
 	remove_variable = pod_combat_ai_prev_move
 	remove_variable = pod_combat_ai_prev2_move
@@ -937,6 +941,15 @@ pod_combat_init_slot_from_character_effect = {
 	#
 	# AI fera shapeshift runs upfront in POD_combat_finalize_duel_effect (before
 	# this), so every potential CASTER already has its crinos modifier here.
+	#
+	# Is a human driving this slot? Captured HERE, in slot scope, because
+	# slot_human_controller is a slot var and everything below runs inside
+	# $CHARACTER$ - a test in there would silently ask the character instead.
+	save_scope_value_as = { name = pod_combat_init_slot_is_driven value = 0 }
+	if = {
+		limit = { has_variable = slot_human_controller }
+		save_scope_value_as = { name = pod_combat_init_slot_is_driven value = 1 }
+	}
 	$CHARACTER$ = {
 		# Discipline combat buffs. Named scopes (not root) to match PoD's duel
 		# pattern and dodge text-substitution issues in nested parametric effects.
@@ -976,10 +989,26 @@ pod_combat_init_slot_from_character_effect = {
 			remove_variable = pod_combat_weapon_attack
 			remove_variable = pod_combat_weapon_soak_pen
 			# Clear per-fight AI scratch so a fresh fight starts clean.
-			# PC slot skipped (persistent loadout, no AI history vars).
+			# Human-occupied slots skipped (persistent loadout, no AI history).
 			if = {
 				limit = { is_ai = yes }
 				pod_combat_clear_ai_scratch_effect = yes
+			}
+			# The loadout is a separate question from the AI's memory: wipe it only
+			# where nothing human is driving, so a launcher can curate a proxy's or
+			# a clone's repertoire before finalize and have it survive. Left alone,
+			# the finalize seed still fills an empty one with the AI's full
+			# repertoire, so an uncurated body is armed either way.
+			#
+			# scope: value, not a bare has_variable: this block is CHARACTER scope
+			# and slot_human_controller is a SLOT var, so testing it here would ask
+			# the character, always answer no, and change nothing at all.
+			if = {
+				limit = {
+					is_ai = yes
+					scope:pod_combat_init_slot_is_driven = 0
+				}
+				clear_variable_list = pod_combat_loadout
 			}
 		}
 	}
@@ -1065,9 +1094,28 @@ pod_combat_init_slot_from_character_effect = {
 # runs pod_combat_init_all_slots_effect once.
 ##############################################################################################
 
-POD_combat_create_duel_effect = {
+# Shared body of both builders. Do NOT call this directly - use
+# POD_combat_create_duel_effect (the caller fights) or
+# POD_combat_create_proxy_duel_effect (the caller directs combatants it is not).
+# One core rather than two copies because everything except the caller's own seat
+# is identical, and a forked ~160-line builder would drift.
+pod_combat_create_duel_core_effect = {
 	# Scaffolds host state, opens the shell card, creates the duel story (the
-	# caller-context handoff), and seats the PC in slot 0. Runs in the PC's scope.
+	# caller-context handoff), and optionally seats the caller in slot 0. Runs in
+	# the caller's scope.
+	#
+	# Seating params:
+	#   SEAT_HOST - yes: the caller takes player/0 and is marked as driving it.
+	#       no: the caller holds the session pointer (so their window binds and
+	#       they own the shell card) but occupies no slot; the player team is
+	#       built entirely from add_ally, and the launcher marks one of those
+	#       seats itself.
+	#   INITIAL_PLAYER_SIZE - 1 when the caller is seated, 0 when not. This is
+	#       what decides where the FIRST add_ally lands, and player/0 must end up
+	#       occupied either way: the player-team leader pointer, the enemy team's
+	#       discipline CASTER, the whole hit-chance baseline pass and the
+	#       mid-fight enemy adds all key off it, and the hit-chance pass fails
+	#       SILENTLY when it is missing.
 	#
 	# Params (all forwarded onto the duel story for pod_combat.9999):
 	#   INITIATOR / ATTACKER / DEFENDER - the original duel parties in
@@ -1128,8 +1176,13 @@ POD_combat_create_duel_effect = {
 			POD_reload_combat_moves = yes
 		}
 	}
+	# Only when the caller is going to fight. A director arming itself would be
+	# seeding a loadout nothing reads.
 	if = {
-		limit = { pod_combat_no_moves_equipped_trigger = yes }
+		limit = {
+			always = $SEAT_HOST$
+			pod_combat_no_moves_equipped_trigger = yes
+		}
 		POD_apply_default_combat_loadout = yes
 	}
 
@@ -1204,7 +1257,7 @@ POD_combat_create_duel_effect = {
 			# add_enemy = enemy/0). Written through the bound scope rather than
 			# the host's pod_combat_session, which is not set until below.
 			set_variable = { name = pod_combat_round value = 1 }
-			set_variable = { name = pod_combat_player_team_size value = 1 }
+			set_variable = { name = pod_combat_player_team_size value = $INITIAL_PLAYER_SIZE$ }
 			set_variable = { name = pod_combat_enemy_team_size  value = 0 }
 		}
 
@@ -1217,13 +1270,19 @@ POD_combat_create_duel_effect = {
 		}
 	}
 
-	# ── PC -> player/0 (occupancy only; stat init deferred to finalize) ──
-	pod_combat_set_slot_char_effect = { TEAM = player POSITION = 0 CHARACTER = scope:combat_pc }
+	# ── caller -> player/0 (occupancy only; stat init deferred to finalize) ──
 	# ...and that seat is the one this human plays. Stated here by the BUILDER
 	# rather than inferred at finalize from "player team, position 0": a launcher
 	# that wants a second played body, or wants the human to direct combatants it
-	# is not, says so with another call like this one and needs no engine change.
-	pod_combat_mark_slot_controlled_effect = { TEAM = player POSITION = 0 CONTROLLER = scope:combat_pc }
+	# is not, says so with its own mark call and needs no engine change.
+	#
+	# Skipped entirely in proxy mode, where the player team starts empty and the
+	# launcher does both the seating and the marking.
+	if = {
+		limit = { always = $SEAT_HOST$ }
+		pod_combat_set_slot_char_effect = { TEAM = player POSITION = 0 CHARACTER = scope:combat_pc }
+		pod_combat_mark_slot_controlled_effect = { TEAM = player POSITION = 0 CONTROLLER = scope:combat_pc }
+	}
 
 	# This fight has a shell card holding its scope table, so the combat window's
 	# scope-less End Combat button stays hidden and .9999 expects the live route.
@@ -1231,6 +1290,54 @@ POD_combat_create_duel_effect = {
 	# flag cannot survive a prior fight, since that fight's story is a different
 	# object that got end_story'd.
 	var:pod_combat_session ?= { set_variable = { name = pod_combat_sc_shell value = yes } }
+}
+
+# The ordinary builder: the launching human fights, seated at player/0.
+POD_combat_create_duel_effect = {
+	pod_combat_create_duel_core_effect = {
+		SEAT_HOST = yes
+		INITIAL_PLAYER_SIZE = 1
+		INITIATOR = $INITIATOR$
+		ATTACKER  = $ATTACKER$
+		DEFENDER  = $DEFENDER$
+		FATALITY  = $FATALITY$
+		FIXED     = $FIXED$
+		LOCALE    = $LOCALE$
+		OUTPUT_EVENT = $OUTPUT_EVENT$
+	}
+}
+
+# The director builder: the launching human DIRECTS the fight without joining it.
+# Their window binds (they hold the session pointer and own the shell card) but
+# they occupy no slot, take no wounds, and are not "in combat" for the busy-gates
+# - pod_combat_is_seated_trigger reads false for them.
+#
+# The caller MUST then, before finalize:
+#   1. seat the player team with POD_combat_duel_add_ally_effect - the FIRST call
+#      lands at player/0 and becomes the player-team leader, which several
+#      finalize steps require (one of them fails silently without it);
+#   2. mark one seat with pod_combat_mark_slot_controlled_effect, passing the
+#      position that seat ALREADY holds (add_ally bumps the counter after it
+#      seats, so re-reading the counter is off by one) and the DIRECTOR as
+#      CONTROLLER;
+#   3. seat the enemy team and call POD_combat_finalize_duel_effect.
+#
+# Name the lead proxy as ATTACKER or DEFENDER, not the director: outcome
+# attribution records the player team's LEADER occupant, and the sc_ victor snap
+# resolves against the principals. INITIATOR should be the director, so the
+# follow-up event fires on the human.
+POD_combat_create_proxy_duel_effect = {
+	pod_combat_create_duel_core_effect = {
+		SEAT_HOST = no
+		INITIAL_PLAYER_SIZE = 0
+		INITIATOR = $INITIATOR$
+		ATTACKER  = $ATTACKER$
+		DEFENDER  = $DEFENDER$
+		FATALITY  = $FATALITY$
+		FIXED     = $FIXED$
+		LOCALE    = $LOCALE$
+		OUTPUT_EVENT = $OUTPUT_EVENT$
+	}
 }
 
 POD_combat_duel_add_ally_effect = {
@@ -1363,14 +1470,10 @@ POD_combat_finalize_duel_effect = {
 	# is arbitrary with several marked slots, which is correct for the one thing
 	# this seeds: a starting view, replaced at the first hand-off.
 	#
-	# STILL OPEN for MULTIPLE DISTINCT HUMANS (clones and proxy are fine): this
-	# pointer is ONE var on the shared fight story, so two humans would each see
-	# whichever was handed off most recently. Display only - the command gate
-	# pod_combat_is_my_turn_trigger compares the marker against the asker - but it
-	# needs a per-driver pointer before multiplayer. Also open: the move card's
-	# uses_weapon lines still describe the VIEWER's armament (two blocks in
-	# pod_combat_skill_guis.txt), and the section-4 CK3 resource primitives still
-	# charge root.
+	# This one is FIGHT-scoped and therefore a singleton: it names the slot whose
+	# turn the engine is currently servicing, which is a property of the fight, not
+	# of any viewer. Its per-viewer twin is pod_combat_my_control_slot, seeded in
+	# the pass below - see that pass for which readers use which.
 	var:pod_combat_session ?= {
 		every_in_list = {
 			variable = pod_combat_active_slots
@@ -1384,6 +1487,45 @@ POD_combat_finalize_duel_effect = {
 	if = {
 		limit = { exists = scope:pod_seed_control_slot }
 		var:pod_combat_session ?= { set_variable = { name = pod_combat_active_control_slot value = scope:pod_seed_control_slot } }
+	}
+
+	# Per-MARKED-SLOT seeding: the driver's own display pointer, and that slot's
+	# standing target. Both are per-slot facts, so this pass has NO first-match
+	# guard - every marked slot seeds its own, which is what makes two drivers (or
+	# one driver with two bodies) independent.
+	#
+	# pod_combat_my_control_slot lives on the CONTROLLING CHARACTER, not on the
+	# fight. That is the whole point: a fight var can only ever name one slot, so
+	# two distinct humans sharing a fight would each see whichever of them was
+	# handed off most recently. Every per-viewer surface (the move bar through
+	# PODCombatMyCombatant, the target readout, the TARGETED badges, the hit
+	# breakdown, self-target suppression) reads this one; the fight var above stays
+	# for the turn machinery, which must follow the LIVE slot regardless of viewer.
+	#
+	# Unlike a story var, a character var does not die with end_story - see the
+	# release blocks in pod_combat_duel_end_effect and the host-death path.
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = { has_variable = slot_human_controller }
+			save_scope_as = pod_marked_slot
+			# Standing target defaults to enemy/0; the player can switch via the
+			# Target button on any card. slot_target_char is the mirror the top-row
+			# 'Target: X' readout reads, rewritten wherever the target changes.
+			set_variable = { name = slot_target_team     value = flag:enemy }
+			set_variable = { name = slot_target_position value = 0 }
+			if = {
+				limit = {
+					scope:combat_pc.var:pod_combat_session ?= { has_variable = pod_combat_enemy_leader_slot }
+					scope:combat_pc.var:pod_combat_session.var:pod_combat_enemy_leader_slot ?= { has_variable = slot_char }
+				}
+				set_variable = { name = slot_target_char value = scope:combat_pc.var:pod_combat_session.var:pod_combat_enemy_leader_slot.var:slot_char }
+			}
+			# Scope switch is the body's LAST statement, keeping the iteration scope
+			# clean. ?= because the marker is a character ref that a mid-fight unmark
+			# could clear.
+			var:slot_human_controller ?= { set_variable = { name = pod_combat_my_control_slot value = scope:pod_marked_slot } }
+		}
 	}
 
 	# scope:combat_pc = the PC (root). scope:pod_combat_target = the enemy
@@ -1484,25 +1626,8 @@ POD_combat_finalize_duel_effect = {
 	}
 	var:pod_combat_session ?= { set_variable = { name = pod_combat_selected_target_team     value = flag:enemy } }
 	var:pod_combat_session ?= { set_variable = { name = pod_combat_selected_target_position value = 0 } }
-	# Target memory, per slot: defaults to enemy/0. Player can switch via the Target
-	# button on any card; the (team, position) pair + can_use triggers gate validity.
-	# slot_target_char is the mirror the top-row 'Target: X' display reads, rewritten
-	# wherever the target changes.
-	#
-	# On the SLOT rather than the fight: a fight can have several controlled slots,
-	# and each needs its own standing target. Reached through
-	# pod_combat_active_control_slot, so every reader is pointer-relative and stays
-	# correct when that pointer moves.
-	var:pod_combat_session.var:pod_combat_active_control_slot ?= {
-		set_variable = { name = slot_target_team     value = flag:enemy }
-		set_variable = { name = slot_target_position value = 0 }
-	}
-	if = {
-		limit = { var:pod_combat_session ?= { has_variable = pod_combat_enemy_leader_slot } var:pod_combat_session.var:pod_combat_enemy_leader_slot ?= { has_variable = slot_char } }
-		var:pod_combat_session.var:pod_combat_active_control_slot ?= {
-			set_variable = { name = slot_target_char value = scope:combat_pc.var:pod_combat_session.var:pod_combat_enemy_leader_slot.var:slot_char }
-		}
-	}
+	# (The per-slot standing target is seeded in the marked-slot pass above, so that
+	# every controlled slot gets one rather than only the display pointer's.)
 	# AP / drain setup happens in the PC-goes-first branch below (AI turns do
 	# their own). apply_ap_drain reads the workspace, so it must follow load_workspace.
 
@@ -1761,6 +1886,25 @@ pod_combat_clear_all_ai_scratch_effect = {
 				var:slot_char = { is_ai = yes  is_alive = yes }
 			}
 			var:slot_char = { pod_combat_clear_ai_scratch_effect = yes }
+		}
+	}
+	# Third pass: the two LISTS a human-driven AI body accumulated. The loops
+	# above deliberately skip marked slots, which is right for the AI memory they
+	# never wrote - but the loadout the launcher curated and the unlock list the
+	# bake built are per-fight scaffolding on an NPC, and nothing else clears
+	# either, so without this they ride the save forever. Only lists, never the
+	# AI history vars.
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				has_variable = slot_human_controller
+				var:slot_char = { is_ai = yes  is_alive = yes }
+			}
+			var:slot_char = {
+				clear_variable_list = pod_combat_loadout
+				clear_variable_list = pod_combat_unlocked_moves
+			}
 		}
 	}
 	# Second pass for the move-story marks, which are NOT liveness-gated - see
@@ -2882,6 +3026,11 @@ pod_combat_setup_pc_turn_effect = {
 				# Scope switch is the body's last statement, keeping the iteration
 				# scope clean (the mind-control matcher in execute_ai_turn is the same
 				# shape).
+				# The driver's own pointer follows the hand-off too, so their client
+				# keeps resolving the body they are playing. Written before the
+				# fight-side switch so the scope switch below stays the last
+				# statement in the iteration.
+				var:slot_human_controller ?= { set_variable = { name = pod_combat_my_control_slot value = scope:pod_handoff_slot } }
 				scope:host.var:pod_combat_session ?= {
 					set_variable = { name = pod_combat_active_control_slot value = scope:pod_handoff_slot }
 					set_variable = { name = pod_combat_control_turn_live value = 1 }
@@ -3384,13 +3533,19 @@ pod_combat_execute_ai_turn_effect = {
 
 pod_combat_check_group_victory_effect = {
 	# Victory conditions (evaluated in order, first match ends combat):
-	#   1. All enemies KO'd           -> player team wins
-	#   2. PC (player/0) KO'd            -> player loses (PC can't act, so combat cannot continue)
-	#   3. All allies KO'd             -> player loses
+	#   1. All enemies KO'd              -> player team wins
+	#   2. Every human-driven slot down  -> player loses (nothing left to play)
+	#   3. All player-team slots down    -> player loses
 
-	# The set_variable arms below address the PC as scope:combat_pc: a bare `root`
-	# there errors with "Event target link 'root' returned unset scope".
+	# scope:combat_pc is the CALLER: a bare `root` in the set_variable arms below
+	# errors with "Event target link 'root' returned unset scope". It is no longer
+	# what gets recorded as winner or loser - see the principal helper below.
 	save_scope_as = combat_pc
+	# The player side's stand-in for the outcome pair: the player team's leader
+	# occupant, which is the caller in an ordinary duel and a directed combatant
+	# in a proxy fight. Saved once here so all three checks name the same
+	# character, and saved BEFORE any check so the arms can read it.
+	pod_combat_save_player_principal_effect = yes
 
 	# --- Check 1: All enemies knocked out ---
 	# All three checks express a team wipe as 'no alive slot of that team via
@@ -3413,7 +3568,7 @@ pod_combat_check_group_victory_effect = {
 		# inside the fight block a bare var:pod_combat_session would ask the fight
 		# story for its own session pointer, which does not exist.
 		var:pod_combat_session ?= {
-			set_variable = { name = pod_combat_winner value = scope:combat_pc }
+			set_variable = { name = pod_combat_winner value = scope:pod_combat_player_principal }
 			set_variable = { name = pod_combat_loser value = scope:combat_pc.var:pod_combat_session.var:pod_combat_enemy_leader_slot.var:slot_char }
 			set_variable = { name = pod_combat_is_over value = yes }
 		}
@@ -3462,7 +3617,7 @@ pod_combat_check_group_victory_effect = {
 		pod_combat_save_enemy_victor_effect = yes
 		var:pod_combat_session ?= {
 			set_variable = { name = pod_combat_winner value = scope:pod_combat_enemy_victor }
-			set_variable = { name = pod_combat_loser value = scope:combat_pc }
+			set_variable = { name = pod_combat_loser value = scope:pod_combat_player_principal }
 			set_variable = { name = pod_combat_is_over value = yes }
 		}
 		scope:pod_combat_enemy_victor = { save_scope_as = pod_combat_target }
@@ -3491,7 +3646,7 @@ pod_combat_check_group_victory_effect = {
 		pod_combat_save_enemy_victor_effect = yes
 		var:pod_combat_session ?= {
 			set_variable = { name = pod_combat_winner value = scope:pod_combat_enemy_victor }
-			set_variable = { name = pod_combat_loser value = scope:combat_pc }
+			set_variable = { name = pod_combat_loser value = scope:pod_combat_player_principal }
 			set_variable = { name = pod_combat_is_over value = yes }
 		}
 		scope:pod_combat_enemy_victor = { save_scope_as = pod_combat_target }
