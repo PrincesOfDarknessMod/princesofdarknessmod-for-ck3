@@ -1,0 +1,201 @@
+﻿######################################
+######   FIRST-FIGHT INTRO GLUE   ######
+######################################
+
+# Shared bodies behind the first-fight intro (pod_combat.0200 / .0201): the one
+# script path that opens the loadout editor, and the deferred duel launch the
+# intro's Begin option runs. The deferral itself is armed in
+# PoD_override_single_combat_effects.txt (pod_combat_sc_intro_or_launch_effect);
+# COMBAT_REFERENCE.info section 10 "First-fight intro deferral" has the model
+# and the accepted deviations.
+
+# Opens the loadout editor. Callers: the Configure Combat Skills decision and
+# pod_combat.0200's review option. Runs in the PC's scope, and is NOT itself
+# hidden_effect-wrapped so each caller keeps its own tooltip discipline.
+#
+# Factored out rather than duplicated because the sequence below is ordered,
+# and a second copy that drifted would open an editor showing an empty pool or
+# stale cap pips with nothing to say so.
+pod_combat_open_loadout_editor_effect = {
+	# Save-compat: if the script-side version constant doesn't match
+	# the global variable set during init, rebuild every story and
+	# re-seed starter loadouts. POD_reload_combat_moves handles the
+	# heavy lifting (see pod_combat_move_init_effects.txt).
+	if = {
+		limit = {
+			OR = {
+				NOT = { exists = global_var:POD_combat_version }
+				global_var:POD_combat_version != POD_current_combat_version
+			}
+			# Defer while any player is mid-fight (see the duel-create twin).
+			NOT = { pod_combat_any_fight_active_trigger = yes }
+		}
+		POD_reload_combat_moves = yes
+	}
+
+	# Seed default loadout if empty (first time opening, new save,
+	# or just after version reload which cleared the list).
+	if = {
+		limit = { pod_combat_no_moves_equipped_trigger = yes }
+		POD_apply_default_combat_loadout = yes
+	}
+
+	set_variable = { name = pod_combat_config_open value = yes }
+
+	# Build the PC's pod_combat_unlocked_moves list for the cheap per-frame
+	# editor-pool check. Runs after the version-reload + default-seed
+	# so it reflects the current catalogue.
+	pod_combat_bake_pc_catalogue_unlocks_effect = yes
+
+	# Seed the loadout-count display cache so the pip strips read cheap
+	# vars while the editor is open.
+	pod_combat_refresh_loadout_counts_effect = yes
+
+	# The sheet scratch list was cleared at last close; if the pool
+	# was left in sheet view, rebuild it now (after the unlock bake
+	# above - the known-only filter tests pod_combat_unlocked_moves membership).
+	if = {
+		limit = { has_variable = pod_combat_sheet_view }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+# One arm of the fatality ladder below. Exists so the dispatch names only what
+# differs per arm: every other launcher parameter is fixed for the deferred
+# route, and five copies of the full call would be five places to drift.
+#
+# OUTPUT_EVENT is the self-diagnosing placeholder - macro args take literal
+# tokens only, so the real follow-up id cannot be threaded through here and is
+# written onto the fight story right after the launcher returns.
+# FIXED is structurally no (Part 3's gate routes FIXED duels to vanilla), and
+# LOCALE is the restore ladder's universal default; see the ladder's comment.
+pod_combat_intro_launch_arm_effect = {
+	pod_combat_sc_launch_minigame_effect = {
+		OPPONENT     = scope:pod_combat_intro_opponent
+		OUTPUT_EVENT = pod_combat.0299
+		FATALITY     = $FATALITY$
+		FIXED        = no
+		LOCALE       = battlefield
+	}
+}
+
+# The deferred launch. Runs in the PC's scope from the Begin option of both
+# pod_combat.0200 and pod_combat.0201, which is why it is one effect: the two
+# surfaces must not be able to disagree about what Begin does.
+#
+# It runs inside the intro event's chain, so it still holds the launching
+# event's saved-scope table (sc_* principals, the flag-typed rule values,
+# scope:follow_up_event, scope:invalidation_event) and the shell card
+# pod_combat.9995 snapshots that same table from inside the builder, exactly as
+# on the direct route. Launching from the loadout editor's close button instead
+# would arrive with no table at all - scripted-GUI executions carry none.
+#
+# Fully hidden: the option supplies the one tooltip line. Left visible, the
+# ladder would render all five arms.
+pod_combat_intro_begin_fight_effect = {
+	hidden_effect = {
+		if = {
+			limit = { pod_combat_intro_launch_valid_trigger = yes }
+			# Re-stamp rather than assume. A vanilla duel that ran during the
+			# pending window (Part 3 routes those around the minigame) releases
+			# engaged_in_single_combat on its way out, and the minigame's own
+			# bookkeeping expects it set - pod_combat.9999 releases it again.
+			scope:sc_attacker = { set_variable = { name = engaged_in_single_combat value = yes } }
+			scope:sc_defender = { set_variable = { name = engaged_in_single_combat value = yes } }
+
+			# The launcher wants the opponent by name, and which principal that
+			# is depends on which side the PC took. Combat-namespaced on purpose:
+			# it rides into the shell card's table alongside the parent's own
+			# aliases, and a generic name there would shadow one of them.
+			if = {
+				limit = { this = scope:sc_attacker }
+				scope:sc_defender = { save_scope_as = pod_combat_intro_opponent }
+			}
+			else = {
+				scope:sc_attacker = { save_scope_as = pod_combat_intro_opponent }
+			}
+
+			# Fatality has to reach the builder as a literal: macro args cannot
+			# carry a runtime value, and a flag copied through a variable
+			# degrades to a plain value whose later flag comparisons are type
+			# errors that skip silently. So each arm passes the literal matching
+			# the inherited scope:fatality, which makes the builder's own re-save
+			# a no-op and leaves the fight story's fatality var correct - the
+			# death gate and the practice wound snapshot both read it at finalize.
+			#
+			# LOCKSTEP with POD_combat_restore_sc_rule_flags_effect's fatality
+			# chain (pod_combat_sc_context_effects.txt): same arms, same order. A
+			# FATALITY literal that exists there and not here silently becomes a
+			# duel to the death.
+			if = {
+				limit = { scope:fatality = flag:always }
+				pod_combat_intro_launch_arm_effect = { FATALITY = always }
+			}
+			else_if = {
+				limit = { scope:fatality = flag:default }
+				pod_combat_intro_launch_arm_effect = { FATALITY = default }
+			}
+			else_if = {
+				limit = { scope:fatality = flag:possible }
+				pod_combat_intro_launch_arm_effect = { FATALITY = possible }
+			}
+			else_if = {
+				limit = { scope:fatality = flag:practice }
+				pod_combat_intro_launch_arm_effect = { FATALITY = practice }
+			}
+			else = {
+				pod_combat_intro_launch_arm_effect = { FATALITY = no }
+			}
+
+			# Put the real follow-up id back. pod_combat.9999 fires the follow-up
+			# from the fight story's var on every route, so without this line the
+			# fight ends into the placeholder and the caller's outcome handling
+			# (a contract's reward, a heist's next node) never runs.
+			# set_variable from an event_id-typed scope value is type-preserving:
+			# it is the second half of POD_save_event_as_var.
+			var:pod_combat_session ?= {
+				set_variable = { name = follow_up value = scope:follow_up_event }
+			}
+
+			remove_variable = pod_combat_intro_pending
+		}
+		else = {
+			# Re-validation failed. The intro can sit open across arbitrary game
+			# time, so by the click a principal may be dead or already fighting
+			# something else. Unwind what Part 3 armed and hand the caller the
+			# same invalidation Part 2 uses for its own dead-end.
+			#
+			# Released only from a living principal who is not seated in a fight:
+			# mutating a corpse's variables errors, and a superseding fight owns
+			# the marker on its own combatants until pod_combat.9999 clears it.
+			if = {
+				limit = {
+					exists = scope:sc_attacker
+					scope:sc_attacker = {
+						is_alive = yes
+						NOT = { pod_combat_is_seated_trigger = yes }
+					}
+				}
+				scope:sc_attacker = { remove_variable = engaged_in_single_combat }
+			}
+			if = {
+				limit = {
+					exists = scope:sc_defender
+					scope:sc_defender = {
+						is_alive = yes
+						NOT = { pod_combat_is_seated_trigger = yes }
+					}
+				}
+				scope:sc_defender = { remove_variable = engaged_in_single_combat }
+			}
+
+			remove_variable = pod_combat_intro_pending
+
+			# trigger_event no-ops on a dead recipient, matching Part 2's own
+			# unguarded fire.
+			scope:sc_initiator ?= {
+				trigger_event = { saved_event_id = scope:invalidation_event }
+			}
+		}
+	}
+}

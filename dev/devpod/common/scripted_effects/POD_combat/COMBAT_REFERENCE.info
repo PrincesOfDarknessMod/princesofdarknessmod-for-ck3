@@ -525,7 +525,7 @@ ordering rules** below before moving anything.
 | §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the fight story. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, and the generator's `team_all_support` lint rejects the combination. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
 | §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
@@ -2136,7 +2136,9 @@ Three further consequences worth stating:
 - **Damage and debuffs broadcast; support does not.** §5b broadcasts tier
   debuffs and stance-strips across the sweep, but §5c/§9/§10/§12/§12b route
   buffs, heals and beneficiary stances to the **actor** for every mode
-  except `single_ally` / `single_pc`. 
+  except `single_ally` / `single_pc`. A `team_all` heal would therefore mend
+  only its caster, so the generator's `team_all_support` lint rejects the
+  combination rather than shipping the surprise.
 - **No reactions.** §15 skips `team_all` for the same reason it skips
   `team_enemy`: a counter can only fire from one workspace target, so firing
   would arbitrarily single out the pre-AoE one.
@@ -2948,7 +2950,10 @@ Code-side entry points and where they live.
 | `pod_combat_error_suppression_effects.txt` | Consolidated never-executed validator set/use bridges for optional move vars, log-entry vars, literal flags, and scope aliases. Called once at game start. |
 | `PoD_override_single_combat_effects.txt` | Same-key redeclaration that routes eligible PC-involved `configure_start_single_combat_effect` calls through `pod_combat_sc_launch_minigame_effect`; ineligible or fixed-result duels retain the PoD body. |
 | `pod_combat_sc_context_effects.txt` | Hand-off helpers for `pod_combat.9999`: outcome derivation (both routes), the fallback principal/rule-flag restore, duel-end finalization, follow-up fire. §10. |
+| `pod_combat_intro_effects.txt` | First-fight intro glue: the shared loadout-editor open (also the Configure Combat Skills decision's whole body) and `pod_combat_intro_begin_fight_effect`, the deferred duel launch the intro's Begin option runs. §10. |
 | `POD_health_track_effects.txt` (PoD file, delta) | Five registered combat deltas: per-point soak (`pod_soak_hits`), practice-spar guards that suppress persistent wound side effects (`pod_combat_practice_active`), the aggravated-overflow push-out correction in `POD_apply_wound_boxes` (`subtract = POD_empty_damage_boxes`), the in-fight weapon soak shred (`pod_combat_weapon_soak_pen`) and its outside-combat sibling (`artifact_weapon_soak_penalty`).  |
+
+The first-fight intro adds two GUI files outside the windows above: `gui/event_windows/pod_combat_intro_bar.gui` (the ready bar for `pod_combat.0201`, cloned from the shell) and `gui/event_window_widgets/pod_combat_intro_pause.gui` (the force-pause carrier embedded in `pod_combat.0200`). Neither needs a `POD_scripted_widgets.txt` entry - event windows resolve by filename, as the shell does.
 
 There is no `pod_combat_debug_effects.txt` in `devpod/` - the
 workspace-sync assert layer was not ported (see §7 (enforcement is
@@ -3185,6 +3190,73 @@ The story therefore still carries the principals, the rule flags and
 the follow-up id. Live host death currently ends that story during the
 dead-safe release without firing the follow-up; no dead-host bridge is
 implemented.
+
+### First-fight intro deferral
+
+On a character's first minigame fight the launch is deferred behind an
+intro popup, which adds one hop to the chain above:
+
+```
+caller's option (table T)
+  -> pod_combat.0200                     (intro; inherits T, holds it open)
+     -> [optional] pod_combat.0201       (ready bar; inherits T, editor opens under it)
+        -> Begin option -> the builder -> pod_combat.9995 (snapshots T)
+```
+
+`pod_combat_sc_intro_or_launch_effect` (in
+`PoD_override_single_combat_effects.txt`) fires the intro INSTEAD of
+calling the launcher, because `trigger_event` only queues: a popup fired
+beside the launch would open on a fight that had already started, with
+the loadout editor hidden by then. `pod_combat_intro_begin_fight_effect`
+(`pod_combat_intro_effects.txt`) runs the builder from the option, which
+is what keeps the card's snapshot equal to the direct route's. The
+launch can never move to the editor's close button - that is a
+scripted-GUI execution and carries no table at all.
+
+Rules the two intro events live by, for the same reason the shell does:
+**no `trigger` block** (a failing trigger would swallow the deferral and
+strand `engaged_in_single_combat` on both principals) and **no scope
+saves** beyond the deliberately namespaced `scope:pod_combat_intro_opponent`
+(anything else would ride T into the follow-up and could shadow a parent
+alias).
+
+Three accepted consequences, all once per character:
+
+- **`follow_up` is restored, not passed.** Macro args take literal
+  tokens, so the deferred launch hands the builder the placeholder
+  `pod_combat.0299` and writes the real id onto the fight story straight
+  after (`var:pod_combat_session ?= { set_variable = { name = follow_up
+  value = scope:follow_up_event } }`). This is load-bearing:
+  `pod_combat.9999` fires the follow-up from that var on **every** route.
+  If the write is ever lost, `pod_combat.0299` error-logs instead of a
+  wrong follow-up firing silently.
+- **`scope:locale` is `flag:battlefield` on the card's table.** Same
+  literal-arg problem, but here the builder's own re-save clobbers the
+  inherited value *before* the card snapshot, so no post-launch fixup can
+  reach it. Verified reader-free: on the minigame route nothing reads
+  `scope:locale` after `create_duel` (the only readers are the vanilla
+  Part-4 chain events and the self-contained `game_rule` 1066 chain), and
+  the story var is consumed only on the degraded fallback path, where
+  `battlefield` is already the restore ladder's default. Re-check this if
+  a follow-up ever starts reading `scope:locale`.
+- **Post-launch decoration no-ops.** `POD_combat_set_custom_title` and
+  the team-name setters are `?=`-guarded on the duel story, which does
+  not exist yet on the deferred branch, so a first fight from the heist,
+  umbra or debug launchers runs with the default window title.
+
+`fatality` is *not* in that list: it reaches the builder through a
+five-arm literal ladder matching
+`POD_combat_restore_sc_rule_flags_effect`, so the story var is correct
+and the death gate and practice snapshot behave exactly as on the direct
+route. Keep the two ladders in lockstep - a `FATALITY` literal present
+there and missing here silently becomes a duel to the death.
+
+While the intro is pending, the Part-3 gate refuses to intercept further
+duels for either principal (`pod_combat_intro_pending`), so a second duel
+runs as a vanilla one rather than starting a minigame fight underneath
+the open card. That vanilla duel releases `engaged_in_single_combat` on
+its way out, which is why Begin re-stamps it and why
+`pod_combat_intro_launch_valid_trigger` deliberately does not test it.
 
 ### Victor snapping
 
