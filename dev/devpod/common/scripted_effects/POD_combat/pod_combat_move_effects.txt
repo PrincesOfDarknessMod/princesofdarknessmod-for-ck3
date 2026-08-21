@@ -20,6 +20,11 @@
 # copy - flag values degrade to plain 'value' through scope-value copies.
 # superficial (the hp default) and absent both fall to flag:duel.
 pod_combat_seed_kind_from_class_effect = {
+	# $KIND_VAR$ names a var on the CALLER's scope, and the three call
+	# sites deliberately split across two owners: :1437 and :1544 run in
+	# fight scope with a fight var, :1729 (via pod_combat_seed_dot_on_slot_effect,
+	# whose callers all sit in an every_in_list over pod_combat_active_slots) runs in
+	# slot scope with slot_dot_kind. That split is why the body cannot wrap itself.
 	set_variable = { name = $KIND_VAR$ value = flag:duel }
 	if = {
 		limit = { $STORY$ = { has_variable = damage_type } }
@@ -43,6 +48,10 @@ pod_combat_seed_kind_from_class_effect = {
 # Self-guarding: a no-op unless the latch is set and this move is the
 # change_class bonus, so call sites need no gate of their own.
 pod_combat_override_kind_from_bonus_class_effect = {
+	# same two-owner call-site split as its sibling above
+	# (:1444 / :1554 fight scope, :1756 slot scope). The latch check below reads the
+	# fight through the named scope:combat_host rather than through `this`, which is
+	# what lets one body serve both owners without a second scope contract.
 	if = {
 		limit = {
 			scope:combat_host ?= { var:pod_combat_session ?= { has_variable = pod_combat_bonus_active } }
@@ -186,21 +195,20 @@ POD_execute_combat_move = {
 	# Only a human-controlled actor pays CK3-side gold/stress/piety/prestige and
 	# reaps the steal_gold / gain_dread primitives; AI turns touch no CK3 resources.
 	#
-	# SEAM (payer identity): the primitives below apply to root, which is the
-	# controlling human today because the controlled slot IS the host. When one
-	# human drives several slots, decide per primitive whether gold leaves the
-	# controller or the acting combatant. Related pre-existing fail-open: the
-	# affordability gate is advisory, so a cost the payer cannot meet still runs
-	# (remove_short_term_gold can push gold negative).
+	# Payer identity splits on whether the primitive has an affordability gate.
+	# gold / piety / prestige stay on root, the clicking driver, because
+	# pod_combat_move_dynamic_gates_trigger tests those three against root too:
+	# charging the acting body instead would let a move the driver can afford push
+	# a driven combatant's purse negative. Stress and the phase-4 gains have no
+	# gate, so they follow the body that actually swung - a director watching a
+	# proxy fight should not accrue its strain, and a clone's theft is the clone's.
+	# Pre-existing fail-open on either side: the gate is advisory, so a cost the
+	# payer cannot meet still runs (remove_short_term_gold can go negative).
 	if = {
 		limit = { pod_combat_current_actor_is_controlled_trigger = yes }
 		if = {
 			limit = { $STORY$ = { has_variable = gold_cost } }
 			remove_short_term_gold = $STORY$.var:gold_cost
-		}
-		if = {
-			limit = { $STORY$ = { has_variable = stress_cost } }
-			add_stress = $STORY$.var:stress_cost
 		}
 		if = {
 			limit = { $STORY$ = { has_variable = piety_cost } }
@@ -217,34 +225,49 @@ POD_execute_combat_move = {
 			}
 		}
 
-		# Phase 4 gains. steal_gold transfers from the target, clamped to what it
-		# actually has so a broke victim never mints gold for the PC; gain_dread
-		# adds to the actor. this = the player/0 actor here (the PC-only gate),
-		# so the actor-side reads are direct, same as the costs above.
-		# Practice spars leave no lasting transfers (the contract that restores
-		# wounds and skips strain), so the gains skip too - no risk-free
-		# gold-theft or dread loop against sparring partners.
-		if = {
-			limit = { NOT = { pod_combat_is_practice_trigger = yes } }
+		# Body-scoped half. Resolve the payee once instead of branching the whole
+		# body twice: seed it with root, then let the actor overwrite it. Seeding
+		# first is what makes the bare ?= safe - a move fired before load_workspace
+		# has no actor_char, the deref skips, and root stands (the same fallback
+		# the energy cost in section 3 spells out as an else). The actor is seated
+		# by construction, so its own pod_combat_session reaches the same fight the
+		# reads below need.
+		save_temporary_scope_as = pod_combat_payee
+		var:pod_combat_session.var:pod_combat_actor_char ?= { save_temporary_scope_as = pod_combat_payee }
+		scope:pod_combat_payee = {
 			if = {
-				limit = {
-					$STORY$ = { has_variable = steal_gold }
-					var:pod_combat_session ?= { has_variable = pod_combat_target_char }
-				}
-				var:pod_combat_session.var:pod_combat_target_char ?= {
-					save_temporary_scope_value_as = {
-						name = pod_combat_stolen_gold
-						value = { value = $STORY$.var:steal_gold  max = gold  min = 0 }
-					}
-					# add_gold rejects negative values, so debit the victim with
-					# remove_short_term_gold (the clamp above keeps it <= their gold).
-					remove_short_term_gold = scope:pod_combat_stolen_gold
-				}
-				add_gold = scope:pod_combat_stolen_gold
+				limit = { $STORY$ = { has_variable = stress_cost } }
+				add_stress = $STORY$.var:stress_cost
 			}
+
+			# Phase 4 gains. steal_gold transfers from the target, clamped to what
+			# it actually has so a broke victim never mints gold for the thief;
+			# gain_dread adds to the actor.
+			# Practice spars leave no lasting transfers (the contract that restores
+			# wounds and skips strain), so the gains skip too - no risk-free
+			# gold-theft or dread loop against sparring partners.
 			if = {
-				limit = { $STORY$ = { has_variable = gain_dread } }
-				add_dread = $STORY$.var:gain_dread
+				limit = { NOT = { pod_combat_is_practice_trigger = yes } }
+				if = {
+					limit = {
+						$STORY$ = { has_variable = steal_gold }
+						var:pod_combat_session ?= { has_variable = pod_combat_target_char }
+					}
+					var:pod_combat_session.var:pod_combat_target_char ?= {
+						save_temporary_scope_value_as = {
+							name = pod_combat_stolen_gold
+							value = { value = $STORY$.var:steal_gold  max = gold  min = 0 }
+						}
+						# add_gold rejects negative values, so debit the victim with
+						# remove_short_term_gold (the clamp above keeps it <= their gold).
+						remove_short_term_gold = scope:pod_combat_stolen_gold
+					}
+					add_gold = scope:pod_combat_stolen_gold
+				}
+				if = {
+					limit = { $STORY$ = { has_variable = gain_dread } }
+					add_dread = $STORY$.var:gain_dread
+				}
 			}
 		}
 	}
@@ -336,8 +359,7 @@ POD_execute_combat_move = {
 	# before the §6 wound roll. AoE target debuffs are still broadcast to slots in
 	# §5b; the workspace target-writes below stay redundant for team_enemy/team_all.
 	# Buff tiers route to the actor for both team AoE modes (only single_ally and
-	# single_pc redirect to the target), so a team_all buff would land on the
-	# caster alone - the generator lint rejects support payloads on team_all.
+	# single_pc redirect to the target), so a team_all buff would land on the caster alone.
 	# Buffs normally apply to the actor. A single_ally move names a
 	# beneficiary in the target workspace, so route every tier and its soak
 	# bridge to that target instead. team_ally still seeds the actor here and
@@ -479,7 +501,7 @@ POD_execute_combat_move = {
 	# heal_condition=on_hp_damage auto-emitted by the generator's `drain` token.
 	# team_all has no broadcast arm here (nor in §10/§12b): a heal reaching both
 	# sides would mend the enemies the same move just hit. It falls to the actor
-	# self-heal else, and the generator lint rejects the combination outright.
+	# self-heal else.
 	if = {
 		limit = {
 			$STORY$ = { has_variable = hp_heal }
@@ -825,7 +847,7 @@ POD_execute_combat_move = {
 		}
 		if = {
 			limit = {
-				var:pod_combat_session ?= { var:pod_combat_target_char = { is_ai = yes } }
+				pod_combat_target_is_dominatable_trigger = yes
 				trigger_if = {
 					limit = { var:pod_combat_session.var:pod_combat_target_char = { POD_has_strong_mental_defenses_trigger = yes } }
 					var:pod_combat_session ?= { var:pod_combat_actor_char = { can_bypass_mental_defenses_trigger = yes } }
@@ -1772,10 +1794,17 @@ pod_combat_upgrade_tier_var_effect = {
 	if = {
 		limit = {
 			$STORY$ = { has_variable = $SRC$ }
-			OR = {
-				NOT = { has_variable = $DST$ }
+			# Nested, not an OR of two siblings: CK3 does not short-circuit, so
+			# `var:$DST$` sitting beside its own NOT-has_variable test still
+			# evaluates on the ordinary FIRST application of a tier, where the
+			# var is genuinely absent - the clears use remove_variable, not a 0
+			# seed. The write landed correctly either way; the read errored.
+			# Same shape as pod_combat_soak_tier_upgrade_only_trigger.
+			trigger_if = {
+				limit = { has_variable = $DST$ }
 				var:$DST$ < $STORY$.var:$SRC$
 			}
+			trigger_else = { always = yes }
 		}
 		set_variable = { name = $DST$ value = $STORY$.var:$SRC$ }
 	}

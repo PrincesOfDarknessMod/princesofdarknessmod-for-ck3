@@ -210,6 +210,14 @@ pod_combat_check_retaliation_effect = {
 }
 
 pod_combat_apply_retaliation_effect = {
+	# pod_combat_apply_reaction_if_triggered_effect:142-146, proves the pointer AND
+	# the exact variable read here: its limit is
+	# `var:pod_combat_session ?= { has_variable = $TRIGGER_VAR$ }` and it binds
+	# AMOUNT_VAR = $TRIGGER_VAR$. Not the spirit gate below - that one INVERTS on an
+	# unset pointer and routes into the unguarded read. A mid-move host death cannot
+	# re-enter either: a `?=` presence test in trigger context answers false against
+	# an end_story'd fight, so slot 1 killing the host closes the gate on slots 2-3.
+	# Waives all three bare session derefs in 212-336, not only the reported one.
 	# $ACTOR_SIDE$      = side taking retaliation (original attacker).
 	# $RETALIATOR_SIDE$ = side dishing out retaliation (original target).
 	# $AMOUNT_VAR$      = workspace var holding retaliation damage.
@@ -734,20 +742,30 @@ pod_combat_route_to_pod_damage_effect = {
 		}
 	}
 
-	# Branch on whether PoD killed the target. POD_apply_wound_boxes
-	# calls POD_health_death_check_effect inline; a fatal blow fires
-	# pod_death and is_alive flips to no before this line resumes.
+	# Branch on whether PoD killed the target: POD_apply_wound_boxes calls
+	# POD_health_death_check_effect inline, so a fatal blow fires pod_death
+	# before this line resumes.
+	#
+	# Phrased positively and gated on `exists`, because a fatal blow against the
+	# fight's ctx_host tears the fight down inside the wound call above and leaves
+	# pod_combat_session dangling on the corpse - has_variable still answers true
+	# for that pointer, so exists is the only discriminator. Asking "is_alive = no"
+	# through a bare deref both errored and answered FALSE, which sent a kill down
+	# the alive branch to fabricate a damage number out of unset scopes. Every
+	# unresolvable case now lands on the died branch, which is truthful: the only
+	# death this effect can cause is the target's.
 	if = {
-		limit = { var:pod_combat_session.var:pod_combat_$TARGET_SIDE$_char = { is_alive = no } }
-		# Dead-char wound SVs read 0 (is_alive limit), so approximate
-		# damage_dealt as the pre-blow empty boxes.
-		save_scope_value_as = {
-			name = damage_dealt
-			value = scope:pre_empty_boxes
+		limit = {
+			trigger_if = {
+				limit = { exists = var:pod_combat_session }
+				trigger_if = {
+					limit = { exists = var:pod_combat_session.var:pod_combat_$TARGET_SIDE$_char }
+					var:pod_combat_session.var:pod_combat_$TARGET_SIDE$_char = { is_alive = yes }
+				}
+				trigger_else = { always = no }
+			}
+			trigger_else = { always = no }
 		}
-		save_scope_value_as = { name = attack_result_flag value = flag:hp_damage }
-	}
-	else = {
 		# Target still alive - read fresh post-damage wound state.
 		var:pod_combat_session.var:pod_combat_$TARGET_SIDE$_char ?= {
 			save_scope_value_as = { name = post_superficial_wounds value = POD_superficial_damage_boxes }
@@ -825,6 +843,15 @@ pod_combat_route_to_pod_damage_effect = {
 				var:pod_combat_session ?= { set_variable = { name = pod_combat_$TARGET_SIDE$_morale value = scope:new_target_morale } }
 			}
 		}
+	}
+	else = {
+		# Dead-char wound SVs read 0 (is_alive limit), so approximate
+		# damage_dealt as the pre-blow empty boxes.
+		save_scope_value_as = {
+			name = damage_dealt
+			value = scope:pre_empty_boxes
+		}
+		save_scope_value_as = { name = attack_result_flag value = flag:hp_damage }
 	}
 }
 
@@ -1135,7 +1162,19 @@ pod_combat_deal_morale_damage_effect = {
 	# (pod_combat_apply_morale_strain_effect), not per hit here.
 	pod_combat_consume_target_stance_effect = { TARGET_SIDE = $TARGET_SIDE$ }
 	if = {
-		limit = { scope:stance_consumed = 0 }
+		limit = {
+			scope:stance_consumed = 0
+			# The fight must still RESOLVE, not merely be pointed at. A fatal
+			# blow earlier in the same move can have torn it down (POD_on_death
+			# -> pod_combat_host_died_release_effect -> end_story) leaving
+			# pod_combat_session dangling, and section 7's entry gate reads only
+			# the move story, so it cannot fail closed. Worse, the stance call
+			# above reads false through that dangling pointer, which is the very
+			# value that opens this block. The two morale reads below sit inside
+			# save_scope_value_as value expressions, where ?= cannot be applied,
+			# so the guard has to live here.
+			exists = var:pod_combat_session
+		}
 		# Cap at current morale so the logged loss doesn't over-count past
 		# a near-broken target (1 left + 5 dmg = 1 actual lost, not 5).
 		save_scope_value_as = {
