@@ -45,7 +45,12 @@ pod_combat_actor_has_used_move_trigger = {
 # (cheapest-first for the AI's per-candidate walk). The AP + energy gates
 # stay in the WRAPPERS - adding them here too would double-evaluate them.
 # $STORY$ = the POD_combat_move story_cycle; $ACTOR$ = the acting character
-# (unlock/energy side); workspace reads resolve against root = the host.
+# (unlock/energy side). Ambient is the combat-host CHARACTER on both entry paths -
+# the PC's move bar through POD_can_execute_combat_move_trigger, the AI through
+# scope:combat_host - which is why the resource gates below read gold/piety/prestige
+# bare. The workspace lives on the FIGHT, so every workspace read here hops
+# var:pod_combat_session. A bare workspace read is absent on every evaluation, and an
+# unentered trigger_if PASSES, so the gate stops applying with nothing in error.log.
 pod_combat_move_dynamic_gates_trigger = {
 	# CK3 resource costs are PC-only - AI combatants spend nothing, so
 	# gold/piety/prestige gates apply only on the player turn.
@@ -91,8 +96,9 @@ pod_combat_move_dynamic_gates_trigger = {
 
 	# Duplicate-stance guards follow the actual beneficiary. On the player turn
 	# a selected single_ally is already loaded into target workspace;
-	# AI chooses its ally only after move selection, so those candidates skip
-	# this redundancy check and rely on the idempotent write helpers.
+	# the AI picks its ally only after move selection, so those candidates branch
+	# below to pod_combat_ai_has_ally_benefiting_trigger, which runs the same upgrade
+	# tests against each candidate ally's own slot vars.
 	# Only reject when the move's ENTIRE payload is a redundant stance/tier/
 	# retaliation rider. A move carrying an independent payload always passes; its
 	# idempotent / upgrade-only / take-strongest rider writers no-op the dead
@@ -170,10 +176,16 @@ pod_combat_move_dynamic_gates_trigger = {
 				# current tier (upgrade-only contract; canonical rationale on
 				# pod_combat_upgrade_tier_var_effect in pod_combat_move_effects.txt).
 				# Strict `<` matches the AI guard.
-				# Gate mechanics: pod_combat_tier_upgrade_only_trigger (below).
-				# Covers workspace single-target tiers only; AoE downgrades are guarded at
-				# write time. Player-selected ally buffs compare the selected target. AI
-				# ally selection happens later, so its idempotent write is the final guard.
+				# Gate mechanics: pod_combat_tier_upgrade_only_trigger (below) for the hit
+				# tiers, pod_combat_soak_tier_upgrade_only_trigger for soak. The two read
+				# different stores - the fight workspace and the combatant's soak bridge -
+				# and each reaches its own through a pointer hop; neither reads ambient.
+				# Round and combat tiers are gated alike: a held rider of either duration is
+				# equally dead, since the write refuses an equal-tier raise and the round
+				# clear is a fixed turn boundary, not a duration a re-apply could refresh.
+				# Covers single-target tiers only; AoE downgrades are guarded at write time.
+				# Player-selected ally buffs compare the selected target. AI single_ally
+				# never reaches this sub-block - it branches above.
 				trigger_if = {
 					limit = {
 						pod_combat_is_player_turn_trigger = yes
@@ -532,17 +544,33 @@ pod_combat_move_is_usable_now_trigger = {
 # Passes unless the move's $TIER_VAR$ is at or below the live workspace tier
 # (upgrade-only contract; canonical rationale on pod_combat_upgrade_tier_var_effect
 # in pod_combat_move_effects.txt).
+# The hit-tier workspace lives on the FIGHT while ambient here is the combat-host
+# CHARACTER on both entry paths, so both reads hop pod_combat_session, exactly as the
+# soak twin below and the stance NANDs at the call sites do. A bare read resolves
+# against the character, is absent on every evaluation, and an unentered trigger_if
+# reports PASS with nothing in error.log.
+# Round and combat tiers are compared alike. Neither clear is a countdown a re-apply
+# could postpone: pod_combat_clear_actor_round_buffs_effect strips the round tier
+# unconditionally at the holder's turn boundary, and pod_combat_upgrade_tier_var_effect
+# refuses any write that is not a strict raise, so an equal-tier re-apply writes
+# nothing at either duration. The round gate still re-opens every turn, because the
+# clear runs before the workspace reload and the mirror is absence-faithful.
 # Single trigger_if (not NAND) so the var reads only happen when both the move
-# attribute and the workspace var exist, avoiding "variable not set" warnings.
+# attribute and the workspace var exist, avoiding "variable not set" warnings. The
+# explicit trigger_else states the fail-open the bare form left implicit: with no
+# fight, no loaded workspace, or no such rider on the move, nothing may be blocked.
 pod_combat_tier_upgrade_only_trigger = {
 	# $STORY$ = move story; $SIDE$ = actor|target; $TIER_VAR$ = tier var name.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = $TIER_VAR$ }
-			has_variable = pod_combat_$SIDE$_$TIER_VAR$
+			var:pod_combat_session ?= { has_variable = pod_combat_$SIDE$_$TIER_VAR$ }
 		}
-		var:pod_combat_$SIDE$_$TIER_VAR$ < $STORY$.var:$TIER_VAR$
+		# Dotted, not wrapped: $STORY$ is a passed scope and resolves absolutely, so
+		# entering the fight buys nothing and the compare stays one line.
+		var:pod_combat_session.var:pod_combat_$SIDE$_$TIER_VAR$ < $STORY$.var:$TIER_VAR$
 	}
+	trigger_else = { always = yes }
 }
 
 # Soak twin of the guard above. Soak tiers are not mirrored onto the workspace -
@@ -1180,17 +1208,19 @@ pod_combat_team_utility_move_admissible_trigger = {
 }
 
 # Weight-modifier context (scope:ai_candidate_move = scored move; scope:combat_host
-# = workspace mirrors, both saved by the AI selector). True if a stance/tier/retal
-# rider the candidate carries is already covered - part of a hybrid is wasted.
-# Retaliation is presence-only. Buff tiers check the actor; debuff tiers the target.
+# = the host carrying the fight pointer, both saved by the AI selector). True when a
+# rider the candidate carries is already covered, so part of a hybrid's payload is
+# dead weight and a cleaner move should win the roll.
+# Stance and retaliation are presence-only: re-entering a binary stance or re-arming a
+# take-strongest reaction is a pure no-op. Combat-duration tiers delegate to the same
+# gate the admissibility check uses, so the hard reject and this soft nudge cannot
+# drift apart on what "already covered" means.
+# ROUND tiers are deliberately absent: a round hit buff is already priced twice, by
+# @ai_round_buff_spam and @ai_round_buff_lateap, and a third -8 against a band width of
+# 10 bands the hybrid out instead of shading its odds. Soak is left to
+# @ai_soak_buff_capped, which prices the same waste off the resulting soak percentage
+# rather than off the tier number.
 pod_combat_ai_candidate_has_redundant_rider_trigger = {
-	# Weight-modifier context (scope:ai_candidate_move = scored move; scope:combat_host
-	# = workspace mirrors, both saved by the AI selector). True when a stance or retal
-	# rider the candidate carries is already active on the actor - re-entering a binary
-	# stance / re-arming (take-strongest) is a pure no-op, so part of a hybrid
-	# is wasted. Tier riders are NOT checked here: the active-tier state lives on the
-	# actor slot (no host mirror at scoring time) and a same-tier re-apply refreshes
-	# duration, so it is not waste - the undersized-buff modifier steers tier choice.
 	OR = {
 		AND = { scope:ai_candidate_move = { has_variable = set_guard } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_is_guarding } }
 		AND = { scope:ai_candidate_move = { has_variable = dodge }     scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_is_dodging } }
@@ -1198,6 +1228,12 @@ pod_combat_ai_candidate_has_redundant_rider_trigger = {
 		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_hit }    scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_hit } }
 		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_missed } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_miss } }
 		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_attacked } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_any } }
+		# Host-wrapped because the gate's contract is ambient = the host character. No
+		# has_variable partner: the gate already passes when the candidate carries no
+		# such tier, so NOT is true exactly when the tier is carried AND already held at
+		# or above that magnitude.
+		scope:combat_host = { NOT = { pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = hit_buff_combat_tier } } }
+		scope:combat_host = { NOT = { pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = hit_debuff_combat_tier } } }
 	}
 }
 
