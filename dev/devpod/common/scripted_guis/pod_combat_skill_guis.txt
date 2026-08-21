@@ -45,7 +45,21 @@ pod_combat_execute_move = {
 		# a slot with slot_alive = 0 and the leftover AP is spendable out of a
 		# corpse. In a FATAL duel the occupant can be genuinely dead, and the next
 		# click then errors on var mutation against a dead reference.
-		NOT = { var:pod_combat_my_control_slot ?= { pod_combat_slot_is_ko_trigger = yes } }
+		#
+		# Invisible with one marked slot, which is why it lasted: there its KO IS
+		# victory check 2, so is_over fires in the same effect and the bar dies on
+		# the same frame. With a second controlled body still alive, check 2 does
+		# not fire and the turn just sits there.
+		#
+		# End Turn deliberately does NOT get this guard - a downed body's turn must
+		# stay committable or the round cannot advance.
+		#
+		# O(1), and on the COMMAND SURFACE ONLY. Do not auto-commit from the KO site
+		# instead: pod_combat_mark_slot_ko_effect runs inside an every_in_list over
+		# the roster mid-move-chain, and pod_combat_process_group_turns_effect saves
+		# the workspace BEFORE it drops the latch, so committing from there recurses
+		# into its own prologue.
+		NOT = { pod_combat_my_slot_is_ko_trigger = yes }
 		# The unlock proof inside this trigger fails CLOSED, so the actor must be a
 		# character whose pod_combat_unlocked_moves has been baked - see the bake
 		# loop in POD_combat_finalize_duel_effect, which now covers every marked
@@ -75,6 +89,245 @@ pod_combat_execute_move = {
 	effect = {
 		POD_execute_combat_move = { STORY = scope:story }
 		pod_combat_save_workspace_effect = yes
+	}
+}
+
+# RENDER-ONLY companion to pod_combat_execute_move - never a gate. Its is_valid
+# exists purely to be rendered by IsValidTooltip on the move bar's buttons, so a
+# greyed-out move says WHY. Never bind IsValid / Execute to this SGUI: it has no
+# effect block, and its answer is deliberately narrower than the real gate's.
+#
+# Failures-only: every clause is a trigger_if whose limit is the INVERTED
+# predicate, so a passing condition emits nothing at all and a usable move
+# renders an empty string. That matches what the loadout editor already does for
+# unlock requirements (is_valid_showing_failures_only on the hidden decision) and
+# keeps the shipped failure-phrased strings readable - as a green "passed" line
+# "Select an enemy target" would read as nonsense. custom_tooltip, not
+# custom_description: the proven form for text rendered out of an SGUI is_valid
+# (POD_journey_requirements -> PlayerGuiIsValidTooltip).
+#
+# Every boolean is the same named predicate the live validators call
+# (pod_combat_move_execution_triggers.txt, SHARED GATE PREDICATES), so the reason
+# and the grey-out cannot disagree. Order is most-superseding first: turn
+# ownership beats resources, resources beat per-move state.
+#
+# Deliberately unvoiced: pod_combat_is_active_trigger (the WINDOW gates on
+# pod_combat_active, so there is no bar to hover), team_enemy / team_all (
+# vacuous during a live fight - the victory check ends the fight when the last
+# enemy dies), the AI-only ally gates, and the scope-resolution trigger_else
+# arms (not player-meaningful). is_over is NOT in this list: see below.
+#
+# LOCKSTEP: mirrors pod_combat_move_dynamic_gates_trigger plus the two wrapper
+# gates. A blocking gate added there with no line here greys the button with no
+# reason shown.
+pod_combat_move_usability_tt = {
+	scope = character
+	# Same contract as pod_combat_execute_move: root = the clicking client,
+	# scope:actor = the combatant being driven. Both are mandatory at every call
+	# site because they are declared here.
+	saved_scopes = { story actor }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		# "You cannot act at all" renders ALONE - a trigger_else chain, not
+		# siblings. CK3 trigger siblings do not short-circuit, so as siblings
+		# these would stack under every per-move reason, and worse, the per-move
+		# gates would price themselves against whatever combatant's workspace is
+		# currently loaded. On someone else's turn that is not this move's cost
+		# or target.
+		#
+		# is_over is voiced, and first. The window survives victory - it gates on
+		# pod_combat_active, and the End Combat button is shown BY is_over - so the
+		# bar sits there with every move greyed. Victory is also detected inside
+		# the player's own move execution, so the turn latch is still held and
+		# "It is not your turn" would not fire either: without this arm a
+		# single_enemy move reports "Select an enemy target" (its target is dead)
+		# and a self-targeted one reports nothing at all.
+		trigger_if = {
+			limit = { pod_combat_is_over_trigger = yes }
+			custom_tooltip = { text = pod_combat_usable_fight_over_tt  always = no }
+		}
+		trigger_else_if = {
+			limit = { NOT = { pod_combat_is_my_turn_trigger = yes } }
+			custom_tooltip = { text = pod_combat_usable_not_your_turn_tt  always = no }
+		}
+		trigger_else_if = {
+			limit = { pod_combat_my_slot_is_ko_trigger = yes }
+			custom_tooltip = { text = pod_combat_usable_actor_down_tt  always = no }
+		}
+		trigger_else = {
+			# Every clause below nests presence OUTSIDE the read. CK3 walks every
+			# sub-trigger in a block, so a has_variable sitting BESIDE a var: read
+			# does not gate it - the read runs anyway and errors when the var is
+			# absent (DUEL_REFACTOR_LESSONS.md, "NOT { has_variable = X; var:X >= ...
+			# } evaluates var:X regardless"). It matters more here than in the live
+			# gate: only a dozen of the ~559 authored moves carry a currency cost, so
+			# a sibling guard would spam error.log for all the rest on every hovered
+			# frame. An unentered trigger_if returns true, so a move without the var
+			# simply prints nothing.
+			trigger_if = {
+				limit = { scope:story = { has_variable = ap_cost } }
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_ap_trigger = { COST = scope:story.var:ap_cost } } }
+					custom_tooltip = { text = pod_combat_usable_need_ap_tt  always = no }
+				}
+			}
+
+			# Energy resolves against the scope it runs on, so wrap in scope:actor to
+			# read the driven combatant's pool rather than the clicking client's.
+			trigger_if = {
+				limit = { scope:story = { has_variable = energy_cost } }
+				trigger_if = {
+					limit = {
+						NOT = {
+							scope:actor = {
+								POD_has_enough_splat_agnostic_energy_reserves = { AMOUNT = scope:story.var:energy_cost }
+							}
+						}
+					}
+					custom_tooltip = { text = pod_combat_usable_need_energy_tt  always = no }
+				}
+			}
+
+			# CK3 currencies are PC-only, matching the live gates' player-turn limits.
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = gold_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_gold_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_gold_tt  always = no }
+				}
+			}
+
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = piety_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_piety_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_piety_tt  always = no }
+				}
+			}
+
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = prestige_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_prestige_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_prestige_tt  always = no }
+				}
+			}
+
+			# once_per: presence, then "was it used", then the window wording.
+			# LOCKSTEP with the round/else dispatch inside
+			# pod_combat_actor_has_used_move_trigger - anything not flag:round is held
+			# for the whole fight there, so the else arm must say "this fight".
+			trigger_if = {
+				limit = { scope:story = { has_variable = once_per } }
+				trigger_if = {
+					limit = { pod_combat_actor_has_used_move_trigger = { STORY = scope:story  ACTOR = scope:actor } }
+					trigger_if = {
+						limit = { scope:story = { var:once_per = flag:round } }
+						custom_tooltip = { text = pod_combat_usable_used_this_round_tt  always = no }
+					}
+					trigger_else = {
+						custom_tooltip = { text = pod_combat_usable_used_this_combat_tt  always = no }
+					}
+				}
+			}
+
+			# Targeting - one presence gate covering all three arms.
+			trigger_if = {
+				limit = { scope:story = { has_variable = targeting } }
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_enemy }
+						NOT = { pod_combat_player_has_enemy_target_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_enemy_tt  always = no }
+				}
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_ally }
+						NOT = { pod_combat_player_has_ally_target_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_ally_tt  always = no }
+				}
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_pc }
+						NOT = { pod_combat_pc_slot_alive_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_pc_alive_tt  always = no }
+				}
+			}
+
+			# One generic line for all the condition predicates: the stat card
+			# directly above already spells out WHICH condition (its "Requires:"
+			# dispatch), so naming it again here would only duplicate. cond_predicate
+			# is its own var, so the presence gate covers both before the switch is
+			# dispatched on it.
+			trigger_if = {
+				limit = { scope:story = { has_variable = cond_mode  has_variable = cond_predicate } }
+				trigger_if = {
+					limit = {
+						scope:story = { var:cond_mode = flag:gate }
+						NOT = {
+							pod_combat_move_condition_met_trigger = {
+								STORY = scope:story ACTOR = scope:actor PREDICATE = scope:story.var:cond_predicate
+							}
+						}
+					}
+					custom_tooltip = { text = pod_combat_usable_condition_unmet_tt  always = no }
+				}
+			}
+
+			# The heal and redundancy predicates carry their own presence guards -
+			# they are the live gate's own bodies, lifted verbatim.
+			trigger_if = {
+				limit = {
+					pod_combat_move_is_self_only_heal_trigger = { STORY = scope:story }
+					NOT = { pod_combat_self_heal_has_effect_trigger = { STORY = scope:story } }
+				}
+				custom_tooltip = { text = pod_combat_cant_heal_already_full_desc  always = no }
+			}
+
+			trigger_if = {
+				limit = {
+					NOT = { pod_combat_move_has_independent_payload_trigger = { STORY = scope:story } }
+					NOT = { pod_combat_move_payload_useful_trigger = { STORY = scope:story } }
+				}
+				custom_tooltip = { text = pod_combat_move_redundant_tt  always = no }
+			}
+
+			trigger_if = {
+				limit = { scope:story = { has_variable = summons_combatant } }
+				trigger_if = {
+					limit = {
+						var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team }
+						NOT = { pod_combat_summon_capacity_available_trigger = { STORY = scope:story } }
+					}
+					custom_tooltip = { text = pod_combat_cant_summon_team_full_tt  always = no }
+				}
+			}
+
+			# Failsafe, last: the bake is meant to cover every marked slot, so this
+			# speaks only if one was missed. Generic wording - the per-move
+			# requirement text lives in the loadout editor, not mid-fight.
+			trigger_if = {
+				limit = { NOT = { pod_combat_actor_has_baked_unlock_trigger = { STORY = scope:story ACTOR = scope:actor } } }
+				custom_tooltip = { text = pod_combat_usable_not_unlocked_tt  always = no }
+			}
+		}
 	}
 }
 
@@ -310,40 +563,39 @@ pod_combat_loadout_toggle = {
 				# COMBAT_REFERENCE.info §9 file map, pod_combat_move_decisions.txt
 				# entry (unlock gating).
 				pod_combat_actor_unlocks_move_trigger = { STORY = scope:story ACTOR = root }
-				# Enforce the TOTAL equipped cap independently of the per-category
-				# caps. Redundant today (4 x 4 = 16 == total), but a backstop if the caps
-				# are retuned so categories no longer sum to pod_combat_max_equipped.
-				# LOCKSTEP: the skills-window pip strips bake fixed pip counts, so retuning
-				# the caps means editing those GUI literals too.
-				pod_combat_equipped_count < pod_combat_max_equipped
+				# Capacity. All three loadout surfaces - this click gate, the
+				# row-enabled gate (pod_combat_loadout_room) and the reason text
+				# (pod_combat_loadout_block_tt) - share these predicates, so a greyed
+				# row and its tooltip cannot disagree about which cap is full.
+				pod_combat_loadout_room_left_trigger = yes
 				# Cap check per combat_category. custom_description surfaces a friendly
 				# "Attack slots full: 4/4" tooltip; the trigger_if chain keeps it singular.
 				trigger_if = {
 					limit = { scope:story = { var:combat_category = flag:ATK } }
 					custom_description = {
 						text = pod_combat_loadout_atk_full_tt
-						pod_combat_atk_count < pod_combat_max_per_category
+						pod_combat_atk_slots_free_trigger = yes
 					}
 				}
 				trigger_else_if = {
 					limit = { scope:story = { var:combat_category = flag:DEF } }
 					custom_description = {
 						text = pod_combat_loadout_def_full_tt
-						pod_combat_def_count < pod_combat_max_per_category
+						pod_combat_def_slots_free_trigger = yes
 					}
 				}
 				trigger_else_if = {
 					limit = { scope:story = { var:combat_category = flag:CTL } }
 					custom_description = {
 						text = pod_combat_loadout_ctl_full_tt
-						pod_combat_ctl_count < pod_combat_max_per_category
+						pod_combat_ctl_slots_free_trigger = yes
 					}
 				}
 				trigger_else_if = {
 					limit = { scope:story = { var:combat_category = flag:PWR } }
 					custom_description = {
 						text = pod_combat_loadout_pwr_full_tt
-						pod_combat_pwr_count < pod_combat_max_per_category
+						pod_combat_pwr_slots_free_trigger = yes
 					}
 				}
 				trigger_else = {
@@ -385,6 +637,139 @@ pod_combat_loadout_toggle = {
 				has_variable = pod_combat_sheet_f_equipped
 			}
 			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Row-enabled twin of pod_combat_loadout_toggle's capacity arm. The pool rows
+# And() this with pod_combat_loadout_option so a cap-full row greys out instead
+# of looking live and clicking to nothing (the toggle checked the caps, but
+# nothing bound that answer to the row).
+#
+# Deliberately NOT pod_combat_loadout_toggle.IsValid, which would be the obvious
+# binding: that one calls pod_combat_actor_unlocks_move_trigger, the live
+# two-level 570-move dispatcher, and the whole point of baking
+# pod_combat_unlocked_moves is to keep that walk off the per-row per-frame path.
+# This SGUI is O(1) - list membership plus cached-count compares.
+pod_combat_loadout_room = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		# Equipped rows stay enabled: clicking one unequips, which no cap blocks.
+		trigger_if = {
+			limit = {
+				exists = scope:story
+				NOT = {
+					is_target_in_variable_list = {
+						name   = pod_combat_loadout
+						target = scope:story
+					}
+				}
+			}
+			pod_combat_loadout_room_left_trigger = yes
+			# Presence gated OUTSIDE the flag reads - see the note on
+			# pod_combat_move_usability_tt for why a sibling has_variable is not a
+			# guard. Both terminators say the same thing the toggle's did: a move
+			# with no category is unequippable-into.
+			trigger_if = {
+				limit = { scope:story = { has_variable = combat_category } }
+				trigger_if = {
+					limit = { scope:story = { var:combat_category = flag:ATK } }
+					pod_combat_atk_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:DEF } }
+					pod_combat_def_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:CTL } }
+					pod_combat_ctl_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:PWR } }
+					pod_combat_pwr_slots_free_trigger = yes
+				}
+				trigger_else = { always = no }
+			}
+			trigger_else = { always = no }
+		}
+	}
+}
+
+# RENDER-ONLY reason text for the row above - never a gate (see
+# pod_combat_move_usability_tt for the full rationale on this shape).
+# Scoped to rows that are UNLOCKED and NOT equipped: a locked row already shows
+# its requirements via the hidden decision's failures-only text, and an equipped
+# row is always clickable.
+pod_combat_loadout_block_tt = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		trigger_if = {
+			limit = {
+				exists = scope:story
+				NOT = {
+					is_target_in_variable_list = {
+						name   = pod_combat_loadout
+						target = scope:story
+					}
+				}
+				root = {
+					is_target_in_variable_list = {
+						name   = pod_combat_unlocked_moves
+						target = scope:story
+					}
+				}
+			}
+			# Category first: at the shipped 4 x 4 = 16 tuning a category always
+			# fills before the total does, so the total line below only ever speaks
+			# if the two caps are retuned apart. Presence gated outside the reads.
+			trigger_if = {
+				limit = { scope:story = { has_variable = combat_category } }
+				trigger_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:ATK }
+						NOT = { pod_combat_atk_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_atk_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:DEF }
+						NOT = { pod_combat_def_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_def_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:CTL }
+						NOT = { pod_combat_ctl_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_ctl_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:PWR }
+						NOT = { pod_combat_pwr_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_pwr_full_tt  always = no }
+				}
+				trigger_else = {
+					# Required terminator (CK3 rejects an open trigger_else_if chain at
+					# load). Nothing to say: this row's category has room.
+					always = yes
+				}
+			}
+			trigger_if = {
+				limit = { NOT = { pod_combat_loadout_room_left_trigger = yes } }
+				custom_tooltip = { text = pod_combat_loadout_total_full_tt  always = no }
+			}
 		}
 	}
 }

@@ -525,7 +525,7 @@ ordering rules** below before moving anything.
 | §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the fight story. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, and the generator's `team_all_support` lint rejects the combination. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
 | §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
@@ -2136,9 +2136,7 @@ Three further consequences worth stating:
 - **Damage and debuffs broadcast; support does not.** §5b broadcasts tier
   debuffs and stance-strips across the sweep, but §5c/§9/§10/§12/§12b route
   buffs, heals and beneficiary stances to the **actor** for every mode
-  except `single_ally` / `single_pc`. A `team_all` heal would therefore mend
-  only its caster, so the generator's `team_all_support` lint rejects the
-  combination rather than shipping the surprise.
+  except `single_ally` / `single_pc`. 
 - **No reactions.** §15 skips `team_all` for the same reason it skips
   `team_enemy`: a counter can only fire from one workspace target, so firing
   would arbitrarily single out the pre-AoE one.
@@ -2531,6 +2529,57 @@ per-segment renderers (`PODCombatLogSeg<X>`) and the result-text
 dispatcher all carry this guard. When you add a
 renderer or a new branch, lead with the same guard.
 
+### Move tooltip variants
+
+The move card (`pod_fancy_combat_move_tooltip`, declared in
+`pod_combat_skills_window.gui`) renders title / effects / flavor and ends
+in an empty `block "additional_text" {}`. Three variants exist, and a
+surface picks one by which type it names:
+
+| Variant | Type | Surfaces |
+|---|---|---|
+| Base | `pod_fancy_combat_move_tooltip` | combat-log rows, perk / inline-loc links |
+| Eligibility | `pod_fancy_combat_move_tooltip_editor` | loadout editor: equipped column, compact pool card, sheet name cell (the detailed pool card has no tooltipwidget by design and carries the same two sections inline) |
+| Usability | `pod_fancy_combat_move_tooltip_live` | the four combat-bar move buttons |
+
+Both non-base variants fill `additional_text` with failures-only reason
+lines. Nothing renders when the move is usable, so the base card is what
+a valid move shows in every variant.
+
+The reason text comes from render-only scripted GUIs -
+`pod_combat_move_usability_tt` and `pod_combat_loadout_block_tt` - whose
+`is_valid` exists purely to be rendered by `ScriptedGui.IsValidTooltip`.
+Never bind `IsValid` / `Execute` to one: they have no effect block, and
+their answer is deliberately narrower than the real gate's. Each clause is
+
+```
+trigger_if = {
+    limit = { <applicability>  NOT = { <shared predicate> } }
+    custom_tooltip = { text = <key>  always = no }
+}
+```
+
+so a passing condition emits nothing at all. `IsValidTooltip` otherwise
+renders the full pass-and-fail checklist, and the shipped strings are
+failure-phrased ("Select an enemy target"), which reads as nonsense on a
+green line. This also matches what the editor already did for unlock
+requirements (`is_valid_showing_failures_only` on the hidden decision).
+
+Both halves of a reason - the gate that greys the button and the line
+that explains it - call the SAME named predicate, so they cannot
+disagree. Those live in the `SHARED GATE PREDICATES` section at the top
+of `pod_combat_move_execution_triggers.txt`, plus the capacity and
+control-slot predicates in `pod_combat_triggers.txt`. LOCKSTEP: a new
+blocking gate needs a predicate, a call from the gate, and a line in the
+matching `_tt` SGUI - otherwise the move greys out with no reason shown.
+
+Cost note: both SGUI calls sit inside a `tooltipwidget` subtree, which
+the engine builds only while the widget is hovered, so the documented
+four-`IsValid`-per-move-button-per-frame hotspot is unaffected. The
+loadout editor's `enabled` bindings do add one per-row per-frame call
+(`pod_combat_loadout_room`), which is O(1) by construction - cached count
+vars and list membership, never the unlock dispatcher.
+
 ### An open event keeps its scope table; trigger_event copies it inline
 
 Two behaviours Paradox documents nowhere, both measured in-game on
@@ -2910,7 +2959,7 @@ the devpod-old copy is the porting reference).
 
 | File | Purpose |
 |---|---|
-| `pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. |
+| `pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. Opens with a SHARED GATE PREDICATES section: one named trigger per player-visible block reason, called by both the live gate and the render-only tooltip SGUI that voices it (see *Move tooltip variants*). |
 | `pod_combat_move_unlock_triggers.txt` | Unlock authority: one manually maintained character-scoped rule per move, plus `pod_combat_actor_unlocks_move_trigger`, the `config_section`/`skill_key` story adapter used by editor, preset, PC-bake, and AI-seeding paths. Every move, including universal moves, needs an explicit dispatcher leaf. The permissive fallbacks are safety guards, not authoring shortcuts. |
 | `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` / `pod_combat_cond_has_modifier_trigger` / `pod_combat_cond_has_perk_trigger` / `pod_combat_cond_fera_form_trigger` - literal-key switches for the move's `cond_param`, because CK3 requires a literal trait, secret-type, modifier or perk key (and a per-form trigger name for the shapeshift forms). Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. |
 | `pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. Also home to the damage-class partition triggers (`pod_combat_move_class_is_elemental_trigger` / `pod_combat_class_always_aggravated_trigger`) and to `pod_combat_ai_move_admissible_trigger` - the AI's entire move-admission gate set, which the move roll calls as its `limit`. |
@@ -3001,7 +3050,7 @@ write splits the directory).
 | File | Purpose |
 |---|---|
 | `pod_combat_control_guis.txt` | Live combat controls: execute move, target changes, turn advance/end, auto-resolve, mode toggle, and help/close gates. |
-| `pod_combat_skill_guis.txt` | Loadout editor actions plus move-card, compact-row, sheet-cell, damage-class, rider, and susceptibility presentation bindings. |
+| `pod_combat_skill_guis.txt` | Loadout editor actions plus move-card, compact-row, sheet-cell, damage-class, rider, and susceptibility presentation bindings. Also the render-only tooltip SGUIs (`pod_combat_move_usability_tt`, `pod_combat_loadout_block_tt`) and the O(1) capacity gate `pod_combat_loadout_room`. |
 | `pod_combat_tuning_guis.txt` | Debug tuning-window buttons, steppers, toggles, resets, and AI trace controls. |
 
 ### Localization
