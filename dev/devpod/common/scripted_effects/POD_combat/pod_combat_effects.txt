@@ -742,9 +742,12 @@ pod_combat_route_to_pod_damage_effect = {
 		}
 	}
 
-	# Branch on whether PoD killed the target: POD_apply_wound_boxes calls
-	# POD_health_death_check_effect inline, so a fatal blow fires pod_death
-	# before this line resumes.
+	# Branch on whether PoD killed the target. The wound pipeline itself can no
+	# longer do that - pod_combat_nonfatal_active gates POD_health_death_check_effect
+	# for every fight, and the deferred deaths are settled at the writeback by
+	# pod_combat_resolve_suppressed_deaths_effect - so the died branch is now
+	# defensive: it covers a target killed by something outside the pipeline while
+	# the call was in flight, and a slot seated on an already-dead character.
 	#
 	# Phrased positively and gated on `exists`, because a fatal blow against the
 	# fight's ctx_host tears the fight down inside the wound call above and leaves
@@ -2178,26 +2181,26 @@ pod_combat_push_system_log_named_effect = {
 }
 
 # ─── POST-COMBAT HEALTH FINALIZATION ─────────────────────────────
-# Post-combat nonfatal-mode finalizer. Damage is applied LIVE during
-# move execution (the damage helpers in pod_combat_effects.txt call
-# POD_increase_wounds_* immediately); this effect runs once at combat
-# end, BEFORE cleanup, and only handles fatality-mode postprocessing:
+# Damage is applied LIVE during move execution (the damage helpers in
+# pod_combat_effects.txt call POD_increase_wounds_* immediately) while
+# pod_combat_nonfatal_active suppresses PoD's inline death check for EVERY
+# fight (direct delta in POD_can_die_from_wounds,
+# scripted_triggers/POD_disciplines_triggers.txt). This effect runs once at
+# combat end, BEFORE cleanup, and does the fatality-mode postprocessing:
 # - fatality = no  ->  cap every populated slot's wound track to leave
-#                       one empty box, then strip pod_combat_nonfatal_active.
+#                       one empty box, then strip the gate flag.
 # - fatality = practice -> restore each pre-fight wound snapshot (see the
 #                       practice-spar section at the bottom of this file),
 #                       then strip the flag.
-# - fatality = always / default  ->  no-op.
+# - fatality = possible / default / always -> keep the wounds, strip the flag.
+#                       The deferred deaths are resolved once at the writeback
+#                       by pod_combat_resolve_suppressed_deaths_effect
+#                       (pod_combat_sc_context_effects.txt), never here: the
+#                       caller reaches pod_combat.9999 through trigger_event,
+#                       which silently no-ops on a dead host, so a kill at this
+#                       site would take the follow-up and the teardown with it.
 
-pod_combat_apply_nonfatal_effect = {
-	# Only fatality = no acts. During the fight its inline death check is
-	# gated by the pod_combat_nonfatal_active flag (direct delta in
-	# POD_can_die_from_wounds, scripted_triggers/POD_disciplines_triggers.txt),
-	# so wounds accumulate but
-	# nobody dies; here we cap the track THEN strip the flag (order
-	# matters - see below). practice takes real wounds live and restores
-	# its snapshot in the else_if below; default lets damage persist as-is.
-
+pod_combat_finalize_combat_health_effect = {
 	if = {
 		limit = { var:pod_combat_session ?= { var:fatality = flag:no } }
 		# Cap pass: keep one empty box per combatant, peeling a superficial
@@ -2280,6 +2283,11 @@ pod_combat_apply_nonfatal_effect = {
 		# pre-fight snapshot, then strip the flag. No cap (the restore overwrites).
 		limit = { pod_combat_is_practice_trigger = yes }
 		pod_combat_restore_practice_wounds_effect = yes
+		pod_combat_clear_nonfatal_flag_effect = yes
+	}
+	else = {
+		# Fatal modes keep every wound they took. Strip the gate so the writeback's
+		# death sweep can run PoD's own check against the final track (see header).
 		pod_combat_clear_nonfatal_flag_effect = yes
 	}
 }
@@ -2409,8 +2417,8 @@ pod_combat_end_combat_effect = {
 	}
 	else = {
 
-	# Nonfatal cap + flag strip (header explains the mode handling).
-	pod_combat_apply_nonfatal_effect = yes
+	# Wound cap / practice restore + death-gate strip (header explains the modes).
+	pod_combat_finalize_combat_health_effect = yes
 
 	# Morale -> Mental Strain (rationale on pod_combat_apply_morale_strain_effect).
 	# A practice spar leaves no lasting Mental Strain, so skip the whole pass.
@@ -2526,6 +2534,19 @@ pod_combat_duel_end_effect = {
 				remove_character_modifier = pod_combat_duel_active
 				remove_character_modifier = pod_combat_anima_flare
 			}
+			# The AI's scoring marks on the SHARED catalogue move stories. Cleared
+			# here rather than from cleanup because cleanup runs downstream of the
+			# writeback's deferred kills, and a garbage-collected loser is a weak
+			# reference no variable trigger can be pointed at. Nothing has died yet
+			# at this point on any path into this effect.
+			# Human-driven slots never ran the selector, so they carry no marks.
+			if = {
+				limit = {
+					NOT = { has_variable = slot_human_controller }
+					var:slot_char = { is_alive = yes }
+				}
+				var:slot_char = { pod_combat_clear_ai_move_marks_effect = yes }
+			}
 			# Release the participant claim (seated in pod_combat_set_slot_char_effect).
 			# is_alive-gated on its own because removing a variable from a dead
 			# character errors, while the modifier removals above are dead-safe.
@@ -2561,7 +2582,7 @@ pod_combat_duel_end_effect = {
 		}
 	}
 
-	# Don't strip pod_combat_nonfatal_active here: pod_combat_apply_nonfatal_effect
+	# Don't strip pod_combat_nonfatal_active here: pod_combat_finalize_combat_health_effect
 	# owns it and must cap THEN strip (a strip before the cap would let
 	# the inline death check fire during the cap pass).
 }
@@ -2605,6 +2626,9 @@ pod_combat_host_died_release_effect = {
 				remove_variable = engaged_in_single_combat
 				# Release the participant claim; this loop is already is_alive-gated.
 				remove_variable = pod_combat_session
+				# Catalogue scoring marks - the dead-host twin of the clear in
+				# pod_combat_duel_end_effect, which this path never reaches.
+				pod_combat_clear_ai_move_marks_effect = yes
 			}
 			# Driver-side twin of the occupant release above. No claim-keeper
 			# exemption here: the dead host's own removals are skipped by the

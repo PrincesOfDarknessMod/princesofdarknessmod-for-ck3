@@ -275,8 +275,10 @@ differently in triggers than in effects**).
 literal slot pointers. Any non-leader slot is reached by iterating
 `pod_combat_active_slots` and matching `combat_team` + `team_position`.
 `pod_combat_nonfatal_active` is not host state: it is a character flag
-stamped on every participant protected by the non-fatal/practice death
-gate.
+stamped on every participant of every fight, whatever the fatality mode,
+so PoD's inline wound-death check cannot fire mid-action. Stripped at
+combat end; the fatal modes' deaths are then settled in one pass at the
+writeback (see **Combat end** and **Deferred death resolution**).
 
 #### Per-slot stats (on each `POD_combat_slot` story)
 
@@ -525,7 +527,7 @@ ordering rules** below before moving anything.
 | §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the fight story. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, and the generator's `team_all_support` lint rejects the combination. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
 | §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
@@ -1192,10 +1194,10 @@ effect returns, so the GUI never sees a half-init roster. In order it:
 5. Computes leader-baseline hit chances for all slots.
 6. Seeds the default PC target (enemy/0) and the workspace target
    pointers.
-7. If `pod_combat_uses_death_gate_trigger` passes (`fatality = no` or
-   practice), stamps `pod_combat_nonfatal_active` on every combatant.
-   Practice additionally snapshots every participant's wound track for
-   end-of-fight restoration (see **Combat end**).
+7. Stamps `pod_combat_nonfatal_active` on every combatant
+   (`pod_combat_uses_death_gate_trigger`, which now passes for every
+   fatality mode). Practice additionally snapshots every participant's
+   wound track for end-of-fight restoration (see **Combat end**).
 8. Runs an init-time KO correction: init sets `slot_alive = 1`
    unconditionally, but a combatant who walks in already KO'd (filled
    track, torpor, morale-broken, scripted incap) is flipped down here
@@ -1289,6 +1291,18 @@ anti-repetition history, focus-fire mark, personality precompute) on AI
 occupants, and stamps the `pod_combat_duel_active` character modifier
 (30-day safety expiry) so other systems can defer mid-duel.
 
+The battery runs **once per seat**, so anything it derives from a
+combatant's *current form* is a snapshot. The Delirium is the one such
+thing, and `pod_combat_delirium_effects.txt` re-derives it: a combatant
+who enters an inducing form later (the PC shapeshifting mid-duel, which
+nothing prevents) is picked up by `pod_combat_refresh_delirium_effect` at
+four turn boundaries - PC commit, AI turn start, PC turn setup, round end -
+and immediately by `POD_combat_on_form_change_effect`, the hook at the tail
+of PoD's shapeshift interaction. Casters are the two team leaders only,
+matching the `ENEMY_LEADER` the battery is given here. Victims already
+carrying either grade are skipped, so the pass is idempotent and each
+victim posts one `delirium_struck` log row per fight.
+
 ### Mid-fight add and summon
 
 The duel builder runs only pre-combat. To seat a combatant into a live
@@ -1321,10 +1335,9 @@ AI Fera into warform.
 
 The whole seat is gated on the team-size counter actually advancing: a
 capped add (past 50) leaves the counter put, and that gate skips the
-finalize, the log row, and the non-fatal death-gate stamp, so nothing
-phantom-joins. In a non-fatal duel the mid-fight seat also stamps
-`pod_combat_nonfatal_active` itself — the finalize-time stamp only
-covered the initial roster.
+finalize, the log row, and the death-gate stamp, so nothing
+phantom-joins. The mid-fight seat stamps `pod_combat_nonfatal_active`
+itself — the finalize-time stamp only covered the initial roster.
 
 Scheduled reinforcements register on the fight list
 `pod_combat_pending_reinforcements` (with `pod_combat_join_round` /
@@ -1342,9 +1355,12 @@ friendly or `summon_hostile` destination and capacity-checks that side
 before the selected `summon_recipe` creates one initialized character.
 Live recipes are `wraith`, `bane`, `gaian_spirit`, and `elemental` (the
 elemental recipe uses PoD's Wyrm elemental-bane family). The glue stamps every result
-`pod_combat_nonfatal_active` and `spirit_pact_block`, so filling its
-wound track KOs it even in a fatal duel and pact interactions remain
-blocked, then registers it in `pod_combat_summoned_chars` before seating.
+`pod_combat_nonfatal_active` and `spirit_pact_block`, so pact interactions
+stay blocked and the flag is there from creation rather than from the
+seat, then registers it in `pod_combat_summoned_chars` before seating.
+Registration is also what keeps a summon out of the end-of-fight death
+sweep (`pod_combat_slot_char_is_summon_trigger`): summons are removed with
+`death_disappearance`, never killed.
 Both cleanup paths remove every still-living registered summon with
 `death_disappearance`; no combat summon persists. The whole body runs in a
 `hidden_effect` so the confirm-tooltip walk doesn't error on character/story
@@ -1631,7 +1647,10 @@ Once `pod_combat_is_over` is set, both are replaced by **End Combat**
 pushes the round-transition log row, ticks active Damage-over-Time burns
 (`pod_combat_tick_dots_effect`, which can itself end combat on a killing
 burn — everything after is guarded on `NOT is_over`), seats due
-reinforcements, rolls next-round initiative, finds the first actor, then sets up the PC
+reinforcements, re-derives the Delirium
+(`pod_combat_refresh_delirium_effect`, after the seat so a fresh arrival is
+not double-counted and before the prowess-derived initiative roll), rolls
+next-round initiative, finds the first actor, then sets up the PC
 turn or begins stepping/draining the next round's pre-PC AI per mode.
 
 ---
@@ -1892,6 +1911,8 @@ Move-less rows carry a flag-valued `system_message` and render via
 | `combat_ended_victory` / `combat_ended_defeat` | combat ends (which side won) |
 | `combatant_joins` | a mid-fight summon seats a combatant (named row) |
 | `ally_down_shock` | a teammate is knocked out (named row) |
+| `form_shifted` | a combatant changes shape mid-fight (named row) |
+| `delirium_struck` | PoD's Delirium lands on a combatant (named row, once per victim per fight) |
 
 The same dispatcher also handles DoT (`dot_applied_*` / `dot_tick_*`),
 daze/stun (`dazed` / `stunned`), and mind-control (`mind_seized` /
@@ -2180,8 +2201,7 @@ Three further consequences worth stating:
   debuffs and stance-strips across the sweep, but §5c/§9/§10/§12/§12b route
   buffs, heals and beneficiary stances to the **actor** for every mode
   except `single_ally` / `single_pc`. A `team_all` heal would therefore mend
-  only its caster, so the generator's `team_all_support` lint rejects the
-  combination rather than shipping the surprise.
+  only its caster.
 - **No reactions.** §15 skips `team_all` for the same reason it skips
   `team_enemy`: a counter can only fire from one workspace target, so firing
   would arbitrarily single out the pre-AoE one.
@@ -2421,6 +2441,16 @@ system** → adding a workspace mirror field).
 
 ### Scope traps inside slot loops
 
+> **Log pushes belong to the host, not the slot.** Both
+> `pod_combat_push_system_log_effect` and `_named_effect` do
+> `save_scope_as = combat_host` on **their caller**. Calling one from inside a
+> loop body that has switched into `var:slot_char` therefore re-points
+> `scope:combat_host` at that combatant, and every later matcher in the running
+> AI turn reads the wrong character. Hop back explicitly - save the host under a
+> name of your own before the walk and push through it, as
+> `pod_combat_apply_delirium_to_victim_effect` does.
+
+
 Three engine behaviors govern every body that runs inside `every_in_list
 = { variable = pod_combat_active_slots ... }` (and the DoT tick loop).
 They are load-bearing for any new code in those loops.
@@ -2501,6 +2531,12 @@ also refreshed after a move writes a soak tier, and the actual PoD wound
 call evaluates its own authoritative soak path. This keeps wound-track
 prowess penalties and live soak changes feeding the fight without
 re-walking expensive script values for every candidate move.
+
+**The combat window pins the game clock**, so no daily skill recalculation
+ever lands during a fight. Any code that adds or removes a character
+modifier mid-fight must therefore call `force_character_skill_recalculation`
+on that character itself, or no `prowess` read - the stash, the hit
+formula, initiative, auto-resolve, the slot card - will ever see it.
 
 The one sanctioned exception is the **wound-bar display mirror**
 (`slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp`): the
@@ -2824,15 +2860,20 @@ recorded as the victor.
 the character still points at one, because the SC route keeps the pointer
 after clearing active (the GUI execute and End Combat both call it). It:
 
-1. **Non-fatal cap / practice restore + strip**
-   (`pod_combat_apply_nonfatal_effect`): for `fatality = no`, caps each
-   combatant's wound track to keep at least one empty box (peeling a
+1. **Health finalization + death-gate strip**
+   (`pod_combat_finalize_combat_health_effect`): for `fatality = no`, caps
+   each combatant's wound track to keep at least one empty box (peeling a
    superficial wound first, else an aggravated one); for `practice`,
    restores each combatant's wound track to the snapshot taken at finalize
    (`pod_combat_restore_practice_wounds_effect`) so the spar leaves no
-   lasting harm. Either way it then strips the `pod_combat_nonfatal_active`
-   death-gate flag — in that order, so the inline death check can't fire
-   during the pass.
+   lasting harm; the fatal modes keep their wounds untouched. Every mode
+   then strips the `pod_combat_nonfatal_active` death-gate flag — for the
+   capped mode in that order, so the inline death check can't fire during
+   the pass. Nothing dies here: the caller reaches `pod_combat.9999`
+   through `trigger_event`, which silently no-ops on a dead host, so a kill
+   at this site would lose the follow-up and the teardown. The fatal modes'
+   deaths are settled at the writeback instead (**Deferred death
+   resolution**).
 2. **Morale → Mental Strain** (`pod_combat_apply_morale_strain_effect`,
    skipped entirely for `practice` spars): one batched pass over alive
    combatants. Each takes
@@ -2932,11 +2973,12 @@ teardown would clear it.
    principals' `engaged_in_single_combat` state; increment one equipped
    primary weapon's `artifact_duel_var` for the victor; grant the victor
    Fera ferocity renown outside practice; then apply fatality-mode death
-   handling. Wounds were written live and PoD death-checked inline, so
-   the death branch only forces `pod_death` for guaranteed-kill modes
-   (`fatality = always`, and `default` on tribal governments) when live
-   damage fell short, guarded by `is_alive`. `practice` and `no` apply
-   no death; `possible` trusts the live damage.
+   handling. Two stages, in this order: the guaranteed-kill modes
+   (`fatality = always`, and `default` on tribal governments) force
+   `pod_death` on the loser regardless of wound math, guarded by
+   `is_alive`; then `pod_combat_resolve_suppressed_deaths_effect` settles
+   every death the in-fight gate deferred (**Deferred death resolution**).
+   `practice` and `no` apply no death at all.
 5. Fire the follow-up event (`OUTPUT_EVENT`), with an initiator →
    defender → attacker fallback chain matching vanilla.
 6. **Cleanup** (`pod_combat_cleanup_effect`): clears the character-side
@@ -2955,6 +2997,67 @@ teardown would clear it.
    re-adding one would end those stories twice.
    (`pod_combat_turn_order_list` is deliberately NOT cascaded - it is a
    reordered view of the same slot stories.)
+
+#### Deferred death resolution
+
+The minigame writes real wounds live on every hit, so PoD's inline death
+check (`POD_health_death_check_effect`, reached through
+`POD_apply_wound_boxes`) would otherwise fire *mid-action*. That is
+unusable: for a victim with guaranteed resurrection — wraith, spectre,
+hsien, siochain, `extra_life_*`, the phoenix / scarab / rebirthing perks —
+`pod_death`'s death arm is inadmissible, so the only branch left is
+`pod_resurrection_effect` → `POD_full_heal_effect`, a **free full heal**
+mid-fight. The minigame's kill test is `is_alive`, so it saw a living
+full-HP enemy, clamped both wound deltas to 0, logged the killing blow as
+*Soaked*, and the fight could never end. Umbra duels surfaced it because
+their opponent pool is mostly wraiths and spectres.
+
+So every fight now carries the death gate for its whole duration
+(`pod_combat_uses_death_gate_trigger`, which no longer looks at the
+fatality mode), a lethally-wounded combatant is **KO'd** rather than
+killed — the KO predicate's `POD_total_damage_boxes >=
+POD_health_track_length` clause already covered exactly this — and the
+deferred deaths resolve once at the writeback, after
+`pod_combat_finalize_combat_health_effect` has stripped the gate. This is
+the model base PoD already uses: `work_out_wounds_or_death_effect`
+(`events/single_combat_events.txt`) applies duel wounds and death exactly
+once, at the end.
+
+`pod_combat_resolve_suppressed_deaths_effect` (last phase of
+`POD_combat_apply_duel_finalization_effect`) walks
+`pod_combat_active_slots` off `scope:sc_ctx` — a story, so it cannot
+become a corpse part-way through the loop — and calls PoD's own
+`POD_health_death_check_effect` once per surviving combatant. Reusing
+PoD's check rather than a bare `pod_death` is what preserves the rest of
+the contract: it re-tests track-full **and** aggravated ≥
+`POD_aggravated_damage_threshold_for_death` **and**
+`POD_can_die_from_wounds`, so a combatant beaten down on superficial
+damage alone walks away, and an immortal *without* guaranteed
+resurrection still takes the `POD_long_depose_effect` off-ramp instead of
+dying.
+
+Three rules the sweep keeps:
+
+* **Bloodless modes are skipped** (`pod_combat_duel_is_bloodless_trigger`
+  — `fatality = no` and `practice`). That trigger holds the *old* body of
+  the death gate, and is also what the CERTÁMEN duel title asks, so a
+  to-the-death mage duel still titles itself DUEL.
+* **Summons are skipped** (`pod_combat_slot_char_is_summon_trigger`, read
+  off the fight's `pod_combat_summoned_chars` registry). Cleanup removes
+  them with `death_disappearance`; killing one would leave the corpse the
+  fight is supposed to erase.
+* **Killer = the opposing side's principal**, captured into
+  `scope:pod_combat_player_principal` / `scope:pod_combat_enemy_victor` at
+  the *top* of the finalization effect — before any forced kill, since
+  both savers read the fight through the host and the host is exactly who
+  a `fatality = always` loss turns into a corpse. A victim whose opposite
+  number is unset or already dead is left standing rather than handed to
+  `POD_commit_murder_effect` with a dead killer; PoD settles their full
+  track at the next `POD_refresh_health_track`.
+
+A wraith killed at the writeback still resurrects once. That is correct
+and is what base PoD does — the duel has already resolved — and the
+spectre it becomes is erased the next day by `POD_umbra_lost.100`.
 
 **The card is the only way to conclude a fight the builder started.** The
 combat window's **End Combat** button hides itself whenever the marker is
@@ -2988,6 +3091,7 @@ Code-side entry points and where they live.
 | `pod_combat_effects.txt` | Damage helpers, soak, retaliation dispatcher, push_log, contact resolver, result-code helpers. |
 | `pod_combat_group_effects.txt` | Duel builder (`POD_combat_create_duel_effect` / `_duel_add_ally_effect` / `_duel_add_enemy_effect` / `_finalize_duel_effect` + the `pod_combat_init_all_slots_effect` dispatcher), workspace load/save, slot iteration, AoE target-alive, team-side filtering, group cleanup. |
 | `pod_combat_slot_effects.txt` | Slot lifecycle (create / clear), parametric slot-field accessor. |
+| `pod_combat_delirium_effects.txt` | Re-derives PoD's Delirium when a combatant changes form after slot init already ran the knight battery. `pod_combat_refresh_delirium_effect` is the idempotent poll (four turn boundaries); `POD_combat_on_form_change_effect` is the public hook PoD's shapeshift interaction calls for same-turn immediacy. |
 | `pod_combat_tier_effects.txt` | Hit recalc-from-base for workspace and slot scopes, including actor-target pair recalculation. Soak has no combat recalc; its character-side tiers are consumed by PoD's `POD_soak_chance`. |
 | `pod_combat_ai_effects.txt` | AI move selection, target swap, anti-repetition weighting. Tuning knobs (weight deltas + comparison thresholds) live in a `@ai_*` parse-time-constants block at the top of the file. |
 | `pod_combat_summon_effects.txt` | Immediate mid-fight seating, scheduled reinforcements, summon destination/capacity gates, the four summon recipes, and summon cleanup registration. |
@@ -3014,7 +3118,7 @@ the devpod-old copy is the porting reference).
 | `pod_combat_condition_dispatch_triggers.txt` | `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` / `pod_combat_cond_has_modifier_trigger` / `pod_combat_cond_has_perk_trigger` / `pod_combat_cond_fera_form_trigger` - literal-key switches for the move's `cond_param`, because CK3 requires a literal trait, secret-type, modifier or perk key (and a per-form trigger name for the shapeshift forms). Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails the condition. |
 | `pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. Also home to the damage-class partition triggers (`pod_combat_move_class_is_elemental_trigger` / `pod_combat_class_always_aggravated_trigger`) and to `pod_combat_ai_move_admissible_trigger` - the AI's entire move-admission gate set, which the move roll calls as its `limit`. |
 | `POD_health_track_triggers.txt` (PoD file, delta) | Current combat damage matrix: per-splat aggravated classification and default immunities for the elemental death reasons, poison/cold-iron weakness helpers, holy/true-faith classification (including vampires/abominations, demons, kuei-jin, wraiths, and true Fae), and the `pod_combat_force_agg` change-type bridge. |
-| `POD_disciplines_triggers.txt` (PoD file, delta) | Adds the participant-side `pod_combat_nonfatal_active` death gate to `POD_can_die_from_wounds`, protecting both non-fatal and practice fights from inline death/torpor. |
+| `POD_disciplines_triggers.txt` (PoD file, delta) | Adds the participant-side `pod_combat_nonfatal_active` death gate to `POD_can_die_from_wounds`. Stamped for EVERY minigame fight, so no fight kills from wounds mid-action; the fatal modes' deaths resolve once at the writeback. |
 
 ### Story cycles
 

@@ -179,6 +179,25 @@ pod_combat_is_my_turn_trigger = {
 	trigger_else = { always = no }
 }
 
+# The BODY whose controlled turn is live right now, as opposed to whoever is
+# clicking - which is what pod_combat_is_my_turn_trigger next door asks. The two
+# separate in a proxy duel, where a director drives a slot it does not occupy, and
+# a form change belongs to the body that changed shape. Character scope.
+#
+# Gating on the latch alone is enough: pod_combat_active_control_slot is written in
+# the same statement pair as pod_combat_control_turn_live and outlives it (the
+# display pointer deliberately survives the commit), so the latch is the narrower test.
+pod_combat_char_is_live_control_actor_trigger = {
+	save_temporary_scope_as = pod_control_actor_asker
+	trigger_if = {
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_control_turn_live } }
+		var:pod_combat_session.var:pod_combat_active_control_slot ?= {
+			var:slot_char = { this = scope:pod_control_actor_asker }
+		}
+	}
+	trigger_else = { always = no }
+}
+
 # Gates the mid-step Advance entry point. Advanceable iff combat is live, not
 # over, an actor is pending, and that turn is NOT handed to the player (any
 # uncontrolled actor, including an ally AI at player-team position > 0). Host
@@ -1047,6 +1066,24 @@ pod_combat_slot_char_is_alive_trigger = {
 	var:slot_char = { is_alive = yes }
 }
 
+pod_combat_slot_char_is_summon_trigger = {
+	# Slot-scoped. Was this seat filled by a mid-fight summon? Cleanup despawns
+	# those as death_disappearance, so the end-of-fight death sweep
+	# (pod_combat_resolve_suppressed_deaths_effect) must skip them - a real death
+	# would leave behind the corpse the fight is supposed to erase.
+	# Reached through the slot's own fight back-pointer so the trigger stays
+	# callable from a bare slot scope; prev inside the block is this slot.
+	# has_variable first, then the ?=, matching pod_combat_slot_summons_allowed_trigger:
+	# in TRIGGER context ?= does not skip an unset pointer, it evaluates against an
+	# empty scope. The registry list itself needs no guard - is_target_in_variable_list
+	# on a never-created list reads as "not present", which is the right answer.
+	trigger_if = {
+		limit = { has_variable = fight }
+		var:fight ?= { is_target_in_variable_list = { name = pod_combat_summoned_chars target = prev.var:slot_char } }
+	}
+	trigger_else = { always = no }
+}
+
 pod_combat_current_actor_is_down_trigger = {
 	# Host scope. The current actor can no longer act: its character died
 	# mid-turn (fatal duel, no death gate) or its slot was marked KO by the
@@ -1431,9 +1468,27 @@ pod_combat_is_practice_trigger = {
 	var:pod_combat_session ?= { var:fatality = flag:practice }
 }
 
-# this = combat host. True for the duels that stamp pod_combat_nonfatal_active
-# (so PoD's inline death check can't kill mid-fight): non-fatal AND practice spars.
+# this = combat host. True for EVERY minigame fight, whatever its fatality mode.
+# The minigame writes real wounds live on every hit, so PoD's inline death check
+# would otherwise fire mid-action - and for a guaranteed-resurrection victim
+# (wraith, spectre, hsien, extra_life_*, ...) pod_death is a free full heal, which
+# made those opponents unkillable inside a fatal duel. Every combatant therefore
+# carries pod_combat_nonfatal_active for the whole fight; the deferred deaths are
+# resolved once at the writeback by pod_combat_resolve_suppressed_deaths_effect,
+# which is the model base PoD already uses (work_out_wounds_or_death_effect).
+#
+# exists rather than a deref: the answer no longer depends on any fight var, and
+# a bare presence test cannot error on a tooltip walk that predates the story.
 pod_combat_uses_death_gate_trigger = {
+	exists = var:pod_combat_session
+}
+
+# this = combat host. True for the duels where NOBODY dies at all: fatality = no
+# (track capped to one empty box at the end) and practice (pre-fight track
+# restored). Distinct from the death gate above, which every mode now passes -
+# this is the narrower "bloodless" question the post-combat health finalizer and
+# the CERTAMEN duel title ask.
+pod_combat_duel_is_bloodless_trigger = {
 	# Nested for the same reason as pod_combat_is_practice_trigger above.
 	var:pod_combat_session ?= {
 		OR = {
@@ -1810,4 +1865,37 @@ pod_combat_intro_launch_valid_trigger = {
 		is_alive = yes
 		NOT = { pod_combat_is_seated_trigger = yes }
 	}
+}
+
+###### MID-FIGHT DELIRIUM ######
+# Predicates for pod_combat_delirium_effects.txt, which re-derives PoD's Delirium
+# when a combatant changes form after slot init has already run the knight battery.
+
+pod_combat_char_has_any_delirium_trigger = {
+	# Character scope. Either grade of PoD's Delirium (00_POD_fera_modifiers.txt).
+	# This is the minigame's idempotency key: a victim already carrying one is neither
+	# re-offered the affliction nor given a second log row.
+	OR = {
+		has_character_modifier = POD_delirium_modifier
+		has_character_modifier = POD_reduced_delirium_modifier
+	}
+}
+
+pod_combat_delirium_caster_ready_trigger = {
+	# Character scope. Can this combatant inflict the Delirium as it currently stands?
+	# Purely an early-out so the roster walk is skipped while neither leader is in an
+	# inducing form - POD_fera_delirium_effect re-tests the same chain per victim, and
+	# that copy is the authority.
+	is_alive = yes
+	POD_inflicts_delirium_trigger = yes
+}
+
+pod_combat_slot_delirium_candidate_trigger = {
+	# Slot-scoped. Worth offering the Delirium to: a live body not already afflicted.
+	# Immunity, the Fera exemption and the caster's bypass perks are deliberately NOT
+	# repeated here - they live in POD_fera_delirium_effect, which no-ops cheaply.
+	# Character liveness rather than the KO flag, because slot init afflicts a
+	# wound-track-full survivor too.
+	pod_combat_slot_char_is_alive_trigger = yes
+	NOT = { var:slot_char = { pod_combat_char_has_any_delirium_trigger = yes } }
 }

@@ -913,11 +913,23 @@ pod_combat_clear_ai_scratch_effect = {
 # effect covers the other end: without it the last action's marks outlive the
 # fight on SHARED, save-persistent catalogue stories.
 #
-# Char scope, and deliberately NOT gated on is_alive like the char-var strips
-# above: every mutation here lands on a story, which is legal regardless of the
-# character's state, and dying is the ordinary way an AI leaves a fight - a
-# liveness gate would skip the common case. Reading the list off a corpse is
-# likewise fine (reads are tolerated, only mutation errors).
+# Char scope. Called from pod_combat_duel_end_effect and the dead-host release,
+# NOT from cleanup, and that placement is the whole point: both callers run while
+# every combatant is still a real character.
+#
+# CK3 garbage-collects an unlanded duel loser, and the resulting weak reference is
+# not a character scope at all - has_variable_list below then errors with "This
+# scope doesn't support variables. Scope: <name> weak". Neither `?=` nor
+# `exists = var:slot_char` screens that: both still resolve on a same-tick weak
+# reference (measured, 2026-08-21 - the KO predicate's exists clause catches a
+# LATER-flushed reference, not this one). Only `is_alive` reads false, and gating
+# on liveness would skip a corpse whose marks we can still clear.
+#
+# So the marks are cleared BEFORE anything dies. Reading the list off a corpse is
+# fine (reads are tolerated on a dead-but-present character, only mutation errors),
+# and every mutation here lands on a move story, which is legal whatever state the
+# owning character is in - so the callers' own is_alive gates are the only screen
+# this needs.
 pod_combat_clear_ai_move_marks_effect = {
 	if = {
 		limit = { has_variable_list = pod_combat_loadout }
@@ -936,11 +948,13 @@ pod_combat_init_slot_from_character_effect = {
 	#   $CHARACTER$    = the slot's occupant (the loop passes var:slot_char).
 	#   $ENEMY_LEADER$ = the OPPOSING team's leader - the CASTER for the
 	#     "enemy knight" discipline buff: scope:pod_combat_target for
-	#     player-team slots, scope:combat_pc for enemy-team slots. Supplied
-	#     by the caller so this effect needs no team branch.
+	#     player-team slots, scope:pod_combat_player_leader for enemy-team
+	#     slots. Supplied by the caller so this effect needs no team branch.
 	#
 	# AI fera shapeshift runs upfront in POD_combat_finalize_duel_effect (before
-	# this), so every potential CASTER already has its crinos modifier here.
+	# this), so every AI CASTER already has its crinos modifier here. A human who
+	# shifts LATER is not covered by this pass at all - pod_combat_delirium_effects.txt
+	# re-derives the Delirium half of the battery at the turn boundaries.
 	#
 	# Is a human driving this slot? Captured HERE, in slot scope, because
 	# slot_human_controller is a slot var and everything below runs inside
@@ -961,13 +975,14 @@ pod_combat_init_slot_from_character_effect = {
 		# MADDENING_HOWL_PERK_EFFECT and friends), so suppressing it inside the
 		# minigame would silently break the advertised contract of every one of them.
 		# The fatality = no writeback is what keeps it survivable - see
-		# pod_combat_apply_nonfatal_effect.
+		# pod_combat_finalize_combat_health_effect.
 		POD_enemy_knight_set_discipline_battle_effect = { CASTER = $ENEMY_LEADER$ }
-		# The battery can KILL outright in a FATAL duel, where no death gate is
-		# stamped (fatality = no / practice are gated in POD_combat_finalize_duel_effect,
-		# ahead of this). Everything below therefore re-checks: var and flag mutation
-		# ERRORS on a dead reference (it silently no-ops only on a live character that
-		# lacks the var), so an unguarded tail here is error spam, not a harmless miss.
+		# The battery's wounds can no longer kill here (the death gate is stamped for
+		# every mode in POD_combat_finalize_duel_effect, ahead of this), but a launcher
+		# can still seat a character who was already dead. Everything below therefore
+		# re-checks: var and flag mutation ERRORS on a dead reference (it silently
+		# no-ops only on a live character that lacks the var), so an unguarded tail
+		# here is error spam, not a harmless miss.
 		if = {
 			limit = { is_alive = yes }
 			POD_ally_knight_set_discipline_battle_effect = { CASTER = $CHARACTER$ }
@@ -1432,6 +1447,74 @@ POD_combat_duel_add_enemy_effect = {
 	}
 }
 
+# ── Stale-layout discard ──
+# Called from POD_on_game_start, which fires on LOAD as well as on a new game,
+# so the discard lands before any surface can resume the fight.
+#
+# POD_combat_state_layout names which owner each piece of fight state lives on.
+# A fight built under a different layout has its vars split across owners the
+# running code no longer reads, so resuming it reads unset on both sides -
+# silent, and exactly the corruption the stamp exists to prevent. The reclaim in
+# create_duel does not cover this: it is pointer-keyed and only fires when the
+# owner starts the NEXT fight, so a save resumed mid-fight never reaches it. A
+# surviving stale fight also reads live to pod_combat_any_fight_active_trigger,
+# which locks the loadout editor and the catalogue reload for as long as it sits
+# there.
+#
+# Two passes. Ending a story inside every_owned_story would mutate the list
+# being walked, so pass 1 only collects. Pass 2 tears each fight down through
+# the character-scoped path, the same sequence the create_duel reclaim uses.
+#
+# Orphans are deliberately left alone: a stale fight nothing points at cannot be
+# resumed (resumption goes through pod_combat_session), so it is an inert story
+# object, not a corruption risk, and ending it would mean walking refs that the
+# teardown above may already have destroyed.
+POD_combat_discard_stale_layout_fights = {
+	character:POD_wraith_01 = {
+		every_owned_story = {
+			limit = {
+				story_type = POD_combat_fight
+				trigger_if = {
+					limit = { has_variable = ctx_layout }
+					NOT = { var:ctx_layout = POD_combat_state_layout }
+				}
+				# No stamp at all predates stamping, so it cannot match either.
+				trigger_else = { always = yes }
+			}
+			add_to_global_variable_list = { name = pod_combat_stale_fights target = this }
+		}
+	}
+
+	if = {
+		limit = { has_global_variable_list = pod_combat_stale_fights }
+		every_in_global_list = {
+			variable = pod_combat_stale_fights
+			save_temporary_scope_as = pod_stale_fight
+			# The teardown effects are character-scoped and reach the fight back
+			# through pod_combat_session, so they run from ctx_host - but only while
+			# that host still points AT this fight, or the sequence would tear down
+			# whatever it does point at. Nested rather than sibling gates: triggers
+			# do not short-circuit, so a sibling has_variable still lets the deref run.
+			var:ctx_host ?= {
+				if = {
+					limit = { has_variable = pod_combat_session }
+					if = {
+						limit = { var:pod_combat_session = { this = scope:pod_stale_fight } }
+						# Strip the death-gate flag and the duel markers BEFORE cleanup:
+						# both iterate the slot list, which cleanup destroys with the
+						# fight story. No wound cap - the fight is discarded, not finalized.
+						pod_combat_clear_nonfatal_flag_effect = yes
+						pod_combat_duel_end_effect = yes
+						pod_combat_cleanup_effect = yes
+					}
+				}
+			}
+		}
+		clear_global_variable_list = pod_combat_stale_fights
+	}
+}
+
+
 ##############################################################################################
 # SECTION 6: SLOT-INIT DISPATCHER + DUEL FINALIZE
 #
@@ -1446,10 +1529,11 @@ POD_combat_duel_add_enemy_effect = {
 ##############################################################################################
 
 pod_combat_init_all_slots_effect = {
-	# Init every combatant by iterating pod_combat_active_slots. finalize must
-	# have saved scope:pod_combat_target (enemy leader) and scope:combat_pc, passed
-	# as the discipline-buff CASTER: player-team slots vs the enemy leader, enemy-
-	# team slots vs the PC.
+	# Init every combatant by iterating pod_combat_active_slots. finalize must have
+	# saved scope:pod_combat_target (enemy leader) and scope:pod_combat_player_leader,
+	# passed as the discipline-buff CASTER: player-team slots vs the enemy leader,
+	# enemy-team slots vs the player leader. Both are DERIVED from the leader slots,
+	# not assumed to be the host - a proxy launcher need not seat it at player/0.
 	#
 	# init_slot_from_character runs in each slot's own scope (the iteration
 	# body) and writes the slot's vars directly. CHARACTER must still be a
@@ -1631,11 +1715,14 @@ POD_combat_finalize_duel_effect = {
 		}
 	}
 
-	# -- Non-fatal / practice duel: gate PoD's inline death check --
-	# fatality = no OR practice: stamp pod_combat_nonfatal_active on every combatant.
+	# -- Every duel: gate PoD's inline death check --
+	# Stamp pod_combat_nonfatal_active on every combatant, whatever the fatality mode.
 	# POD_can_die_from_wounds (delta in POD_disciplines_triggers.txt) reads it
-	# and returns no, so the death check never reaches pod_death. Stripped post-combat
-	# (fatality = no caps the track; practice restores its snapshot). Fatal duels don't gate.
+	# and returns no, so the death check never reaches pod_death mid-fight - which is
+	# what stops a guaranteed-resurrection opponent from full-healing on every killing
+	# blow. Stripped post-combat by pod_combat_finalize_combat_health_effect, which then
+	# lets pod_combat_resolve_suppressed_deaths_effect settle the fatal modes' deaths in
+	# one pass at the writeback.
 	#
 	# MUST precede init_all_slots: slot init opens with PoD's discipline battery
 	# (POD_enemy_knight_set_discipline_battle_effect), which applies real wounds off
@@ -1648,7 +1735,7 @@ POD_combat_finalize_duel_effect = {
 		pod_combat_apply_nonfatal_flag_effect = yes
 	}
 	# Practice spar: snapshot every combatant's wound track now so it can be
-	# restored at combat end (pod_combat_apply_nonfatal_effect practice branch).
+	# restored at combat end (pod_combat_finalize_combat_health_effect practice branch).
 	# Also ahead of init for the same reason: the snapshot is the restore baseline,
 	# so taking it after the discipline battery would bake that damage in permanently,
 	# and pod_combat_practice_active must exist before the wounds land or PoD's
@@ -1956,17 +2043,12 @@ pod_combat_clear_all_ai_scratch_effect = {
 			}
 		}
 	}
-	# Second pass for the move-story marks, which are NOT liveness-gated - see
-	# pod_combat_clear_ai_move_marks_effect for why they cannot ride the loop
-	# above. Runs while the slot stories still resolve and before any summon
-	# despawn, same as the pass above.
-	var:pod_combat_session ?= {
-		every_in_list = {
-			variable = pod_combat_active_slots
-			limit = { NOT = { has_variable = slot_human_controller } }
-			var:slot_char ?= { pod_combat_clear_ai_move_marks_effect = yes }
-		}
-	}
+	# The move-story marks are NOT cleared here. They cannot be: this effect runs
+	# from cleanup, which is downstream of the writeback's deferred kills, and a
+	# garbage-collected loser is a weak reference that has_variable_list cannot be
+	# pointed at. They are cleared one step earlier instead, from
+	# pod_combat_duel_end_effect, where nothing has died yet - see
+	# pod_combat_clear_ai_move_marks_effect.
 }
 
 # Strips the scheduling vars off pending (never-seated) reinforcements. Dead-safe:
@@ -3091,6 +3173,11 @@ pod_combat_setup_pc_turn_effect = {
 	# Round-duration buffs expire at the START of the holder's turn (a self soak buff
 	# guarded the prior enemy phase; it lapses now). pod_combat_tier_effects.txt.
 	pod_combat_clear_actor_round_buffs_effect = yes
+
+	# Mid-fight form changes: re-derive the Delirium before the workspace load below,
+	# so the stash and the hit recalc that follow read the corrected prowess on the
+	# first frame of this turn rather than one turn late.
+	pod_combat_refresh_delirium_effect = yes
 	pod_combat_load_workspace_effect = yes
 	pod_combat_recalc_pc_hit_chance_effect = yes
 	pod_combat_seed_turn_ap_effect = yes
@@ -3323,6 +3410,11 @@ pod_combat_process_group_turns_effect = {
 	# this whole turn). pod_combat_tier_effects.txt.
 	pod_combat_clear_actor_round_debuffs_effect = yes
 
+	# Same refresh, on the PC-commit side: a form change made during the turn just
+	# committed has to land before the AI drain below, or every AI action this round
+	# swings against the pre-shift numbers.
+	pod_combat_refresh_delirium_effect = yes
+
 	# the prologue above (mark PC acted + save PC
 	# workspace) is the PC-commit, run EXACTLY ONCE per PC turn here. This is the
 	# only effect that carries it; mid-round Advance clicks route through
@@ -3424,6 +3516,11 @@ pod_combat_execute_ai_turn_effect = {
 	# no controlled turn can be live. Covers any entry path that reaches an AI turn
 	# without passing the commit (the pre-PC drain, a mid-round Advance).
 	var:pod_combat_session ?= { remove_variable = pod_combat_control_turn_live }
+
+	# STEP mode lets the player shapeshift between two Advance clicks, so re-derive
+	# before target selection and the workspace load: the AI threat weighting and the
+	# pair hit chance both read live prowess.
+	pod_combat_refresh_delirium_effect = yes
 
 	# Mind control: detect a stolen turn before target selection. The resolve
 	# loop mirrors the mark-acted matcher at the bottom; the host flag gates
@@ -3820,6 +3917,11 @@ pod_combat_group_end_round_effect = {
 	# Seat reinforcements scheduled to arrive this round, before initiative so they
 	# roll into the new round's turn order and act this round.
 	pod_combat_process_pending_reinforcements_effect = yes
+
+	# Backstop for any form change the two turn-side sites missed, placed after the
+	# reinforcement seat (its own battery already afflicted the new arrival, so the
+	# candidate filter skips it) and before initiative, which is prowess-derived.
+	pod_combat_refresh_delirium_effect = yes
 
 	pod_combat_calculate_initiative_effect = yes
 	pod_combat_find_next_actor_effect = yes
