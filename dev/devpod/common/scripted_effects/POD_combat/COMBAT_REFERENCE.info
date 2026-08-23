@@ -291,7 +291,8 @@ writeback (see **Combat end** and **Deferred death resolution**).
 | `slot_morale` | current Morale |
 | `slot_hit_chance` | live hit chance (20–95) |
 | `slot_base_hit_chance` | hit chance before any tier effects |
-| `slot_initiative` | initiative roll this round |
+| `slot_initiative_base` | the combatant's rolled initiative base, rolled once per fight (per round when the reroll knob is on) |
+| `slot_initiative` | effective initiative this round: `slot_initiative_base` + any folded `slot_init_bonus` |
 | `slot_init_bonus` | next-round initiative modifier |
 | `slot_ap_drain` | pending AP drain, consumed after the victim's next-turn AP budget is seeded; subtracts from that budget and floors at 0 |
 | `slot_energy_used` | counter feeding AI energy-attrition weighting |
@@ -1409,15 +1410,33 @@ enemy/0), so there is one code path for every roster.
 
 #### Initiative
 
-`pod_combat_calculate_initiative_effect` rolls `slot_initiative` for
-every alive slot:
+**Initiative is static by default.** Each combatant rolls a base once,
+when it enters the fight, and keeps it; only the per-round bonus fold
+moves the effective value. `pod_combat_calculate_initiative_effect`
+runs every round and recomposes `slot_initiative` on every alive slot:
 
 ```
-slot_initiative = pod_combat_initiative_base_value   (the combatant's live prowess, floored at 0, by default; a flat, tunable baseline when the decouple-prowess toggle is on)
-                + integer_range[1, pod_combat_initiative_roll_max]   (1..30)
-                + slot_init_bonus   (carried from last round's buff/debuff moves, then cleared)
-                + pod_combat_initiative_modifier_value   (designer hook, 0 by default - see §11)
+slot_initiative_base = pod_combat_initiative_base_value   (the combatant's live prowess, floored at 0, by default; a flat, tunable baseline when the decouple-prowess toggle is on)
+                     + integer_range[1, pod_combat_initiative_roll_max]   (1..30)
+                     + pod_combat_initiative_modifier_value   (designer hook, 0 by default - see §11)
+                                                              ^ rolled ONCE per combatant (every round when the reroll knob is on)
+
+slot_initiative      = slot_initiative_base
+                     + slot_init_bonus   (carried from last round's debuff moves, then cleared)
+                                                              ^ recomposed EVERY round
 ```
+
+The split is what keeps an `initiative_debuff` a one-round shift while
+the base underneath it stays put; freezing `slot_initiative` outright
+would turn all 20 debuff-carrying moves into permanent, stacking
+rest-of-fight shifts and falsify their "next round" tooltips. The
+recompose is also unconditional because `find_next_actor` reads
+`var:slot_initiative` with no `has_variable` guard.
+
+Because the base is rolled once, live prowess stops feeding back into
+turn order as a fight wears on: a combatant whose wound track has cost
+it prowess keeps the initiative it entered with. Turn the reroll knob on
+to restore the per-round feedback.
 
 Tunable knobs (debug tuning window): `pod_combat_initiative_roll_max`
 (30) sizes the random roll; the **decouple-prowess** toggle plus
@@ -1432,12 +1451,11 @@ effect also clears `slot_has_acted` and the round-duration once-per list
 display rank (`slot_turn_order`, rank 1 = highest) and rebuilds the GUI
 initiative track list `pod_combat_turn_order_list`.
 
-When the debug override
-`global_var:pod_combat_tune_init_no_reroll` is set, an existing
-`slot_initiative` is retained instead of rerolled; a fresh mid-fight
-seat still receives its first roll. The `slot_init_bonus` fold and all
-round resets still run. Under that mode, a folded initiative bonus or
-debuff becomes a rest-of-fight shift rather than a one-round shift.
+When the debug override `global_var:pod_combat_tune_init_reroll` is set,
+`slot_initiative_base` is re-rolled at every round start instead of
+being kept - the pre-2026-08 behaviour. A fresh mid-fight seat rolls its
+first base on the round it enters either way, and the `slot_init_bonus`
+fold and all round resets run in both modes.
 
 Ties break by `(is_enemy ascending, team_position ascending)` — player
 team before enemy team, lower positions first. This is a direct
