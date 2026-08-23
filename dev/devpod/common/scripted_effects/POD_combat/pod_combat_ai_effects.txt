@@ -891,56 +891,104 @@ pod_combat_ai_retry_alternate_target_effect = {
 	scope:combat_host.var:pod_combat_session ?= { remove_variable = pod_combat_ai_excluded_target_position }
 }
 
-# Caches whether ONE bonus-mode loadout move's condition is currently met, as
-# the flag pod_combat_ai_bonus_met on the move story, for the
-# @ai_bonus_condition_met weight modifier to read as a flat has_variable.
-# Called per bonus move from the selector's precompute loop (below) - in effect
-# scope each move is a saved scope (scope:precompute_bonus_move), so the
-# condition trigger's STORY stays stable inside its own $ACTOR$ / target
+# Caches how a loadout move's bonus CLAUSES stand for the acting AI, on the move
+# story: pod_combat_ai_bonus_met (any clause met - the flat has_variable the
+# @ai_bonus_condition_met weight arm reads), pod_combat_ai_bonus_met_count (how
+# many, so stacking scores higher) and the two per-effect marks the scoring walk
+# needs by name, pod_combat_ai_bonus_met_uses_weapon / _ap_refund. Those two exist
+# because the move-level bonus_effect scalar mirrors clause 1 only: combined with
+# the generic met flag it answers for the wrong clause in both directions the
+# moment a move carries more than one.
+# Called per clause-bearing move from the selector's precompute loop (below) - in
+# effect scope the move and the clause it is walking are each a saved scope, so
+# the condition trigger's STORY stays stable inside its own $ACTOR$ / target
 # scope-switches, which prev/this would NOT in a weight modifier.
 # The move story is shared, but AI turns are sequential and the loop refreshes
-# every bonus move right before that actor scores, so no stale cross-actor read.
+# every clause-bearing move right before that actor scores, so no stale
+# cross-actor read.
 # Also derives the effective AP drain from that met-status, for the same reason
 # the tier cache is precomputed: the drain branches compare inside a host scope
 # switch, where the candidate's own vars are out of reach and a trigger cannot
 # do the base + bonus arithmetic anyway.
 pod_combat_ai_precompute_bonus_met_effect = {
-	# this = a bonus-mode POD_combat_move; HOST = combat host, ACTOR = acting AI.
+	# this = a clause-bearing POD_combat_move; HOST = combat host, ACTOR = acting AI.
 	save_temporary_scope_as = precompute_bonus_move
+
+	# Set-or-clear pairs, with the clear hoisted ahead of a walk that can only ever
+	# set: move stories are SHARED catalogue objects, so a mark left standing from
+	# the previous actor would score this one.
+	remove_variable = pod_combat_ai_bonus_met
+	remove_variable = pod_combat_ai_bonus_met_uses_weapon
+	remove_variable = pod_combat_ai_bonus_met_ap_refund
+	set_variable = { name = pod_combat_ai_bonus_met_count  value = 0 }
+
 	if = {
-		limit = {
-			$HOST$ = {
-				pod_combat_move_condition_met_trigger = { STORY = scope:precompute_bonus_move  ACTOR = $ACTOR$  PREDICATE = scope:precompute_bonus_move.var:cond_predicate }
+		limit = { has_variable_list = bonus_clauses }
+
+		# Seeded with the base drain before the walk, which then adds each met
+		# ap_drain clause. Written whether or not any of those conditions holds: an
+		# unmet bonus stamps the base drain alone, which is what the branches should
+		# then score. Its presence is what tells them to prefer it over the raw
+		# ap_drain var, so it must not be conditional on the met flag.
+		# No clear twin, unlike the marks above: which effects the clauses carry is
+		# fixed when the registry is built, so a move either takes this branch on
+		# every pass or never takes it, and a value can only go stale on a move
+		# nobody scores. It is still cleared per fight with the rest, in
+		# pod_combat_clear_ai_move_marks_effect.
+		if = {
+			limit = {
+				any_in_list = {
+					variable = bonus_clauses
+					var:bonus_effect = flag:ap_drain
+				}
+			}
+			set_variable = {
+				name = pod_combat_ai_eff_ap_drain
+				value = {
+					value = 0
+					if = { limit = { has_variable = ap_drain } add = var:ap_drain }
+				}
 			}
 		}
-		set_variable = pod_combat_ai_bonus_met
+
+		every_in_list = {
+			variable = bonus_clauses
+			save_temporary_scope_as = precompute_bonus_clause
+			if = {
+				limit = {
+					$HOST$ = {
+						pod_combat_move_condition_met_trigger = { STORY = scope:precompute_bonus_clause  ACTOR = $ACTOR$  PREDICATE = scope:precompute_bonus_clause.var:cond_predicate }
+					}
+				}
+				# Back to the move through the SAVED scope, never prev - a relative
+				# switch inside every_in_list corrupts the iteration.
+				scope:precompute_bonus_move = {
+					set_variable = pod_combat_ai_bonus_met
+					change_variable = { name = pod_combat_ai_bonus_met_count  add = 1 }
+					if = {
+						limit = { scope:precompute_bonus_clause.var:bonus_effect = flag:uses_weapon }
+						set_variable = pod_combat_ai_bonus_met_uses_weapon
+					}
+					if = {
+						limit = { scope:precompute_bonus_clause.var:bonus_effect = flag:ap_refund }
+						set_variable = pod_combat_ai_bonus_met_ap_refund
+					}
+					# The seed above is guaranteed to have run: this clause carrying
+					# ap_drain is exactly what its any_in_list gate tested.
+					if = {
+						limit = { scope:precompute_bonus_clause.var:bonus_effect = flag:ap_drain }
+						change_variable = { name = pod_combat_ai_eff_ap_drain  add = scope:precompute_bonus_clause.var:bonus_value }
+					}
+				}
+			}
+		}
 	}
-	else = {
-		remove_variable = pod_combat_ai_bonus_met
-	}
-	# Written for every ap_drain-bonus move whether or not the condition holds:
-	# an unmet bonus stamps the base drain alone, which is what the branches
-	# should then score. Its presence is what tells them to prefer it over the
-	# raw ap_drain var, so it must not be conditional on the met flag.
-	# No clear twin, unlike the flag above: bonus_effect is fixed when the
-	# registry is built, so a move either takes this branch on every pass or
-	# never takes it, and a value can only go stale on a move nobody scores.
+
+	# Present only while it means something, so the scoring arm's multiply can read
+	# it under the same has_variable gate the met flag already carries.
 	if = {
-		limit = {
-			trigger_if = {
-				limit = { has_variable = bonus_effect }
-				var:bonus_effect = flag:ap_drain
-			}
-			trigger_else = { always = no }
-		}
-		set_variable = {
-			name = pod_combat_ai_eff_ap_drain
-			value = {
-				value = 0
-				if = { limit = { has_variable = ap_drain } add = var:ap_drain }
-				if = { limit = { has_variable = pod_combat_ai_bonus_met } add = var:bonus_value }
-			}
-		}
+		limit = { NOT = { var:pod_combat_ai_bonus_met_count > 0 } }
+		remove_variable = pod_combat_ai_bonus_met_count
 	}
 }
 
@@ -1296,7 +1344,7 @@ pod_combat_ai_fold_usable_move_effect = {
 					has_variable = summons_combatant
 					has_variable = steal_gold
 					has_variable = gain_dread
-					has_variable = bonus_effect
+					has_variable_list = bonus_clauses
 					# A marker is setup by definition: it pays off only through a
 					# LATER move that reads it via the has_modifier condition.
 					has_variable = marker_modifier
@@ -1794,11 +1842,18 @@ pod_combat_ai_score_candidate_effect = {
 		# (the move's base effect is weighted separately). Reads the flat
 		# flag precomputed by pod_combat_ai_precompute_bonus_met_effect
 		# (its header explains why the trigger can't run here).
+		# Scaled by how many clauses are met, so a move firing three riders outranks
+		# one firing a single rider. The count is written by the same precompute and
+		# is present exactly when the flag is, so the multiply needs no guard of its
+		# own; at one met clause the term is unchanged.
 		if = {
 			limit = {
+				# Both, not just the flag: a mark left by a PRE-clause save carries the
+				# met flag with no count, and the multiply below would read an unset var.
 				has_variable = pod_combat_ai_bonus_met
+				has_variable = pod_combat_ai_bonus_met_count
 			}
-			change_variable = { name = pod_combat_ai_score  add = @ai_bonus_condition_met }
+			change_variable = { name = pod_combat_ai_score  add = { value = @ai_bonus_condition_met  multiply = var:pod_combat_ai_bonus_met_count } }
 		}
 
 		# Heal when hurt, split by heal_type so the scaled weight only fires
@@ -2271,18 +2326,22 @@ pod_combat_ai_score_candidate_effect = {
 		# nudge compensates without pretending to know the resulting element.
 		if = {
 			limit = {
-				# Static flag, or the uses_weapon conditional bonus with its
-				# condition holding right now - pod_combat_ai_bonus_met is
-				# refreshed for every bonus move just before this scoring walk.
-				# Guarded chain for the same non-short-circuit reason as the
+				# Static flag, or a uses_weapon bonus CLAUSE with its condition
+				# holding right now - pod_combat_ai_bonus_met_uses_weapon is the
+				# per-effect mark refreshed for every clause-bearing move just
+				# before this scoring walk. The generic met flag paired with the
+				# move-level bonus_effect scalar answered for clause 1 only, so it
+				# both fired on a met heal clause and missed a met clause-2 swing.
+				# Kept as a trigger_if chain for shape consistency with the arms that
+				# do read var: - both tests here are bare presence checks now.
 				# ap_refund exemption below.
 				trigger_if = {
 					limit = { has_variable = uses_weapon }
 					always = yes
 				}
 				trigger_else_if = {
-					limit = { has_variable = pod_combat_ai_bonus_met  has_variable = bonus_effect }
-					var:bonus_effect = flag:uses_weapon
+					limit = { has_variable = pod_combat_ai_bonus_met_uses_weapon }
+					always = yes
 				}
 				trigger_else = { always = no }
 				# A parry that counters (masterful_riposte) carries its damage as
@@ -2350,10 +2409,13 @@ pod_combat_ai_score_candidate_effect = {
 		# the 22 cost 0 AP and are already excluded by the ap_cost > 0 clause, but
 		# time_out_of_time is COSTED (minor) and grants 1, so this guard is what keeps
 		# the arithmetic exact rather than merely redundant.
-		# A bonus_effect = ap_refund whose condition holds right now refunds the same
+		# An ap_refund bonus CLAUSE whose condition holds right now refunds the same
 		# way, so it earns the same exemption - but only while the condition holds,
-		# which is what pod_combat_ai_bonus_met records (refreshed for every bonus
-		# move by pod_combat_ai_precompute_bonus_met_effect just before this walk).
+		# which is what pod_combat_ai_bonus_met_ap_refund records (refreshed for
+		# every clause-bearing move by pod_combat_ai_precompute_bonus_met_effect
+		# just before this walk). Reading the move-level bonus_effect scalar instead
+		# would exempt on a met clause of any other effect and miss a met refund
+		# clause that is not clause 1.
 		if = {
 			limit = {
 				# A move that spends no AP cannot strand any. Explicit rather than relying on
@@ -2362,12 +2424,11 @@ pod_combat_ai_score_candidate_effect = {
 				# does not enforce in either direction.
 				var:ap_cost > 0
 				NOT = { has_variable = ap_gain }
-				# Positive guard around the flag compare: boolean blocks do not
-				# short-circuit, so reading var:bonus_effect unguarded would warn on
-				# every move without one (564 of 570).
+				# A skipped trigger_if reads TRUE inside this AND, so the move keeps
+				# the strand penalty unless the mark is actually present.
 				trigger_if = {
-					limit = { has_variable = pod_combat_ai_bonus_met  has_variable = bonus_effect }
-					NOT = { var:bonus_effect = flag:ap_refund }
+					limit = { has_variable = pod_combat_ai_bonus_met_ap_refund }
+					always = no
 				}
 				var:ap_cost < scope:combat_host.var:pod_combat_session.var:pod_combat_current_ap
 				var:ap_cost > scope:combat_host.var:pod_combat_session.var:pod_combat_ai_ap_strand_floor
@@ -2532,8 +2593,8 @@ pod_combat_ai_score_candidate_effect = {
 		# budget AND improves on any pending drain. No is_ai gate - the player loses a
 		# turn too (only mind control is player-immune).
 		# All three branches read pod_combat_ai_eff_ap_drain where the precompute
-		# wrote one (base + a bonus drain whose condition holds), falling back to the
-		# raw var for the base-only moves it never visits. The threshold is the
+		# wrote one (base + the sum of the met ap_drain clauses), falling back to the
+		# raw var for the clause-less moves it never visits. The threshold is the
 		# per-action projected-cap snapshot, NOT pod_combat_base_ap - the log's stun
 		# wording uses that one and the two must not be conflated.
 		if = {
@@ -3153,9 +3214,11 @@ pod_combat_ai_select_and_execute_move_effect = {
 			# Bonus-condition met-status precompute (before the random_in_list) -
 			# rationale on pod_combat_ai_precompute_bonus_met_effect. (Same shape
 			# as the heal-weight precompute.)
+			# Filtered on the clause list, not cond_mode: a GATE row may carry bonus
+			# clauses too, and the clause list is the only bonus channel now.
 			every_in_list = {
 				variable = pod_combat_loadout
-				limit = { has_variable = cond_mode  var:cond_mode = flag:bonus }
+				limit = { has_variable_list = bonus_clauses }
 				pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
 			}
 
