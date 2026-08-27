@@ -278,12 +278,17 @@ POD_combat_move_set_flag = {
 ###################
 # Mid-combat summon. RECIPE selects the creature-creation recipe dispatched in
 # pod_combat_apply_summon_recipe_effect. Live recipes are wraith, bane,
-# gaian_spirit, and elemental (a Wyrm elemental bane). Author with TARGETING =
-# self and no hp_damage; section 14b of POD_execute_combat_move fires the glue.
+# gaian_spirit, elemental (a Wyrm elemental bane), and controlled_animal.
+# Author with TARGETING = self and no hp_damage; section 14b of
+# POD_execute_combat_move fires the glue.
 # The separate summon_hostile presence flag inverts the destination side.
 POD_combat_move_set_summon = {
 	set_variable = summons_combatant
 	set_variable = { name = summon_recipe value = flag:$RECIPE$ }
+}
+
+POD_combat_move_set_target_filter = {
+	set_variable = { name = target_filter value = flag:$FILTER$ }
 }
 
 
@@ -304,6 +309,20 @@ POD_combat_move_set_marker_modifier = {
 	set_variable = { name = marker_modifier value = flag:$KEY$ }
 }
 
+# Strips a marker character modifier instead of applying one.
+# $KEY$    = a MARKER_MODIFIERS key (combat-owned only - a move must never strip
+#            a PoD-owned modifier such as a shapeshift form or discipline buff,
+#            which is why this list is MARKER_MODIFIERS and not the wider
+#            COND_READABLE_MODIFIERS the has_modifier condition may name).
+# $TARGET$ = user | target. `target` reads the loaded target workspace, so the
+#            move's own targeting decides whether that is an ally or an enemy;
+#            the generator rejects `target` on team targeting because this
+#            writes one workspace side and does not broadcast.
+POD_combat_move_set_remove_marker = {
+	set_variable = { name = remove_marker        value = flag:$KEY$ }
+	set_variable = { name = remove_marker_target value = flag:$TARGET$ }
+}
+
 # Generalized move condition (gate or bonus).
 # $MODE$ = gate | bonus  ;  $TARGET$ = user | target | global | relational
 # $PREDICATE$ = the state predicate (see pod_combat_move_condition_met_trigger)
@@ -317,29 +336,96 @@ POD_combat_move_set_condition = {
 
 # Identifier-predicate param: has_trait -> trait key, target_known_secret ->
 # secret_type. Read by the pod_combat_cond_*_trigger sub-dispatches.
+# Mode-only twin of POD_combat_move_set_condition, for a move whose row-level
+# condition is nothing but the mirror of bonus clause 1. cond_mode is still
+# read on a bonus move by the sheet/compact "if+" glyphs (PODCombatSheetFxCond,
+# PODCombatCLCond) and by the sheet's conditional filter, but cond_target /
+# cond_predicate / cond_threshold / cond_param are not: every reader of those
+# is reached only through cond_mode = flag:gate, and the bonus path evaluates
+# the CLAUSE story instead. Writing them anyway would duplicate clause 1 with
+# no reader and give the two copies room to drift.
+# Display projection for the sheet AP column and the compact line, which are
+# customizable_localization on the MOVE story and cannot index bonus_clauses to
+# fetch a magnitude. Written only when clause 1 grants ap_drain (the generator
+# position-locks that effect to clause 1 for exactly this reason), so the number
+# those two columns print is always the clause they describe. Not gameplay data:
+# execution reads the clause, never this.
+POD_combat_move_set_sheet_ap_drain = {
+	set_variable = { name = sheet_ap_drain value = $VALUE$ }
+}
+
 POD_combat_move_set_cond_param = {
 	set_variable = { name = cond_param value = flag:$PARAM$ }
 }
 
-# Conditional bonus effect (cond_mode = bonus). Evaluated once at execution
-# §2b; a set pod_combat_bonus_active then gates the per-phase bonus apply.
-# $EFFECT$ names the phase-specific conditional primitive POD_execute_combat_move
-# grants; the live set is the bonus_effect branches in
-# pod_combat_move_effects.txt (phase-to-effect map: COMBAT_REFERENCE.info §2b).
-# $VALUE$ = the magnitude.
-POD_combat_move_set_bonus = {
-	set_variable = { name = bonus_effect value = flag:$EFFECT$ }
-	set_variable = { name = bonus_value  value = $VALUE$ }
+
+###################
+###### BONUS-CLAUSE SETTERS
+###################
+# A move may carry N stackable conditional bonuses, each its own condition and
+# its own payload, on top of the single move-level gate the cond_* scalars hold.
+# One clause = one POD_combat_move_clause story carrying the SAME cond_* var
+# names the move-level gate uses, which is what lets
+# pod_combat_move_condition_met_trigger evaluate a clause verbatim with
+# STORY = the clause story. Execution §2b walks the list once and folds every
+# met clause into per-effect fight transients, so same-effect clauses sum and
+# each phase still applies exactly once.
+#
+# Runs in MOVE-story scope, like every other setter here.
+# $TARGET$ = user | target | global | relational
+# $PREDICATE$ = the state predicate (see pod_combat_move_condition_met_trigger)
+# $THRESHOLD$ = the X for value predicates (pass 0 for boolean ones)
+# $EFFECT$ = the bonus primitive (the bonus_effect branches in §2b)
+# $VALUE$ = its magnitude (pass 0 for the magnitude-less effects)
+POD_combat_move_add_bonus_clause = {
+	# Charon owns the clause stories for the same reason he owns the moves.
+	character:POD_wraith_01 = {
+		create_story = {
+			type = POD_combat_move_clause
+			save_scope_as = pod_new_clause
+		}
+	}
+	scope:pod_new_clause = {
+		set_variable = { name = cond_target    value = flag:$TARGET$ }
+		set_variable = { name = cond_predicate value = flag:$PREDICATE$ }
+		set_variable = { name = cond_threshold value = $THRESHOLD$ }
+		set_variable = { name = bonus_effect   value = flag:$EFFECT$ }
+		set_variable = { name = bonus_value    value = $VALUE$ }
+	}
+	# Teardown handle. POD_reload_combat_moves ends the move stories that hold
+	# the bonus_clauses lists, so this global list is the only reference that
+	# still reaches a clause by the time the rebuild needs to end it.
+	add_to_global_variable_list = {
+		name   = POD_combat_move_clauses
+		target = scope:pod_new_clause
+	}
+	add_to_variable_list = {
+		name   = bonus_clauses
+		target = scope:pod_new_clause
+	}
 }
 
-# Element a change_class bonus converts this action's damage to. Separate from
-# POD_combat_move_set_bonus because CK3 macros have no optional arguments, and
-# only one bonus is parameterised; the split mirrors set_condition /
-# set_cond_param. $PARAM$ is one of the ten damage elements (there is no generic
-# "elemental" class - the move names the element). §6 switches on this var in
-# place: copying a flag into a host var would degrade it to a plain value.
-POD_combat_move_set_bonus_param = {
-	set_variable = { name = bonus_param value = flag:$PARAM$ }
+# The three optional clause fields. Separate setters rather than arguments on
+# the add above because CK3 macros have no optional arguments and an empty
+# argument is a parse error; each reads scope:pod_new_clause, so a call must
+# follow its own POD_combat_move_add_bonus_clause immediately.
+
+# Identifier-predicate param, the clause twin of POD_combat_move_set_cond_param.
+POD_combat_move_clause_set_cond_param = {
+	scope:pod_new_clause = { set_variable = { name = cond_param value = flag:$PARAM$ } }
+}
+
+# change_class element. The move-level twin is gone: nothing outside the clause
+# list reads it.
+POD_combat_move_clause_set_bonus_param = {
+	scope:pod_new_clause = { set_variable = { name = bonus_param value = flag:$PARAM$ } }
+}
+
+# hide_condition_if_unfulfilled: the stat card hides this clause's condition
+# line AND its effect line together until the viewer meets the condition, so an
+# unearned rider never advertises itself. Presence var - no value to carry.
+POD_combat_move_clause_set_hide = {
+	scope:pod_new_clause = { set_variable = hide_if_unmet }
 }
 
 
@@ -542,6 +628,14 @@ POD_reload_combat_moves = {
 		# The per-char unlock list holds refs to those same stories.
 		clear_variable_list = pod_combat_unlocked_moves
 	}
+	# Clauses first: ending a move drops the bonus_clauses list that points at
+	# them, so after the moves teardown below nothing could reach a clause story
+	# to end it and the rebuild would leak one per clause per reload.
+	every_in_global_list = {
+		variable = POD_combat_move_clauses
+		end_story = yes
+	}
+	clear_global_variable_list = POD_combat_move_clauses
 	every_in_global_list = {
 		variable = POD_combat_moves
 		end_story = yes

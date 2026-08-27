@@ -4,13 +4,72 @@
 
 ###### CORE COMBAT STATE TRIGGERS ######
 
+# REACH: "a live fight is running, and THIS character can address it." It answers
+# a question about the character's WINDOW and command surface, not about the board.
+#
+# It used to double as "is this character in a fight", on the reasoning that only a
+# participant holds a pointer. That is no longer true: a proxy director holds the
+# pointer so their window binds, while occupying no slot. Busy-gates - launchers,
+# the journey energy lock, anything asking "are you occupied fighting" - must use
+# pod_combat_is_seated_trigger below instead. Sites that ask about the window (the
+# command SGUIs, the loadout editor's collision gate, the auto-resolve readout)
+# stay here, and so does pod_combat_any_fight_active_trigger, which deliberately
+# wants the widest possible answer.
+#
+# The two-level shape is load-bearing, and ?= alone is NOT enough here. In EFFECT
+# context ?= skips the block when the pointer is unset; in TRIGGER context it does
+# not - the link resolves to an empty scope and the inner trigger evaluates
+# against it anyway, which is three errors per call (fetch failed / unset scope /
+# has_variable on an empty scope). This trigger is evaluated constantly OUT of
+# combat by the loadout decision's is_valid, so that fired ~1100 times in one
+# session. has_variable on a character never errors, so it is what must come
+# first; the inner ?= then covers a pointer left at an ended story.
 pod_combat_is_active_trigger = {
-	has_variable = pod_combat_active
+	trigger_if = {
+		limit = { has_variable = pod_combat_session }
+		var:pod_combat_session ?= { has_variable = pod_combat_active }
+	}
+	trigger_else = { always = no }
+}
+
+# SEAT: "this character OCCUPIES a slot in a live fight." The busy question, as
+# opposed to pod_combat_is_active_trigger's reach question.
+#
+# SEAT is a strict subset of REACH by construction - every combatant is granted the
+# session pointer as it is seated (pod_combat_set_slot_char_effect) - so the roster
+# walk can start from the asker's own pointer: a seated character reaches the fight
+# and finds itself; a director reaches the fight and finds nothing; a character with
+# no pointer never enters the walk at all.
+#
+# save_temporary_scope_as first because any_in_list flips the scope to each slot
+# story, and a bare `this` inside would compare the SLOT against the character. Same
+# reason as pod_combat_current_actor_is_down_trigger; the match idiom itself is
+# pod_combat_actor_has_used_move_trigger's.
+#
+# has_variable before the ?=, for the reason spelled out above: in TRIGGER context
+# ?= does not skip, it evaluates against an empty scope and logs.
+pod_combat_is_seated_trigger = {
+	save_temporary_scope_as = pod_seat_asker
+	trigger_if = {
+		limit = { has_variable = pod_combat_session }
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				var:slot_char ?= { this = scope:pod_seat_asker }
+			}
+		}
+	}
+	trigger_else = { always = no }
 }
 
 pod_combat_is_over_trigger = {
-	# Authoritative end flag - set by pod_combat_check_group_victory_effect; all combats route through it.
-	has_variable = pod_combat_is_over
+	# Authoritative end flag - set by pod_combat_check_group_victory_effect; all
+	# combats route through it. Same two-level shape as is_active above.
+	trigger_if = {
+		limit = { has_variable = pod_combat_session }
+		var:pod_combat_session ?= { has_variable = pod_combat_is_over }
+	}
+	trigger_else = { always = no }
 }
 
 # Does the shell card being clicked belong to the fight that is running now?
@@ -26,62 +85,220 @@ pod_combat_is_over_trigger = {
 # principals would still match, but that needs the same pair duelling twice
 # with a card orphaned between, and orphaning requires the host to have died.
 pod_combat_shell_owns_live_fight_trigger = {
-	has_variable = pod_combat_active
-	has_variable = pod_combat_sc_context
 	exists = scope:sc_attacker
 	exists = scope:sc_defender
-	var:pod_combat_sc_context = {
+	# One ?= covering liveness AND identity. A separate has_variable sibling would
+	# be no guard at all (sibling triggers do not short-circuit), and the deref is
+	# genuinely reachable with the pointer dangling - this evaluates from the shell
+	# card's option, and the card described above can outlive its fight.
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_active
 		var:attacker = scope:sc_attacker
 		var:defender = scope:sc_defender
 	}
 }
 
-pod_combat_is_player_turn_trigger = {
-	# PC is the current actor specifically, not just the player team's turn - ally AI shares the team side.
-	has_variable = pod_combat_current_actor_team
-	var:pod_combat_current_actor_team = flag:player
-	var:pod_combat_current_actor_position = 0
+# ENGINE-tier control gate: does the slot seated at the current-actor pointers
+# carry a human controller? Walks the roster, so it belongs at the turn-engine
+# decision points (once per turn advance) - NOT on the per-frame GUI path, which
+# reads the hand-off latch through pod_combat_is_player_turn_trigger instead.
+#
+# Substrate: exactly one slot is marked (the PC's, at finalize), so this answers
+# identically to the player/0 literal pair it replaces.
+#
+# trigger_if rather than a leading sibling: the matcher's pointer derefs must not
+# evaluate with current_actor unset, and sibling triggers do not short-circuit.
+# Same shape as pod_combat_slot_is_current_actor_trigger.
+pod_combat_current_actor_is_controlled_trigger = {
+	save_temporary_scope_as = pod_cac_host
+	trigger_if = {
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				var:combat_team = scope:pod_cac_host.var:pod_combat_session.var:pod_combat_current_actor_team
+				var:team_position = scope:pod_cac_host.var:pod_combat_session.var:pod_combat_current_actor_position
+				has_variable = slot_human_controller
+			}
+		}
+	}
+	trigger_else = { always = no }
 }
 
-# Gates the mid-step Advance entry point. Advanceable
-# iff combat is live, not over, an actor is pending, and that actor is NOT the PC
-# (any AI, including an ally AI at player-team position > 0). Host (PC) scope.
-# The NOR wraps the single PC-match AND: a multi-child NOT would parse as an
-# OR-of-children, so the team+position pair must sit inside one AND under NOR.
-pod_combat_can_advance_trigger = {
-	pod_combat_is_active_trigger = yes
-	NOT = { has_variable = pod_combat_is_over }
-	has_variable = pod_combat_current_actor_team
-	NOR = {
-		AND = {
-			var:pod_combat_current_actor_team = flag:player
-			var:pod_combat_current_actor_position = 0
-		}
+# MODE, not authority: "a human is driving the current actor", as opposed to an
+# AI. It says nothing about WHICH human, and it must stay that way - under
+# player-controlled clones and proxy fights the driver is not the actor and may
+# not even be on the board, so narrowing this to an owner would break exactly the
+# cases the control marker exists to enable. Its readers are the move-execution
+# gates, which ask "is this a human-driven action" to decide whether to consult
+# the human's standing target and stance surfaces at all.
+#
+# For "is it MY turn" - the question a command button must ask - use
+# pod_combat_is_my_turn_trigger below.
+#
+#
+# Between turns, during AI turns and out of combat the latch is absent, so this
+# reads false - the same envelope the player/0 literal pair had. Deliberately a
+# lone has_variable behind the ?=: a chained deref of the slot would evaluate
+# against an empty scope in trigger context whenever the latch is down, which is
+# the normal state for most of a fight.
+pod_combat_is_player_turn_trigger = {
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_control_turn_live
 	}
 }
 
-# True once the PC has committed its turn this round
-# (the prologue in process_group_turns set the PC slot's slot_has_acted). Routes
-# pod_combat_advance_turn between the in-round settle (PC already acted -> draining
-# post-PC AI) and the pre-PC settle (PC not yet acted -> combat-start/round-start
-# sequence). Host (PC) scope; pod_combat_pc_slot is the player/0 slot story.
+# AUTHORITY: "is the live controlled turn MINE". Root is the asking character -
+# in a scripted_gui that is the clicking client, which is the only place CK3 lets
+# script see which human is acting.
+#
+# Identical to the mode gate while exactly one slot is marked, which is why this
+# ships as a pure rename of intent. It becomes load-bearing the moment a second
+# human is seated: the latch alone is unqualified, so without the ownership test
+# every client passes is_valid during another player's turn and their click
+# resolves that turn out of the wrong slot, with the wrong loadout and AP.
+#
+# Deliberately NOT used by the engine. Turn flow must stay client-agnostic or it
+# becomes client-dependent, which is an OOS hazard - the engine asks the roster
+# (pod_combat_current_actor_is_controlled_trigger), only the command surface asks
+# who is clicking.
+pod_combat_is_my_turn_trigger = {
+	save_temporary_scope_as = pod_my_turn_asker
+	trigger_if = {
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_control_turn_live } }
+		var:pod_combat_session.var:pod_combat_active_control_slot ?= {
+			var:slot_human_controller = scope:pod_my_turn_asker
+		}
+	}
+	trigger_else = { always = no }
+}
+
+# The BODY whose controlled turn is live right now, as opposed to whoever is
+# clicking - which is what pod_combat_is_my_turn_trigger next door asks. The two
+# separate in a proxy duel, where a director drives a slot it does not occupy, and
+# a form change belongs to the body that changed shape. Character scope.
+#
+# Gating on the latch alone is enough: pod_combat_active_control_slot is written in
+# the same statement pair as pod_combat_control_turn_live and outlives it (the
+# display pointer deliberately survives the commit), so the latch is the narrower test.
+pod_combat_char_is_live_control_actor_trigger = {
+	save_temporary_scope_as = pod_control_actor_asker
+	trigger_if = {
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_control_turn_live } }
+		var:pod_combat_session.var:pod_combat_active_control_slot ?= {
+			var:slot_char = { this = scope:pod_control_actor_asker }
+		}
+	}
+	trigger_else = { always = no }
+}
+
+# Gates the mid-step Advance entry point. Advanceable iff combat is live, not
+# over, an actor is pending, and that turn is NOT handed to the player (any
+# uncontrolled actor, including an ally AI at player-team position > 0). Host
+# (PC) scope. It backs the Advance button's enabled state every frame, and 
+# the latch is authoritative for "handed # to the player", so no roster walk 
+# is needed here.
+pod_combat_can_advance_trigger = {
+	pod_combat_is_active_trigger = yes
+	NOT = { pod_combat_is_over_trigger = yes }
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_current_actor_team
+		NOT = { has_variable = pod_combat_control_turn_live }
+	}
+}
+
+# True once EVERY controlled slot that could still act this round has acted.
+# Routes pod_combat_advance_turn between the in-round settle (already committed
+# -> draining the rest of the AI) and the pre-PC settle (still owed a turn ->
+# combat-start / round-start sequence). Host scope.
+#
+# A quantifier over the roster rather than a read of one slot, so a second
+# controlled slot cannot have the round settle out from under it. Identical to
+# the single-slot read while exactly one slot is marked.
+#
+# "Could still act" is why the alive gate is here and not just has_acted:
+# pod_combat_calculate_initiative_effect resets slot_has_acted for ALIVE slots
+# only, so a controlled slot knocked out before it acted keeps has_acted = 0 for
+# the rest of the fight. Asking only has_acted would pin this false forever and
+# strand the router in its pre-PC branch.
 pod_combat_pc_has_acted_this_round_trigger = {
-	has_variable = pod_combat_pc_slot
-	var:pod_combat_pc_slot = { var:slot_has_acted = 1 }
+	save_temporary_scope_as = pod_has_acted_host
+	trigger_if = {
+		limit = { has_variable = pod_combat_session }
+		var:pod_combat_session ?= {
+			NOT = {
+				any_in_list = {
+					variable = pod_combat_active_slots
+					has_variable = slot_human_controller
+					pod_combat_slot_is_alive_trigger = yes
+					pod_combat_slot_has_not_acted_trigger = yes
+				}
+			}
+		}
+	}
+	trigger_else = { always = no }
+}
+
+###### DUEL RULE: SUMMONING ######
+# Optional per-fight rule. A duel launched after POD_combat_ban_duel_summons_effect
+# bars every summons_combatant move for BOTH sides; event-driven arrivals
+# (pod_combat_add_*_midfight_effect, scheduled reinforcements) are untouched, since
+# the rule is about what a combatant may do, not who may enter.
+#
+# The rule lives on the fight story as var:summons - flag:allowed by default,
+# flag:banned when barred - written by the duel builder from flag LITERALS, because
+# a flag copied through a value read degrades to plain 'value' and every later
+# comparison becomes a silently-skipped type error.
+#
+# Three entry points because the readers sit in three different ambient scopes: the
+# fight story, a participant character (the move gates run on the combat host), and
+# a slot story (the auto-resolve spirit verdict, which reaches the fight through the
+# slot's own back-pointer var:fight).
+
+pod_combat_fight_bans_summons_trigger = {
+	# Fight-story scope.
+	trigger_if = {
+		limit = { has_variable = summons }
+		var:summons = flag:banned
+	}
+	# Fail-open. A fight seated without the builder, or a tooltip build with no
+	# fight at all, allows summoning.
+	trigger_else = { always = no }
+}
+
+pod_combat_duel_bans_summons_trigger = {
+	# Participant-character scope. has_variable first, then the ?=: in TRIGGER
+	# context ?= does not skip an unset pointer, it evaluates against an empty
+	# scope (see pod_combat_is_active_trigger).
+	trigger_if = {
+		limit = { has_variable = pod_combat_session }
+		var:pod_combat_session ?= { pod_combat_fight_bans_summons_trigger = yes }
+	}
+	trigger_else = { always = no }
+}
+
+pod_combat_slot_summons_allowed_trigger = {
+	# Slot-story scope, phrased positively for the one caller that needs it that
+	# way (the spirit-answer arm below).
+	trigger_if = {
+		limit = { has_variable = fight }
+		NOT = { var:fight ?= { pod_combat_fight_bans_summons_trigger = yes } }
+	}
+	trigger_else = { always = yes }
 }
 
 ###### FLAVORIZATION ######
 
 pod_combat_has_custom_title = {
-	var:pod_combat_sc_context ?= { has_variable = custom_title }
+	var:pod_combat_session ?= { has_variable = custom_title }
 }
 
 pod_combat_has_custom_player_team_name = {
-	var:pod_combat_sc_context ?= { has_variable = player_team_name }
+	var:pod_combat_session ?= { has_variable = player_team_name }
 }
 
 pod_combat_has_custom_enemy_team_name = {
-	var:pod_combat_sc_context ?= { has_variable = enemy_team_name }
+	var:pod_combat_session ?= { has_variable = enemy_team_name }
 }
 
 ###### AP AFFORDABILITY TRIGGER ######
@@ -109,6 +326,38 @@ pod_combat_no_moves_equipped_trigger = {
 	pod_combat_equipped_count = 0
 }
 
+# Equip-capacity predicates, character (PC) scope. Shared by the click gate
+# (pod_combat_loadout_toggle), the row-enabled gate (pod_combat_loadout_room) and
+# the reason text (pod_combat_loadout_block_tt), all in pod_combat_skill_guis.txt,
+# so a greyed row and its tooltip cannot disagree about which cap is full.
+# The counts are cached vars refreshed by pod_combat_refresh_loadout_counts_effect
+# while the editor is open, so these stay O(1) on the per-row per-frame path.
+# LOCKSTEP: the skills-window pip strips bake fixed pip counts, so retuning
+# pod_combat_max_per_category / pod_combat_max_equipped means editing those GUI
+# literals too.
+pod_combat_atk_slots_free_trigger = {
+	pod_combat_atk_count < pod_combat_max_per_category
+}
+
+pod_combat_def_slots_free_trigger = {
+	pod_combat_def_count < pod_combat_max_per_category
+}
+
+pod_combat_ctl_slots_free_trigger = {
+	pod_combat_ctl_count < pod_combat_max_per_category
+}
+
+pod_combat_pwr_slots_free_trigger = {
+	pod_combat_pwr_count < pod_combat_max_per_category
+}
+
+# The TOTAL equipped cap, independent of the per-category caps. Redundant today
+# (4 x 4 = 16 == total), but a backstop if the caps are retuned so the categories
+# no longer sum to pod_combat_max_equipped.
+pod_combat_loadout_room_left_trigger = {
+	pod_combat_equipped_count < pod_combat_max_equipped
+}
+
 ###### AI SELECTOR HELPER TRIGGERS ######
 # Host-scope one-liners named for what they mean rather than what they compare, so
 # the rationale lives once instead of being restated at every reader. Read by the
@@ -121,14 +370,42 @@ pod_combat_ai_actor_is_wounded_trigger = {
 	pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
 }
 
-# The loaded target is an AI (players are immune to mind control and never
-# waste-gate). Host scope. The presence check must GATE the deref from a
-# trigger_if limit: as a plain sibling it still returns the right boolean, but
-# the deref evaluates anyway (no short-circuit) and errors with no target loaded.
-pod_combat_ai_target_is_ai_trigger = {
+# The loaded target can be dominated: an AI body that no human is DRIVING. Host
+# scope. Read by the resolver's landing gate and by both AI mind-control gates.
+#
+# Both terms are load-bearing and neither replaces the other.
+#   is_ai alone was the old test, and it stops being sufficient the moment a
+#     human drives an AI-flagged body (a clone, a proxy, an ally in a
+#     fully-controlled team). The seize would land, and slot_controlled is only
+#     ever consumed by pod_combat_execute_ai_turn_effect - which a controlled
+#     slot never enters - so the marker is never cleared: the Dominated badge
+#     burns for the rest of the fight while the player keeps playing the body
+#     normally, and the AI thereafter refuses control moves against it forever.
+#   The seat test alone would be worse. An is_ai = no character sitting in an
+#     UNMARKED slot would become seizable, and since the turn engine now guards
+#     on the marker rather than on is_ai, the enemy would genuinely puppet a
+#     player character.
+#
+# The presence check must GATE the deref from a trigger_if limit: as a plain
+# sibling it still returns the right boolean, but the deref evaluates anyway (no
+# short-circuit) and errors with no target loaded. The host save is at the top
+# for the same reason it is in pod_combat_current_actor_is_controlled_trigger:
+# any_in_list flips the scope to each slot story, so the target has to be reached
+# by an absolute chain from a scope saved before the walk.
+pod_combat_target_is_dominatable_trigger = {
+	save_temporary_scope_as = pod_dom_host
 	trigger_if = {
-		limit = { has_variable = pod_combat_target_char }
-		var:pod_combat_target_char = { is_ai = yes }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+		var:pod_combat_session ?= { var:pod_combat_target_char = { is_ai = yes } }
+		NOT = {
+			var:pod_combat_session ?= {
+				any_in_list = {
+					variable = pod_combat_active_slots
+					has_variable = slot_human_controller
+					var:slot_char ?= { this = scope:pod_dom_host.var:pod_combat_session.var:pod_combat_target_char }
+				}
+			}
+		}
 	}
 	trigger_else = { always = no }
 }
@@ -153,22 +430,22 @@ pod_combat_ai_target_is_ai_trigger = {
 # precompute, so they read bare.
 
 pod_combat_ai_mind_control_is_useful_trigger = {
-	# A player can never be dominated, and neither can a mentally-defended target
-	# this caster cannot bypass.
-	pod_combat_ai_target_is_ai_trigger = yes
+	# A player-driven body can never be dominated, and neither can a
+	# mentally-defended target this caster cannot bypass.
+	pod_combat_target_is_dominatable_trigger = yes
 	# Nested so the target_char deref runs only once the mirror is known to
 	# exist: a has_variable in the SAME limit would not stop it.
 	trigger_if = {
-		limit = { has_variable = pod_combat_target_char }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
 		trigger_if = {
-			limit = { var:pod_combat_target_char = { POD_has_strong_mental_defenses_trigger = yes } }
+			limit = { var:pod_combat_session.var:pod_combat_target_char = { POD_has_strong_mental_defenses_trigger = yes } }
 			scope:ai_actor = { can_bypass_mental_defenses_trigger = yes }
 		}
 	}
 	# Re-dominating an already-dominated target changes nothing.
 	trigger_if = {
 		limit = { $STORY$ = { NOR = { has_variable = hp_damage  has_variable = morale_damage  has_variable = dot_amount  has_variable = initiative_debuff  has_variable = ap_drain  has_variable = remove_guard  has_variable = soak_debuff_round_tier  has_variable = soak_debuff_combat_tier  has_variable = hit_debuff_round_tier  has_variable = hit_debuff_combat_tier } } }
-		NOT = { var:pod_combat_ai_tgt_controlled = 1 }
+		NOT = { var:pod_combat_session ?= { var:pod_combat_ai_tgt_controlled = 1 } }
 	}
 }
 
@@ -176,7 +453,7 @@ pod_combat_ai_ap_drain_is_useful_trigger = {
 	# A drain no deeper than the one already pending takes nothing further.
 	trigger_if = {
 		limit = { $STORY$ = { NOR = { has_variable = hp_damage  has_variable = morale_damage  has_variable = dot_amount  has_variable = initiative_debuff  has_variable = mind_control  has_variable = remove_guard  has_variable = soak_debuff_round_tier  has_variable = soak_debuff_combat_tier  has_variable = hit_debuff_round_tier  has_variable = hit_debuff_combat_tier } } }
-		var:pod_combat_ai_tgt_ap_drain < $STORY$.var:ap_drain
+		var:pod_combat_session ?= { var:pod_combat_ai_tgt_ap_drain < $STORY$.var:ap_drain }
 	}
 }
 
@@ -236,7 +513,7 @@ pod_combat_ai_move_admissible_trigger = {
 	# zero-AP acceleration, wrong-side AoE, and ally support in
 	# one clause, and keeps the no-control-re-propagation rule.
 	trigger_if = {
-		limit = { has_variable = pod_combat_turn_is_controlled }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_turn_is_controlled } }
 		scope:ai_candidate_move = { var:targeting = flag:single_enemy }
 		scope:ai_candidate_move = {
 			OR = {
@@ -306,14 +583,14 @@ pod_combat_ai_move_admissible_trigger = {
 			# (1 = morale), always written by the precompute, so it reads bare.
 			AND = {
 				scope:ai_candidate_move = { has_variable = dot_morale }
-				var:pod_combat_ai_tgt_dot_morale = 0
+				var:pod_combat_session ?= { var:pod_combat_ai_tgt_dot_morale = 0 }
 			}
 			AND = {
 				scope:ai_candidate_move = { NOT = { has_variable = dot_morale } }
-				var:pod_combat_ai_tgt_dot_morale = 1
+				var:pod_combat_session ?= { var:pod_combat_ai_tgt_dot_morale = 1 }
 			}
-			var:pod_combat_ai_tgt_dot_amount < scope:ai_candidate_move.var:dot_amount
-			var:pod_combat_ai_tgt_dot_rounds < scope:ai_candidate_move.var:dot_rounds
+			var:pod_combat_session ?= { var:pod_combat_ai_tgt_dot_amount < scope:ai_candidate_move.var:dot_amount }
+			var:pod_combat_session ?= { var:pod_combat_ai_tgt_dot_rounds < scope:ai_candidate_move.var:dot_rounds }
 		}
 	}
 
@@ -364,10 +641,18 @@ pod_combat_ai_move_admissible_trigger = {
 				}
 				pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
 			}
-			# Morale heal - useful below cap.
+			# Morale heal - useful below cap. Dotted rather than wrapped: see the
+			# twin in pod_combat_move_execution_triggers.txt - wrapping would put
+			# the host-anchored max SV in fight scope and collapse it to the base
+			# cap. Presence-guarded like that twin, since the workspace mirror is
+			# unset before this fight's first load_workspace.
 			AND = {
 				scope:ai_candidate_move = { has_variable = morale_heal }
-				var:pod_combat_actor_morale < pod_combat_actor_max_morale_value
+				trigger_if = {
+					limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_morale } }
+					var:pod_combat_session.var:pod_combat_actor_morale < pod_combat_actor_max_morale_value
+				}
+				trigger_else = { always = no }
 			}
 		}
 	}
@@ -424,7 +709,7 @@ pod_combat_ai_move_admissible_trigger = {
 	# restrict. A stolen turn is already hard-gated to single-target
 	# offense above, and none is the lock fallback and the escape branch.
 	trigger_if = {
-		limit = { var:pod_combat_ai_intent = flag:pressure }
+		limit = { var:pod_combat_session ?= { var:pod_combat_ai_intent = flag:pressure } }
 		scope:ai_candidate_move = {
 			OR = {
 				var:ap_cost = 0
@@ -438,7 +723,7 @@ pod_combat_ai_move_admissible_trigger = {
 		}
 	}
 	trigger_else_if = {
-		limit = { var:pod_combat_ai_intent = flag:break }
+		limit = { var:pod_combat_session ?= { var:pod_combat_ai_intent = flag:break } }
 		scope:ai_candidate_move = {
 			OR = {
 				var:ap_cost = 0
@@ -451,7 +736,7 @@ pod_combat_ai_move_admissible_trigger = {
 		}
 	}
 	trigger_else_if = {
-		limit = { var:pod_combat_ai_intent = flag:setup }
+		limit = { var:pod_combat_session ?= { var:pod_combat_ai_intent = flag:setup } }
 		scope:ai_candidate_move = {
 			OR = {
 				var:ap_cost = 0
@@ -473,15 +758,16 @@ pod_combat_ai_move_admissible_trigger = {
 				has_variable = summons_combatant
 				has_variable = steal_gold
 				has_variable = gain_dread
-				has_variable = bonus_effect
+				has_variable_list = bonus_clauses
 				has_variable = marker_modifier
+				has_variable = remove_marker
 				has_variable = retaliate_damage
 				has_variable = retaliate_morale
 			}
 		}
 	}
 	trigger_else_if = {
-		limit = { var:pod_combat_ai_intent = flag:stabilize }
+		limit = { var:pod_combat_session ?= { var:pod_combat_ai_intent = flag:stabilize } }
 		scope:ai_candidate_move = {
 			OR = {
 				var:ap_cost = 0
@@ -529,23 +815,57 @@ pod_combat_move_targets_ally_trigger = {
 	}
 }
 
+# $STORY$ = a single-ally move; $SLOT$ = a candidate ally slot. The AI chooses
+# its ally after choosing a move, so target-side gates must be evaluated against
+# each candidate instead of the still-loaded enemy workspace. Add explicit
+# predicate cases here as AI-authored single-ally target gates are introduced;
+# an unknown target predicate fails closed rather than buffing the wrong ally.
+pod_combat_slot_meets_single_ally_target_gate_trigger = {
+	trigger_if = {
+		limit = {
+			$STORY$ = {
+				has_variable = cond_mode
+				var:cond_mode = flag:gate
+				has_variable = cond_target
+				var:cond_target = flag:target
+				has_variable = cond_predicate
+			}
+		}
+		switch = {
+			trigger = $STORY$.var:cond_predicate
+			flag:has_modifier = {
+				$SLOT$ = {
+					has_variable = slot_char
+					var:slot_char ?= { pod_combat_cond_has_modifier_trigger = { STORY = $STORY$ } }
+				}
+			}
+			fallback = { always = no }
+		}
+	}
+	trigger_else = { always = yes }
+}
+
 ###### TEAM-ALIVE TRIGGERS ######
 
 pod_combat_ai_has_available_ally_trigger = {
-	# Actor has an alive non-self same-team ally - gates single_ally moves out of the AI pool when none exists.
+	# $STORY$ = the single_ally move. Actor has an alive non-self same-team
+	# recipient that also satisfies any authored target-side condition gate.
 	# save_temporary_scope_as captures the host BEFORE any_in_list flips scope to per-slot, so the body
 	# can reach back via scope:host for the actor's team/position. (KO'd slots linger in the list, hence the explicit alive filter.)
 	save_temporary_scope_as = host
-	any_in_list = {
-		variable = pod_combat_active_slots
-		pod_combat_slot_is_alive_trigger = yes
-		NOT = {
-			AND = {
-				var:combat_team = scope:host.var:pod_combat_current_actor_team
-				var:team_position = scope:host.var:pod_combat_current_actor_position
+	scope:host.var:pod_combat_session ?= {
+		any_in_list = {
+			variable = pod_combat_active_slots
+			pod_combat_slot_is_alive_trigger = yes
+			NOT = {
+				AND = {
+					var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+					var:team_position = scope:host.var:pod_combat_session.var:pod_combat_current_actor_position
+				}
 			}
+			var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+			pod_combat_slot_meets_single_ally_target_gate_trigger = { STORY = $STORY$ SLOT = this }
 		}
-		var:combat_team = scope:host.var:pod_combat_current_actor_team
 	}
 }
 
@@ -559,11 +879,13 @@ pod_combat_ai_has_team_member_needing_heal_trigger = {
 	# (SLOT = this, the per-slot iteration scope) so the keep stays in lockstep with
 	# the runtime team-ally admit. scope:host capture mirrors the sibling trigger above.
 	save_temporary_scope_as = host
-	any_in_list = {
-		variable = pod_combat_active_slots
-		pod_combat_slot_is_alive_trigger = yes
-		var:combat_team = scope:host.var:pod_combat_current_actor_team
-		pod_combat_slot_heal_is_useful_trigger = { SLOT = this STORY = $STORY$ }
+	scope:host.var:pod_combat_session ?= {
+		any_in_list = {
+			variable = pod_combat_active_slots
+			pod_combat_slot_is_alive_trigger = yes
+			var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+			pod_combat_slot_heal_is_useful_trigger = { SLOT = this STORY = $STORY$ }
+		}
 	}
 }
 
@@ -630,8 +952,8 @@ pod_combat_slot_can_benefit_from_move_trigger = {
 # Nested so the slot_char deref only runs once the pointer is known to exist.
 pod_combat_pc_slot_is_loadable_trigger = {
 	trigger_if = {
-		limit = { has_variable = pod_combat_pc_slot }
-		var:pod_combat_pc_slot = { has_variable = slot_char }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_pc_slot } }
+		var:pod_combat_session.var:pod_combat_pc_slot ?= { has_variable = slot_char }
 	}
 	trigger_else = { always = no }
 }
@@ -652,6 +974,7 @@ pod_combat_summon_recipe_is_known_trigger = {
 				var:summon_recipe = flag:bane
 				var:summon_recipe = flag:gaian_spirit
 				var:summon_recipe = flag:elemental
+				var:summon_recipe = flag:controlled_animal
 			}
 		}
 	}
@@ -663,15 +986,18 @@ pod_combat_summon_recipe_is_known_trigger = {
 # supported combat primitive.
 pod_combat_summon_destination_is_player_team_trigger = {
 	trigger_if = {
-		limit = { has_variable = pod_combat_current_actor_team }
-		OR = {
-			AND = {
-				var:pod_combat_current_actor_team = flag:player
-				NOT = { $MOVE_STORY$ = { has_variable = summon_hostile } }
-			}
-			AND = {
-				var:pod_combat_current_actor_team = flag:enemy
-				$MOVE_STORY$ = { has_variable = summon_hostile }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		# $MOVE_STORY$ is an absolute scope, so it still resolves from in here.
+		var:pod_combat_session ?= {
+			OR = {
+				AND = {
+					var:pod_combat_current_actor_team = flag:player
+					NOT = { $MOVE_STORY$ = { has_variable = summon_hostile } }
+				}
+				AND = {
+					var:pod_combat_current_actor_team = flag:enemy
+					$MOVE_STORY$ = { has_variable = summon_hostile }
+				}
 			}
 		}
 	}
@@ -680,15 +1006,17 @@ pod_combat_summon_destination_is_player_team_trigger = {
 
 pod_combat_summon_destination_is_enemy_team_trigger = {
 	trigger_if = {
-		limit = { has_variable = pod_combat_current_actor_team }
-		OR = {
-			AND = {
-				var:pod_combat_current_actor_team = flag:enemy
-				NOT = { $MOVE_STORY$ = { has_variable = summon_hostile } }
-			}
-			AND = {
-				var:pod_combat_current_actor_team = flag:player
-				$MOVE_STORY$ = { has_variable = summon_hostile }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		var:pod_combat_session ?= {
+			OR = {
+				AND = {
+					var:pod_combat_current_actor_team = flag:enemy
+					NOT = { $MOVE_STORY$ = { has_variable = summon_hostile } }
+				}
+				AND = {
+					var:pod_combat_current_actor_team = flag:player
+					$MOVE_STORY$ = { has_variable = summon_hostile }
+				}
 			}
 		}
 	}
@@ -700,16 +1028,19 @@ pod_combat_summon_destination_is_enemy_team_trigger = {
 pod_combat_ai_has_ally_benefiting_trigger = {
 	# Fail closed in the between-rounds window when the actor pointer is briefly
 	# unset (the combat window still re-evals the PC move bar is_valid then); the
-	# any_in_list body reads scope:host.var:pod_combat_current_actor_team unguarded.
+	# any_in_list body reads the current actor unguarded.
 	trigger_if = {
-		limit = { has_variable = pod_combat_current_actor_team }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
 		save_temporary_scope_as = host
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_alive_trigger = yes
-			NOT = { AND = { var:combat_team = scope:host.var:pod_combat_current_actor_team  var:team_position = scope:host.var:pod_combat_current_actor_position } }
-			var:combat_team = scope:host.var:pod_combat_current_actor_team
-			pod_combat_slot_can_benefit_from_move_trigger = { SLOT = this STORY = $STORY$ }
+		scope:host.var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				NOT = { AND = { var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team  var:team_position = scope:host.var:pod_combat_session.var:pod_combat_current_actor_position } }
+				var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+				pod_combat_slot_meets_single_ally_target_gate_trigger = { STORY = $STORY$ SLOT = this }
+				pod_combat_slot_can_benefit_from_move_trigger = { SLOT = this STORY = $STORY$ }
+			}
 		}
 	}
 	trigger_else = { always = no }
@@ -749,11 +1080,37 @@ pod_combat_slot_is_ko_trigger = {
 	var:slot_alive = 0
 }
 
+# Host/client scope, NOT slot scope: is the body this client is driving down?
+# Shared by pod_combat_execute_move's command gate and the tooltip line that
+# voices it (pod_combat_move_usability_tt), both in pod_combat_skill_guis.txt.
+# The ?= deref is the guard - a client with no control slot reads as "not down".
+pod_combat_my_slot_is_ko_trigger = {
+	var:pod_combat_my_control_slot ?= { pod_combat_slot_is_ko_trigger = yes }
+}
+
 pod_combat_slot_char_is_alive_trigger = {
 	# Slot-scoped. The CHARACTER seated here is a live person - distinct from
 	# pod_combat_slot_is_alive_trigger (the in-combat KO flag), which reads 0 for a
 	# wound-track-full survivor in a non-fatal duel even though the char still lives.
 	var:slot_char = { is_alive = yes }
+}
+
+pod_combat_slot_char_is_summon_trigger = {
+	# Slot-scoped. Was this seat filled by a mid-fight summon? Cleanup despawns
+	# those as death_disappearance, so the end-of-fight death sweep
+	# (pod_combat_resolve_suppressed_deaths_effect) must skip them - a real death
+	# would leave behind the corpse the fight is supposed to erase.
+	# Reached through the slot's own fight back-pointer so the trigger stays
+	# callable from a bare slot scope; prev inside the block is this slot.
+	# has_variable first, then the ?=, matching pod_combat_slot_summons_allowed_trigger:
+	# in TRIGGER context ?= does not skip an unset pointer, it evaluates against an
+	# empty scope. The registry list itself needs no guard - is_target_in_variable_list
+	# on a never-created list reads as "not present", which is the right answer.
+	trigger_if = {
+		limit = { has_variable = fight }
+		var:fight ?= { is_target_in_variable_list = { name = pod_combat_summoned_chars target = prev.var:slot_char } }
+	}
+	trigger_else = { always = no }
 }
 
 pod_combat_current_actor_is_down_trigger = {
@@ -764,36 +1121,45 @@ pod_combat_current_actor_is_down_trigger = {
 	# AP / is_over and kept spending a downed actor's remaining actions.
 	# Fails open (no) when no actor is stamped; the loop's own gates still apply.
 	trigger_if = {
-		limit = { has_variable = pod_combat_actor_char }
+		limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_char } }
 		# Scope-save the char pointer: a host-var deref does not survive the
 		# any_in_list scope flip to the slot stories.
-		var:pod_combat_actor_char = { save_temporary_scope_as = pod_combat_loop_actor }
+		var:pod_combat_session ?= { var:pod_combat_actor_char = { save_temporary_scope_as = pod_combat_loop_actor } }
 		OR = {
 			NOT = { scope:pod_combat_loop_actor = { is_alive = yes } }
-			any_in_list = {
-				variable = pod_combat_active_slots
-				var:slot_char = { this = scope:pod_combat_loop_actor }
-				pod_combat_slot_is_ko_trigger = yes
+			var:pod_combat_session ?= {
+				any_in_list = {
+					variable = pod_combat_active_slots
+					var:slot_char = { this = scope:pod_combat_loop_actor }
+					pod_combat_slot_is_ko_trigger = yes
+				}
 			}
 		}
 	}
 	trigger_else = { always = no }
 }
 
-# This slot seats the CURRENT ACTOR / the PC's SELECTED TARGET (the host's
-# turn / target pointers). Callers save the host as scope:host before
-# iterating (the standing idiom); the has_variable guard makes tooltip-build
-# and between-turns evaluations fail closed instead of erroring.
+# This slot seats the CURRENT ACTOR / the PC's SELECTED TARGET (the fight's turn
+# pointer / the host's target pointers). Callers save the host as scope:host
+# before iterating (the standing idiom).
+#
+# trigger_if rather than a leading sibling guard: several of the seven callers
+# run outside any fight block, and a sibling has_variable would not stop the
+# derefs below it from evaluating. trigger_else preserves the documented
+# fail-closed behaviour for tooltip-build and between-turns evaluations.
 pod_combat_slot_is_current_actor_trigger = {
-	scope:host = { has_variable = pod_combat_current_actor_team }
-	var:combat_team = scope:host.var:pod_combat_current_actor_team
-	var:team_position = scope:host.var:pod_combat_current_actor_position
+	trigger_if = {
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+		var:team_position = scope:host.var:pod_combat_session.var:pod_combat_current_actor_position
+	}
+	trigger_else = { always = no }
 }
 
 pod_combat_slot_is_selected_target_trigger = {
-	scope:host = { has_variable = pod_combat_selected_target_team }
-	var:combat_team = scope:host.var:pod_combat_selected_target_team
-	var:team_position = scope:host.var:pod_combat_selected_target_position
+	scope:host.var:pod_combat_session ?= { has_variable = pod_combat_selected_target_team }
+	var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_selected_target_team
+	var:team_position = scope:host.var:pod_combat_session.var:pod_combat_selected_target_position
 }
 
 pod_combat_slot_is_enemy_trigger = {
@@ -805,6 +1171,19 @@ pod_combat_slot_is_player_team_trigger = {
 	var:combat_team = flag:player
 }
 
+# True when the current slot is NOT the one $SLOT$ names.
+#   $SLOT$ = a saved scope holding a POD_combat_slot story
+# Compares the identity pair rather than the story scopes so it holds up inside
+# every_in_list, where the current scope is the iterated slot.
+pod_combat_slot_differs_from_trigger = {
+	NOT = {
+		AND = {
+			var:combat_team = $SLOT$.var:combat_team
+			var:team_position = $SLOT$.var:team_position
+		}
+	}
+}
+
 ###### SPIRIT-GATE AUTO-RESOLVE VERDICT ######
 # Auto-resolve is a prowess roll, so without these it hands a win to a side
 # whose every attack the contact resolver's spirit gate would have denied.
@@ -813,33 +1192,42 @@ pod_combat_slot_is_player_team_trigger = {
 # spirit, mirroring the manual fight's damage paths:
 #   - slot_can_damage_spirit
 #   - an equipped ungated HP DoT move. 
-#   - an equipped friendly summon
+#   - an equipped friendly spirit-family summon, unless this duel bars summoning
 # Morale offense is DELIBERATELY not an answer.
 # KNOWN LIMITATION: this does not ask whether THIS spirit is immune to the
 # credited move's damage class, so e.g. a sun-only kit (8 ungated moves, and
 # every incorporeal splat is sun-immune) still reads as an answer and falls
 # back to the roll.
+#
+# The summon arm is its own any_in_list rather than a branch of the damage one:
+# the summon rule is a SLOT-scope question (it reaches the fight through
+# var:fight) and inside any_in_list the ambient scope is the move story, where
+# that back-pointer is out of reach. Splitting the existential is equivalent -
+# "some move is A or B" and "some move is A, or some move is B" agree.
 pod_combat_slot_has_spirit_answer_trigger = {
 	OR = {
 		has_variable = slot_can_damage_spirit
 		var:slot_char ?= {
 			any_in_list = {
 				variable = pod_combat_loadout
+				NOT = { has_variable = checks_spirit_gate }
 				OR = {
+					has_variable = hp_damage
 					AND = {
-						NOT = { has_variable = checks_spirit_gate }
-						OR = {
-							has_variable = hp_damage
-							AND = {
-								has_variable = dot_amount
-								NOT = { has_variable = dot_morale }
-							}
-						}
+						has_variable = dot_amount
+						NOT = { has_variable = dot_morale }
 					}
-					AND = {
-						has_variable = summons_combatant
-						NOT = { has_variable = summon_hostile }
-					}
+				}
+			}
+		}
+		AND = {
+			pod_combat_slot_summons_allowed_trigger = yes
+			var:slot_char ?= {
+				any_in_list = {
+					variable = pod_combat_loadout
+					has_variable = summons_combatant
+					NOT = { has_variable = summon_hostile }
+					NOT = { var:summon_recipe = flag:controlled_animal }
 				}
 			}
 		}
@@ -865,42 +1253,70 @@ pod_combat_slot_has_live_hp_burn_trigger = {
 # mirror images, because the win conditions in
 # pod_combat_check_group_victory_effect are not either.
 pod_combat_player_side_cannot_win_trigger = {
-	any_in_list = {
-		variable = pod_combat_active_slots
-		pod_combat_slot_is_enemy_trigger = yes
-		pod_combat_slot_is_alive_trigger = yes
-		has_variable = slot_incorporeal_spirit
-		pod_combat_slot_has_live_hp_burn_trigger = no
-	}
-	NOT = {
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_player_team_trigger = yes
-			pod_combat_slot_is_alive_trigger = yes
-			pod_combat_slot_has_spirit_answer_trigger = yes
-		}
-	}
-}
-
-# The enemy's easier win is the PC's slot alone going down (check 2 fires even
-# with allies still up), so this asks about the PC specifically, NOT the player
-# team: an incorporeal ALLY does not protect a corporeal PC, and treating it as
-# though it did would hand the player a win the enemy could still have taken.
-# A burn already on the PC is the same story in reverse - it can still finish
-# them, so it is not a fight the enemy has no way of winning.
-pod_combat_enemy_side_cannot_win_trigger = {
-	has_variable = pod_combat_pc_slot
-	var:pod_combat_pc_slot = {
-		pod_combat_slot_is_alive_trigger = yes
-		has_variable = slot_incorporeal_spirit
-		pod_combat_slot_has_live_hp_burn_trigger = no
-	}
-	NOT = {
+	var:pod_combat_session ?= {
 		any_in_list = {
 			variable = pod_combat_active_slots
 			pod_combat_slot_is_enemy_trigger = yes
 			pod_combat_slot_is_alive_trigger = yes
-			pod_combat_slot_has_spirit_answer_trigger = yes
+			has_variable = slot_incorporeal_spirit
+			pod_combat_slot_has_live_hp_burn_trigger = no
+		}
+	}
+	NOT = {
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_player_team_trigger = yes
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_slot_has_spirit_answer_trigger = yes
+			}
+		}
+	}
+}
+
+# The enemy's easier win is every human-driven slot going down (check 2 fires
+# even with allies still up), so this asks about the CONTROLLED slots, not the
+# player team: an incorporeal ALLY does not protect a corporeal player body, and
+# treating it as though it did would hand the player a win the enemy could still
+# have taken. A burn already on a controlled slot is the same story in reverse -
+# it can still finish them, so it is not a fight the enemy cannot win.
+#
+# Mirrors check 2, so it quantifies the same way: unwinnable only if EVERY
+# controlled slot is individually untouchable. One killable body is a way in.
+pod_combat_enemy_side_cannot_win_trigger = {
+	var:pod_combat_session ?= {
+		# At least one LIVE controlled slot. The alive term stops the vacuous
+		# answer: the inner quantifier treats a dead slot as untouchable (it is -
+		# nothing can kill it twice), so an all-dead controlled set would otherwise
+		# read as "the enemy cannot win" when in fact the enemy has already won.
+		any_in_list = {
+			variable = pod_combat_active_slots
+			has_variable = slot_human_controller
+			pod_combat_slot_is_alive_trigger = yes
+		}
+		NOT = {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				has_variable = slot_human_controller
+				NOR = {
+					AND = {
+						pod_combat_slot_is_alive_trigger = yes
+						has_variable = slot_incorporeal_spirit
+						pod_combat_slot_has_live_hp_burn_trigger = no
+					}
+					pod_combat_slot_is_alive_trigger = no
+				}
+			}
+		}
+	}
+	NOT = {
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_enemy_trigger = yes
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_slot_has_spirit_answer_trigger = yes
+			}
 		}
 	}
 }
@@ -923,22 +1339,27 @@ pod_combat_ai_target_candidate_trigger = {
 	# picks from the actor's OWN team, so this stops a dominated unit from rolling
 	# ITSELF as the betrayal target while living teammates exist. The sole-survivor
 	# case is handled by the roster-based pod_combat_ai_check_control_fizzle_effect,
-	# not by self-selection.
-	NOT = {
-		AND = {
-			var:combat_team = scope:host.var:pod_combat_current_actor_team
-			var:team_position = scope:host.var:pod_combat_current_actor_position
+	# not by self-selection. Guarded like its two trigger_if siblings below: with no
+	# actor the self-exclusion is vacuous, so the else admits.
+	trigger_if = {
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		NOT = {
+			AND = {
+				var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+				var:team_position = scope:host.var:pod_combat_session.var:pod_combat_current_actor_position
+			}
 		}
 	}
+	trigger_else = { always = yes }
 	# Alternate-target retry: skip the exhausted target the caller flagged
 	# (set/cleared by pod_combat_ai_retry_alternate_target_effect). Unset =
 	# normal selection - trigger_if passes when its limit is false.
 	trigger_if = {
-		limit = { scope:host = { has_variable = pod_combat_ai_excluded_target_team } }
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_ai_excluded_target_team } }
 		NOT = {
 			AND = {
-				var:combat_team = scope:host.var:pod_combat_ai_excluded_target_team
-				var:team_position = scope:host.var:pod_combat_ai_excluded_target_position
+				var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_ai_excluded_target_team
+				var:team_position = scope:host.var:pod_combat_session.var:pod_combat_ai_excluded_target_position
 			}
 		}
 	}
@@ -959,23 +1380,54 @@ pod_combat_ai_target_candidate_trigger = {
 	# or that the target dies. These tests mirror that fold's arms and must move with
 	# them.
 	trigger_if = {
-		limit = { scope:host = { has_variable = pod_combat_ai_snap_restrict } }
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_ai_snap_restrict } }
 		OR = {
 			AND = {
-				scope:host = { var:pod_combat_ai_enemy_finishable_hp = 1 }
+				scope:host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable_hp = 1 }
 				var:slot_char.POD_empty_damage_boxes <= pod_combat_ai_hp_finish_threshold
 			}
 			AND = {
-				scope:host = { var:pod_combat_ai_enemy_finishable_mor = 1 }
+				scope:host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable_mor = 1 }
 				var:slot_morale <= pod_combat_ai_morale_finish_threshold
 			}
 		}
 	}
 }
 
+# The player team's leader seat, as a BOARD POSITION. No callers: everything that
+# used to ask this was really asking one of two other questions, and now asks it
+# directly - "is this slot human-driven" (has_variable = slot_human_controller)
+# or "is this the slot I am driving" (pod_combat_is_my_control_slot_trigger).
+# Kept as the definition of the seat itself, which the leader derivation and any
+# future launcher still reason about. Do not reintroduce it as a control test.
 pod_combat_slot_is_pc_trigger = {
 	var:combat_team = flag:player
 	var:team_position = 0
+}
+
+# True when $SLOT$ is the slot THIS character is currently driving. Character
+# scope; $SLOT$ = a saved scope holding a POD_combat_slot story.
+#
+# The question the targeting surfaces actually want. They used to ask
+# pod_combat_slot_is_pc_trigger, which is a board position - correct only while
+# the one controlled slot is player/0. Under clones you must still be able to
+# target your OTHER bodies, so "not me" has to mean the acting slot, not the
+# player-team leader.
+#
+# Identity pair rather than a story compare, matching
+# pod_combat_slot_differs_from_trigger. trigger_if rather than a bare ?=: this
+# backs per-frame card surfaces and the pointer is legitimately unset out of
+# combat, where a trigger-context ?= would evaluate against an empty scope and
+# log on every frame.
+pod_combat_is_my_control_slot_trigger = {
+	trigger_if = {
+		limit = { has_variable = pod_combat_my_control_slot }
+		var:pod_combat_my_control_slot ?= {
+			var:combat_team = $SLOT$.var:combat_team
+			var:team_position = $SLOT$.var:team_position
+		}
+	}
+	trigger_else = { always = no }
 }
 
 pod_combat_slot_is_leader_trigger = {
@@ -1039,17 +1491,40 @@ pod_combat_fatality_default_will_die_trigger = {
 # unkillable, the pre-fight wound track is snapshot/restored at the combat bounds,
 # and no lasting Mental Strain is applied. this = combat host.
 pod_combat_is_practice_trigger = {
-	has_variable = pod_combat_sc_context
-	var:pod_combat_sc_context.var:fatality = flag:practice
+	# Nested, not a sibling has_variable: triggers do not short-circuit, so a
+	# sibling guard would still let the deref run - and this is evaluated from
+	# POD_combat_finalize_duel_effect, which a duel confirm-tooltip walks before
+	# the fight story exists.
+	var:pod_combat_session ?= { var:fatality = flag:practice }
 }
 
-# this = combat host. True for the duels that stamp pod_combat_nonfatal_active
-# (so PoD's inline death check can't kill mid-fight): non-fatal AND practice spars.
+# this = combat host. True for EVERY minigame fight, whatever its fatality mode.
+# The minigame writes real wounds live on every hit, so PoD's inline death check
+# would otherwise fire mid-action - and for a guaranteed-resurrection victim
+# (wraith, spectre, hsien, extra_life_*, ...) pod_death is a free full heal, which
+# made those opponents unkillable inside a fatal duel. Every combatant therefore
+# carries pod_combat_nonfatal_active for the whole fight; the deferred deaths are
+# resolved once at the writeback by pod_combat_resolve_suppressed_deaths_effect,
+# which is the model base PoD already uses (work_out_wounds_or_death_effect).
+#
+# exists rather than a deref: the answer no longer depends on any fight var, and
+# a bare presence test cannot error on a tooltip walk that predates the story.
 pod_combat_uses_death_gate_trigger = {
-	has_variable = pod_combat_sc_context
-	OR = {
-		var:pod_combat_sc_context.var:fatality = flag:no
-		var:pod_combat_sc_context.var:fatality = flag:practice
+	exists = var:pod_combat_session
+}
+
+# this = combat host. True for the duels where NOBODY dies at all: fatality = no
+# (track capped to one empty box at the end) and practice (pre-fight track
+# restored). Distinct from the death gate above, which every mode now passes -
+# this is the narrower "bloodless" question the post-combat health finalizer and
+# the CERTAMEN duel title ask.
+pod_combat_duel_is_bloodless_trigger = {
+	# Nested for the same reason as pod_combat_is_practice_trigger above.
+	var:pod_combat_session ?= {
+		OR = {
+			var:fatality = flag:no
+			var:fatality = flag:practice
+		}
 	}
 }
 
@@ -1057,8 +1532,13 @@ pod_combat_uses_death_gate_trigger = {
 # Any player currently in a combat minigame (combat hosts are always
 # players). Gates POD_reload_combat_moves so a version-mismatch reload can't
 # end/recreate the global move stories out from under a live fight.
+#
+# Deliberately NOT the simpler `has_variable = pod_combat_session`: a living
+# player holding a pointer at an ended story would then block every reload
+# forever. Asking the fight whether it is live keeps today's semantics and
+# self-heals, since the launcher's teardown clears such a pointer.
 pod_combat_any_fight_active_trigger = {
-	any_player = { has_variable = pod_combat_active }
+	any_player = { pod_combat_is_active_trigger = yes }
 }
 
 
@@ -1322,8 +1802,11 @@ pod_combat_sheet_row_match_trigger = {
 		limit = {
 			scope:pod_combat_sheet_owner = { has_variable = pod_combat_sheet_f_conditional }
 		}
-		# cond_mode is the conditional-move anchor var (gate or bonus).
-		has_variable = cond_mode
+		# Conditional either way: a gate writes cond_mode, a bonus is the clause list.
+		OR = {
+			has_variable = cond_mode
+			has_variable_list = bonus_clauses
+		}
 	}
 }
 
@@ -1337,7 +1820,7 @@ pod_combat_sheet_row_match_trigger = {
 # The implicit scope at the call site is the iterated candidate move
 # story_cycle (also bound as scope:ai_candidate_move), so
 # `var:damage_type` reads directly off the move. The target
-# character is reached via scope:combat_host.var:pod_combat_target_char.
+# character is reached via scope:combat_host.var:pod_combat_session.var:pod_combat_target_char.
 #
 # To add a new class -> weakness mapping: define the weakness as a
 # POD_weak_to_<class>_trigger alongside the rest of the family in
@@ -1348,45 +1831,104 @@ pod_combat_move_exploits_target_weakness_trigger = {
 	OR = {
 		AND = {
 			var:damage_type = flag:silver
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_silver_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:gold
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_gold_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:sun
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_sun_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:fire
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_fire_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:holy
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_holy_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:poison
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_poison_trigger = yes
 			}
 		}
 		AND = {
 			var:damage_type = flag:cold_iron
-			scope:combat_host.var:pod_combat_target_char = {
+			scope:combat_host.var:pod_combat_session.var:pod_combat_target_char = {
 				POD_weak_to_cold_iron_trigger = yes
 			}
 		}
 	}
+}
+
+###### FIRST-FIGHT INTRO ######
+
+# Begin-click re-validation for the first-fight intro (pod_combat.0200 /
+# pod_combat.0201). The intro defers the launch behind a player click and can
+# sit open across arbitrary game time, so the duel is re-checked when it fires
+# rather than when it was armed: either principal may have died since, or been
+# pulled into another fight by the vanilla duel the Part-3 gate routes around
+# the minigame while the intro is pending.
+#
+# Deliberately does NOT require engaged_in_single_combat. That interleaved
+# vanilla duel legitimately releases it on its way out, which would make this
+# fail for a pair that is otherwise perfectly able to fight;
+# pod_combat_intro_begin_fight_effect re-stamps it instead.
+pod_combat_intro_launch_valid_trigger = {
+	exists = scope:sc_attacker
+	exists = scope:sc_defender
+	scope:sc_attacker = {
+		is_alive = yes
+		NOT = { pod_combat_is_seated_trigger = yes }
+	}
+	scope:sc_defender = {
+		is_alive = yes
+		NOT = { pod_combat_is_seated_trigger = yes }
+	}
+}
+
+###### MID-FIGHT DELIRIUM ######
+# Predicates for pod_combat_delirium_effects.txt, which re-derives PoD's Delirium
+# when a combatant changes form after slot init has already run the knight battery.
+
+pod_combat_char_has_any_delirium_trigger = {
+	# Character scope. Either grade of PoD's Delirium (00_POD_fera_modifiers.txt).
+	# This is the minigame's idempotency key: a victim already carrying one is neither
+	# re-offered the affliction nor given a second log row.
+	OR = {
+		has_character_modifier = POD_delirium_modifier
+		has_character_modifier = POD_reduced_delirium_modifier
+	}
+}
+
+pod_combat_delirium_caster_ready_trigger = {
+	# Character scope. Can this combatant inflict the Delirium as it currently stands?
+	# Purely an early-out so the roster walk is skipped while neither leader is in an
+	# inducing form - POD_fera_delirium_effect re-tests the same chain per victim, and
+	# that copy is the authority.
+	is_alive = yes
+	POD_inflicts_delirium_trigger = yes
+}
+
+pod_combat_slot_delirium_candidate_trigger = {
+	# Slot-scoped. Worth offering the Delirium to: a live body not already afflicted.
+	# Immunity, the Fera exemption and the caster's bypass perks are deliberately NOT
+	# repeated here - they live in POD_fera_delirium_effect, which no-ops cheaply.
+	# Character liveness rather than the KO flag, because slot init afflicts a
+	# wound-track-full survivor too.
+	pod_combat_slot_char_is_alive_trigger = yes
+	NOT = { var:slot_char = { pod_combat_char_has_any_delirium_trigger = yes } }
 }

@@ -40,7 +40,7 @@ Additional files are conditional:
 
 | File | Edit it only when |
 |---|---|
-| `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | A `has_trait` / `has_modifier` / `has_perk` / `fera_form` condition on a new literal key gets its case by adding the CSV row and regenerating. |
+| `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt` | A `has_trait` / `has_modifier` / `has_perk` / `fera_form` condition on a new literal key must end up with its own `flag:<key>` case in that predicate's sub-dispatch (18.5); Without a case the condition falls to `fallback = { always = no }` and never fires. |
 | `localization/english/gui/POD_combat_static_l_english.yml` | A complex unlock rule introduces a new `custom_tooltip` requirement key. |
 | `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` | A genuinely new optional variable or parametric flag needs validator pairing after spelling, scope, and runtime use have been verified. |
 
@@ -329,7 +329,7 @@ POD_init_combat_move = {
 | `SKILL_KEY` | Unique lower-snake-case flag | Stable runtime and saved-preset identity. |
 | `CATEGORY` | `ATK`, `DEF`, `CTL`, `PWR` | Loadout category and category-cap accounting. |
 | `CONFIG` | Existing or newly added dispatcher slug | Outer runtime unlock-dispatch branch. |
-| `GROUP` | One of the 16 splat families (`universal`, `vampire`, `werewolf`, `bastet`, `mokole`, `fera`, `fae`, `demon`, `wraith`, `mummy`, `kueijin`, `hunter`, `sorcerer`, `psychic`, `theurgy`, `truefaith`) | Which kind of character can ever hold this. Drives only the loadout editor's "Show all skills" display filter, never access. Derived from `CONFIG` by the generator's `section_unlock_group()`. |
+| `GROUP` | One of the 16 splat families (`universal`, `vampire`, `werewolf`, `bastet`, `mokole`, `fera`, `fae`, `demon`, `wraith`, `mummy`, `kueijin`, `hunter`, `sorcerer`, `psychic`, `theurgy`, `truefaith`) | Which kind of character can ever hold this. Drives only the loadout editor's "Show all skills" display filter, never access. Follows from `CONFIG`: every move in a configuration section carries the same group, the splat family that owns that discipline. `pod_combat_move_group_matches_actor_trigger` switches on it, so a value outside the 16 falls to its `fallback = { always = yes }` and shows the move to every splat instead of filtering it. |
 | `AP_COST` | Non-negative integer or an existing AP constant | Action points spent on use. Zero is an exceptional, reviewed value. |
 | `AI_WEIGHT` | Positive number | Base AI score before tactical adjustments. |
 | `TARGETING` | Supported targeting flag | Who receives target-directed effects. |
@@ -383,7 +383,7 @@ Allowed constructor values are:
 | `self` | The actor. Use for self-healing, stances, transformations, and summons. |
 | `team_enemy` | Every living enemy. Use only effects known to broadcast. |
 | `team_ally` | Every living ally, including the actor. Use only effects known to broadcast. |
-| `team_all` | Every living combatant on both sides, the actor included. Damage, morale damage and debuff riders only. Support payloads route to the caster on this mode, so the generator rejects them here. |
+| `team_all` | Every living combatant on both sides, the actor included. Damage, morale damage and debuff riders only. Support payloads route to the caster on this mode, so they are not legal here. |
 | `single_pc` | The player character. This is a specialized AI-side protection target with no current move examples. Only HP and morale healing explicitly route to the PC; tier buffs and stances affect the actor instead. Require focused engine and AI review before using it. |
 
 ### 7.1 Team-target compatibility
@@ -406,8 +406,8 @@ Safe `team_ally` payloads:
 
 Safe `team_all` payloads are the `team_enemy` list above, and nothing more. It
 covers both sides **including the caster**, so a heal or buff on it would strike
-everyone and then mend or strengthen only the caster; the generator's
-`team_all_support` check is a hard error rather than a warning for that reason.
+everyone and then mend or strengthen only the caster; a support payload on
+`team_all` is therefore a hard error and not a balance judgement.
 Retaliation never fires against a `team_all` move, exactly as with `team_enemy`.
 
 Price the self-hit in. The caster takes the move's own `hp_damage` and
@@ -935,6 +935,11 @@ Supported recipes:
 - `bane`
 - `gaian_spirit`
 - `elemental`
+- `controlled_animal`
+
+The controlled-animal recipe creates a fixed-Prowess physical animal. If the
+summoner owns `plague_of_beasts_perk`, the same recipe selects a stronger
+one-slot swarm template instead of bypassing the team cap with extra units.
 
 Author normal summons with:
 
@@ -954,10 +959,31 @@ capacity, no-space behavior, allegiance, initialization, next-round action,
 and combat cleanup. No current live move exercises `summon_hostile`, so require
 focused capability review before shipping it.
 
+To author a support move for an animal using PoD's Wolf Form, use the ordinary
+target-side condition gate with ally targeting:
+
+```paradox
+TARGETING = single_ally
+POD_combat_move_set_condition = {
+	MODE = gate
+	TARGET = target
+	PREDICATE = has_modifier
+	THRESHOLD = 0
+}
+POD_combat_move_set_cond_param = { PARAM = pod_shapeshift_form_wolf_modifier }
+```
+
+The controlled-animal templates already carry
+`POD_shapeshift_form_wolf_modifier`. The player gate, click-time revalidation,
+AI admission, AI benefit test, and AI target selection all read the same
+condition metadata. This deliberately also admits any other allied combatant
+currently using PoD's Wolf Form.
+
 ## 18. Move-state conditions
 
-A move supports one generalized condition. It can either prevent use or add
-one bonus effect.
+A move supports **one optional gate** plus **any number of conditional bonus
+clauses**. The two channels are independent: a gated move may carry clauses,
+and a move with clauses needs no gate.
 
 ### 18.1 Gate condition
 
@@ -972,24 +998,50 @@ POD_combat_move_set_condition = {
 }
 ```
 
-Do not add `POD_combat_move_set_bonus` to a gate move.
+A gate move may still add bonus clauses (18.2).
 
-### 18.2 Bonus condition
+### 18.2 Bonus clauses
 
-A bonus leaves the base move usable and grants an extra effect when true:
+A bonus clause leaves the base move usable and grants an extra effect when its
+own condition is true. Each clause carries its own condition **and** its own
+effect, so one move can stack several:
 
 ```paradox
-POD_combat_move_set_condition = {
-	MODE = bonus
+POD_combat_move_add_bonus_clause = {
 	TARGET = target
 	PREDICATE = has_trait
 	THRESHOLD = 0
+	EFFECT = energy_drain
+	VALUE = 2
 }
-POD_combat_move_set_cond_param = { PARAM = vampire }
-POD_combat_move_set_bonus = { EFFECT = energy_drain VALUE = 2 }
+POD_combat_move_clause_set_cond_param = { PARAM = vampire }
 ```
 
-A bonus condition must have exactly one supported bonus effect.
+Three optional follow-on setters act on the clause the `add` call just built
+(they read `scope:pod_new_clause`, so each must immediately follow its own
+`POD_combat_move_add_bonus_clause`):
+
+| Setter | Purpose |
+|---|---|
+| `POD_combat_move_clause_set_cond_param = { PARAM = <key> }` | The literal key for an identifier predicate. |
+| `POD_combat_move_clause_set_bonus_param = { PARAM = <element> }` | The element a `change_class` clause converts to. |
+| `POD_combat_move_clause_set_hide = yes` | Hide this clause's condition and effect lines on the stat card until the viewer meets it (18.6.1). |
+
+**How clauses combine at execution.** Execution section 2b walks the list once
+and folds every met clause into a per-effect transient on the fight story:
+
+- Clauses naming the **same** effect **sum** their magnitudes, and the phase
+  applies once off the total. That single apply is load-bearing, not tidiness -
+  the energy ceiling rounds per call (two gains of 1 cost two Blood where one
+  gain of 2 costs one), the DoT seed overwrites rather than stacks, and the
+  damage adder would clobber.
+- Clauses naming **different** effects each apply once, in their own phase.
+
+The move-level `POD_combat_move_set_condition` / `_set_bonus` /
+`_set_bonus_param` setters still appear in the registry, and on a bonus row they
+mirror clause 1. Execution does not read them; the presence-only readers do (AI
+intent setup, the independent-payload gate, and the story-bound sheet and
+compact-log display dispatchers).
 
 ### 18.3 Condition targets
 
@@ -1042,15 +1094,23 @@ Unknown predicates and unknown identifier parameters fail closed.
 `has_trait`, `has_modifier` and `has_perk` each need a literal key (and
 `fera_form` maps each form to its own `POD_is_shapeshifted_*_trigger`), because CK3 cannot
 interpolate a variable into `has_trait` or `has_character_modifier`. The
-condition carries that key in `cond_param`:
+condition carries that key in `cond_param` - on the move for a gate, on the
+clause for a bonus clause:
 
 ```paradox
 POD_combat_move_set_cond_param = { PARAM = verified_trait_key }
+POD_combat_move_clause_set_cond_param = { PARAM = verified_trait_key }
 ```
 
 `common/scripted_triggers/POD_combat/pod_combat_condition_dispatch_triggers.txt`
 holds one sub-dispatch per identifier predicate, each a switch on `cond_param`
 that turns it back into a literal.
+
+Every identifier key in use needs its own case there, whether it came from the
+move-level `cond_param` **or** from a bonus clause: a clause-2 identifier
+predicate needs a case just as clause 1 does. A key with no case falls to the
+switch's `fallback = { always = no }`, which is a rider that silently never
+fires while the card still advertises it.
 
 The `has_trait` dispatcher supports:
 
@@ -1058,6 +1118,7 @@ The `has_trait` dispatcher supports:
 - `wraith`
 - `spirit`
 - `psychic`
+- `brave`
 
 For another verified trait, add a literal branch inside
 `pod_combat_cond_has_trait_trigger`:
@@ -1117,19 +1178,110 @@ Supported `EFFECT` values:
 | `self_morale_heal` | Morale restored to the user | Actor only; no target twin |
 | `retaliate_boost` | Damage added to the counter this move arms | Requires a `retaliate_if_*` flag |
 | `change_class` | Converts the damage to the element in `bonus_param` | No authored `damage_type`; not Mental |
+| `hit_buff_round` | Grants a hit-chance tier to the recipient for a round | `VALUE` is the TIER (1-3); never `team*` |
+| `hit_debuff_round` | Costs the target a hit-chance tier for a round | `single_enemy` only; `VALUE` is the TIER |
+| `soak_buff_round` | Grants a soak tier to the recipient for a round | `VALUE` is the TIER (1-3); never `team*` |
+| `soak_debuff_round` | Costs the target a soak tier for a round | `single_enemy` only; `VALUE` is the TIER |
+| `hit_buff_combat` | As `hit_buff_round`, but for the rest of combat | `VALUE` is the TIER (1-3); never `team*` |
+| `hit_debuff_combat` | As `hit_debuff_round`, but for the rest of combat | `single_enemy` only; `VALUE` is the TIER |
+| `soak_buff_combat` | As `soak_buff_round`, but for the rest of combat | `VALUE` is the TIER (1-3); never `team*` |
+| `soak_debuff_combat` | As `soak_debuff_round`, but for the rest of combat | `single_enemy` only; `VALUE` is the TIER |
 
-`change_type`, `change_class` and the three stance effects ignore numeric
-magnitude; pass `VALUE = 0`. `change_class` takes its element from the separate
-`bonus_param` column (`POD_combat_move_set_bonus_param`).
+`uses_weapon` is the twenty-seventh effect, the one the table omits: it grants the actor's own equipped
+`primary_armament` swing for that action instead of running a phase of its own.
+
+The eight tier effects are the odd ones out: `VALUE` carries a TIER
+(1 = small, 2 = medium, 3 = large), not a magnitude. Anything outside 1-3 is
+rejected. They also do not sum - a tier is ordinal, so two clauses granting
+tier 1 and tier 2 leave tier 2, and the grant is upgrade-only against whatever
+tier the recipient already carries. Three limits are enforced at authoring time:
+
+* No `team*` targeting on any of the eight. The team appliers broadcast the
+  move's STATIC tier columns only, and `team_all` inverts - the caster would
+  take the debuff while the swept team took nothing.
+* All four debuffs are `single_enemy` only. Ally or self targeting would land
+  the penalty on the beneficiary.
+* A clause tier is rejected on a move whose `special` column already grants the
+  same stat/direction/duration statically. Both writes would land, but the move
+  bar's redundancy gate reads the story tier only, so once the static tier is up
+  the move is filtered out and the clause can never upgrade it. A DIFFERENT
+  duration or stat is fine - `hit_buff_small_round` in `special` alongside a
+  `hit_buff_combat` clause upgrades two separate vars and is allowed.
+
+`_round` and `_combat` are the same code path; the duration lives entirely in
+which persistent tier var section 5c upgrades. A `_combat` grant outlives the
+clause that earned it - the clause is re-tested every action, but the tier it
+wrote stands for the rest of the fight, exactly as a static `_combat` column does.
+
+A clause-granted tier writes no combat-log line (COMBAT_REFERENCE.info, bonus-
+clause transients). It applies and shows on the move card; only the log is silent.
+
+`change_type`, `change_class`, `uses_weapon` and the three stance effects ignore
+numeric magnitude; pass `VALUE = 0`. `change_class` takes its element from
+`POD_combat_move_clause_set_bonus_param`.
 
 `ap_refund` is a refund, not a discount. Both affordability gates read the
 gross `ap_cost`, so a move the actor cannot afford stays unclickable however
-large its refund; the AP comes back only after the move resolves. Keep
-`bonus_value` strictly below the move's `AP_COST` so a successful use still
-costs at least 1 AP net; nothing in the engine clamps it. No live move used
+large its refund; the AP comes back only after the move resolves. Keep the
+**sum** of the move's `ap_refund` clauses strictly below its `AP_COST` so a
+successful use still costs at least 1 AP net whichever combination of clauses
+happens to be met; nothing in the engine clamps it. No live move used
 `ap_refund` before the marker work in 18.7, so treat its runtime path as
 unexercised and test it directly rather than trusting it by analogy with the
 other bonus effects.
+
+**Exclusivity across a clause set.** These clause pairings are not legal on one
+move, each rule derived from a real engine collision:
+
+| Illegal pairing | Why |
+|---|---|
+| `change_type` + `change_class` | Section 6 dispatches `REASON = duel_aggravated` first, so the conversion branch is unreachable. |
+| `dot` + `morale_dot` | One DoT slot per combatant, and the seed overwrites, so the second burn erases the first. Either alongside a base `dot_rounds` breaks the same way. |
+| `uses_weapon` + `change_class` | An armament's retype and the conversion contend for the same swing. Static `uses_weapon` beside either clause collides the same way. |
+| The same magnitude-less effect twice | The token carries everything, so the second copy has nothing to sum. The three stances are the exception - they coexist with each other. |
+
+Clause order does not matter. The sheet and compact-log columns find an
+`ap_drain` or a `uses_weapon` wherever it sits: the weapon tag walks the clause
+list, and the AP column prints a display projection of every `ap_drain` clause on
+the move. What those columns cannot do is stay quiet, which is why neither effect
+may be hidden (19.6.1).
+
+### 18.6.1 Hiding an unearned clause
+
+`POD_combat_move_clause_set_hide = yes` is the engine form of
+`hide_condition_if_unfulfilled`: the clause's condition line and its effect line
+are hidden **together** on the stat card until the viewer meets the condition, so
+an unearned rider never advertises itself. The pair is all-or-nothing on purpose
+- an orphan "+3 damage" with no condition beside it misstates the move's profile.
+
+Evaluation is live, through the clause's own generated dispatch. No cache: the
+three permitted predicates are direct character reads, so they answer correctly
+on every planning surface, and `has_modifier` reading false out of combat is the
+true answer (a combo line lights up mid-fight only).
+
+Hiding is allowed only on a `user`-targeted `has_perk` / `has_trait` /
+`has_modifier` clause. A combat-state predicate is unanswerable in the loadout
+editor, so its line would appear and vanish with the fight.
+
+Known, deliberate leaks:
+
+- The move sheet's `if+` glyph and the compact view's "bonus if..." phrase reveal
+  that *some* conditional bonus exists - never the predicate, effect or value.
+- `PODCombatSheetApSwing`, `PODCombatCLApDrain`, `PODCombatSheetFxWeapon` and
+  `PODCombatCLWeapon` show an AP drain or a weapon tag from whichever clause
+  carries it, so neither effect may be hidden on any clause.
+- The card is viewer-relative (root is whoever is reading it) while execution
+  asks the driven body, so while driving a proxy, clone or dominated body a line
+  can render and not fire, or fire unrendered. This is the same divergence the
+  card's weapon line already carries.
+- **The `notes` flavor line is the one prose surface no engine gate covers.** It
+  is appended unconditionally by every card surface, so the flavor text of a move
+  with hidden clauses must not describe them. Validation cannot check English;
+  this one is on the author.
+
+The combat-log hover card is the exception that proves the rule: it narrates
+whoever acted rather than the reader, so it renders through
+`PODCombatMoveEffectStatic`, which binds a `nohide` scope and shows every clause.
 
 ### 18.7 Marker modifiers
 
@@ -1141,23 +1293,25 @@ without an AP-cost-modifier layer.
 
 `has_modifier` also reads modifiers combat does not own, which is how a move
 becomes usable only while a PoD state is active (a shapeshift form, a
-discipline buff). Those keys go in the generator's `COND_READABLE_MODIFIERS`
-map and get a `PODCombatCondMarkerName` case, but **not** the
-`MARKER_MODIFIERS` wiring below: that list drives the teardown removals in
-18.7.2 step 4, and combat stripping a modifier PoD applied is a bug. See
-"Usable-only-while conditions" in `SKILL_AUTHORING_GUIDE.md`; the rules below
-are for markers a move itself applies.
+discipline buff). Such a key is read-only, so it takes only the read half of
+the wiring below: a case in `pod_combat_cond_has_modifier_trigger`, and a
+`PODCombatCondMarkerName` case so the stat card can name it. It must **not**
+get the section 12c apply case or the teardown removals in 18.7.2 step 4,
+because combat stripping a modifier PoD applied is a bug. The rules below are
+for markers a move itself applies.
 
 The applier uses one setter:
 
 ```paradox
 POD_combat_move_set_marker_modifier = { KEY = pod_combat_anima_flare }
+POD_combat_move_set_remove_marker = { KEY = pod_combat_anima_flare TARGET = target }
 ```
 
 Supported keys are those defined in
-`common/modifiers/pod_combat_modifiers.txt`, currently `pod_combat_anima_flare`
-alone. That file is combat-owned rather than a delta inside PoD's own modifier
-file, so a PoD re-sync cannot drop it.
+`common/modifiers/pod_combat_modifiers.txt`: `pod_combat_anima_flare`,
+`pod_combat_predator_focus`, and `pod_combat_kai_focus`. That file is
+combat-owned rather than a delta inside PoD's own modifier file, so a PoD
+re-sync cannot drop it.
 
 Rules and limits:
 
@@ -1168,10 +1322,8 @@ Rules and limits:
   execution section 12c of `POD_execute_combat_move`, well after the condition
   is evaluated in execution section 2b, so the payoff is always cross-move and
   always on a later turn.
-- **One condition slot per move.** A move gets one condition, used as a gate
-  or as a bonus, and a bonus carries exactly one effect. Spending it on
-  `has_modifier` plus `ap_refund` means that move can carry no other gate and
-  no other bonus.
+- **A marker rider costs no other channel.** Reading the marker is one bonus
+  clause, so the move can still carry its gate and any number of other clauses.
 - **CK3 character modifiers are day-scoped, not round-scoped.** Nothing in the
   engine expires one at end of round, which is why the marker is stripped by
   combat teardown, re-stripped when a character is seated into a slot, and
@@ -1180,8 +1332,11 @@ Rules and limits:
 
 ### 18.7.1 Worked example: a marker plus a refund
 
-The Terrestrial Exalted "Anima Flare" lights the anima once per combat; the
-Charm moves that follow partially refund their own AP while it burns.
+The debug pilot is the isolated worked example. `debug_marker_stamp` lights
+`pod_combat_anima_flare` once per combat; the moves that follow read it back.
+Shipped discipline sequences also exercise the full lifecycle: Predator's
+Communion feeds Predator's Talons, and Inner Focus feeds Focused Strike. Those
+payoff moves consume their respective markers through `remove_marker`.
 
 The applier carries the marker setter and `once_per = combat`, and no
 condition of its own:
@@ -1191,24 +1346,31 @@ condition of its own:
 	POD_combat_move_set_once_per = { DURATION = combat }
 ```
 
-Each consumer spends its condition slot on the marker and pays out a refund
-strictly below its own `AP_COST`, so a successful use still costs at least
-1 AP net:
+Each consumer adds one clause reading the marker, paying out a refund whose
+clause sum stays strictly below its own `AP_COST`, so a successful use still
+costs at least 1 AP net:
 
 ```paradox
-	POD_combat_move_set_condition = {
-		MODE = bonus
+	POD_combat_move_add_bonus_clause = {
 		TARGET = user
 		PREDICATE = has_modifier
 		THRESHOLD = 0
+		EFFECT = ap_refund
+		VALUE = 1
 	}
-	POD_combat_move_set_cond_param = { PARAM = pod_combat_anima_flare }
-	POD_combat_move_set_bonus = { EFFECT = ap_refund VALUE = 1 }
+	POD_combat_move_clause_set_cond_param = { PARAM = pod_combat_anima_flare }
+	POD_combat_move_clause_set_hide = yes
 ```
 
-The AI needs no extra work here. The gate, the flat condition-met scoring
-nudge, and the AP-strand exemption for a move whose refund would fire all run
-off the shared evaluator.
+`debug_clause_mixed` is that clause beside a `has_trait` heal and a `has_perk`
+energy gain, which is the acceptance test for the whole model: three effects,
+three predicate types and two hidden lines on one move.
+
+The AI needs no extra work here. The gate, the condition-met scoring nudge, and
+the AP-strand exemption for a move whose refund would fire all run off the
+shared evaluator - the exemption reads the per-effect
+`pod_combat_ai_bonus_met_ap_refund` mark, so it stays exact when the refund is
+not clause 1.
 
 ### 18.7.2 Adding a marker key
 
@@ -1221,21 +1383,25 @@ Add all of these in lockstep, or the key half-works:
    `pod_combat_move_effects.txt`, and the matching read-side case in
    `pod_combat_cond_has_modifier_trigger` (see the identifier-condition
    dispatch above).
-3. A case in `PODCombatCondMarkerName` and in `PODCombatAppliedMarkerName`
-   (`common/customizable_localization/POD_combat_log_custom_loc.txt`). Both
+3. A case in `PODCombatCondMarkerName`, in `PODCombatAppliedMarkerName` and in
+   `PODCombatRemovedMarkerName`
+   (`common/customizable_localization/POD_combat_log_custom_loc.txt`). All three
    resolve to the modifier's own name key, which keeps the shared condition
-   and effect phrasings generic. The combat-log row needs nothing further:
-   `pod_combat_log_seg_marker` is key-agnostic and re-roots
-   `PODCombatAppliedMarkerName` onto the `move` scope.
+   and effect phrasings generic. The combat-log rows need nothing further:
+   `pod_combat_log_seg_marker` and `pod_combat_log_seg_marker_removed` are
+   key-agnostic and re-root those dispatchers onto the `move` scope.
+3b. A case in the 12b-marker strip switch (`pod_combat_strip_marker_effect`).
+   The switch has no fallback arm, so a key missing here strips nothing and
+   reports no error.
 4. A removal line in `pod_combat_duel_end_effect`, in
    `pod_combat_host_died_release_effect`, and in the slot-init self-heal
    inside `pod_combat_init_slot_from_character_effect`. Skipping any of the
    three leaves the marker on a character after the fight.
 5. A `pod_combat_suppress_flag = { FLAG = <key> }` line in section 4 of
-   `pod_combat_error_suppression_effects.txt`, for as long as no CSV row
-   carries the key. The setter writes the key parametrically while steps 2
-   and 3 compare it literally, so without the entry the game logs
-   `Flag '<key>' is used but is never set` at load.
+   `pod_combat_error_suppression_effects.txt`. The key is written through
+   parameterized setters while steps 2 and 3 compare it literally, which the
+   analyzer cannot reliably pair. Keep the suppression alongside the key even
+   after a registered move carries it.
 
 ## 19. AI authoring
 
@@ -1461,15 +1627,18 @@ scope:new_combat_move = {
 	POD_combat_move_set_flag = { NAME = checks_stance }
 	POD_combat_move_set_flag = { NAME = requires_hit_roll }
 	POD_combat_move_set_hp_damage = { VALUE = @damage_minor }
-	POD_combat_move_set_condition = {
-		MODE = bonus
+	POD_combat_move_add_bonus_clause = {
 		TARGET = target
 		PREDICATE = hp_missing
 		THRESHOLD = 2
+		EFFECT = damage
+		VALUE = 1
 	}
-	POD_combat_move_set_bonus = { EFFECT = damage VALUE = 1 }
 }
 ```
+
+Add a second `POD_combat_move_add_bonus_clause` for a second rider; two `damage`
+clauses sum, and a `damage` plus a `morale_damage` clause each land once.
 
 ### 21.9 Counter stance
 
@@ -1614,6 +1783,7 @@ A new capability commonly requires coordinated work in:
 |---|---|
 | Story setter and variable | `common/scripted_effects/POD_combat/pod_combat_move_init_effects.txt` |
 | Execution phase and result | `common/scripted_effects/POD_combat/pod_combat_move_effects.txt` and sometimes `pod_combat_effects.txt` |
+| Per-fight execution state | The `POD_combat_fight` story, reached from the host as `var:pod_combat_session ?= { ... }` - never a new variable on the combat host. It needs no teardown line of its own: the fight's `end_story` drops everything on it, and the hand-written cleanup lists it would have gone into are gone. Note that `?=` skips an unset pointer in an EFFECT but not in a TRIGGER, so a gate reachable out of combat must test `has_variable = pod_combat_session` first, and nested. |
 | Usability and redundancy | `common/scripted_triggers/POD_combat/pod_combat_move_execution_triggers.txt` or `pod_combat_triggers.txt` |
 | Independent-payload inventory | `pod_combat_move_has_independent_payload_trigger` in `pod_combat_move_execution_triggers.txt`. A primitive missing from it lets the redundancy gate reject a move whose only real payload is that primitive, because a redundant stance or tier rider then looks like the whole move. |
 | Character modifier and its lifecycle | `common/modifiers/pod_combat_modifiers.txt` for the definition, plus removal in `pod_combat_duel_end_effect` and `pod_combat_host_died_release_effect` (`pod_combat_effects.txt`) and in the slot-init self-heal in `pod_combat_group_effects.txt`. |
@@ -1621,7 +1791,7 @@ A new capability commonly requires coordinated work in:
 | Compact card and move-sheet cells | `common/customizable_localization/POD_combat_log_custom_loc.txt` (the `PODCombatCL*` and `PODCombatSheetFx*` dispatchers), so a move carrying only the new primitive does not render an empty effects cell. |
 | Static labels and failures | `localization/english/gui/POD_combat_static_l_english.yml` |
 | AI admission, intent, and scoring | `common/scripted_effects/POD_combat/pod_combat_ai_effects.txt` and related triggers |
-| AI tactical-intent membership | Two lockstep copies: the counter fold in `pod_combat_ai_effects.txt`, the intent dispatch ladder in `common/scripted_triggers/POD_combat/pod_combat_triggers.txt`. |
+| AI tactical-intent membership | Two lockstep copies in this tree: the counter fold in `pod_combat_ai_effects.txt` and the intent dispatch ladder in `common/scripted_triggers/POD_combat/pod_combat_triggers.txt`. Miss one and the AI quietly stops considering moves that carry the primitive. |
 | Validator pairing | `common/scripted_effects/POD_combat/pod_combat_error_suppression_effects.txt` |
 | Visible combat result | A combat-log segment: its bake site, its `PODCombatLogSeg*` renderer in `POD_combat_log_custom_loc.txt`, its loc key, and its widget pair in `gui/POD_windows/pod_combat_window.gui`. See the segment recipe in `COMBAT_REFERENCE.info`. |
 
@@ -1791,7 +1961,12 @@ Observe multiple AI turns. Confirm:
 - [ ] Repeat limits prevent obvious loops.
 - [ ] Conditions use a supported predicate, target, threshold, and the literal
   parameter that predicate requires.
-- [ ] A bonus condition has exactly one compatible bonus effect.
+- [ ] Every bonus clause names a compatible effect, and the clause set trips
+  none of the exclusivity rules in 18.6.
+- [ ] `ap_drain` and `uses_weapon` clauses sit at clause 1, and no hidden clause
+  leaks through the sheet or the `notes` flavor line.
+- [ ] Every clause's identifier parameter has a case in its generated
+  sub-dispatch (a missing one fails closed and never fires).
 - [ ] `AI_WEIGHT` is close to category peers.
 
 ### Integration

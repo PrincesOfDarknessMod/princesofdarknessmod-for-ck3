@@ -19,15 +19,288 @@
 # is_target_in_variable_list on a never-created list reads as "not present", so no
 # list-existence guard is needed.
 pod_combat_actor_has_used_move_trigger = {
-	any_in_list = {
-		variable = pod_combat_active_slots
-		var:slot_char = { this = $ACTOR$ }
-		trigger_if = {
-			limit = { $STORY$ = { var:once_per = flag:round } }
-			is_target_in_variable_list = { name = slot_moves_used_round target = $STORY$ }
+	var:pod_combat_session ?= {
+		any_in_list = {
+			variable = pod_combat_active_slots
+			var:slot_char = { this = $ACTOR$ }
+			trigger_if = {
+				limit = { $STORY$ = { var:once_per = flag:round } }
+				is_target_in_variable_list = { name = slot_moves_used_round target = $STORY$ }
+			}
+			trigger_else = {
+				is_target_in_variable_list = { name = slot_moves_used_combat target = $STORY$ }
+			}
 		}
-		trigger_else = {
-			is_target_in_variable_list = { name = slot_moves_used_combat target = $STORY$ }
+	}
+}
+
+
+######################################################
+###### SHARED GATE PREDICATES
+######################################################
+# One named predicate per player-visible block reason, lifted out of the gate
+# bodies below. Each is called from BOTH the live gate (which keeps its
+# custom_description wrapper and its place in the evaluation order) and the
+# render-only pod_combat_move_usability_tt SGUI that voices the reason on the
+# move bar, so a greyed-out button and its tooltip line cannot disagree about
+# why. Ambient is the combat-host CHARACTER, matching the bodies they came from.
+# LOCKSTEP: a new blocking condition needs a predicate here, a call from its
+# gate, and a line in pod_combat_move_usability_tt (pod_combat_skill_guis.txt).
+
+# Resource affordability, one predicate per CK3 currency. PC-only by
+# construction - every caller fronts these with pod_combat_is_player_turn_trigger,
+# since AI combatants spend nothing.
+pod_combat_can_afford_move_gold_trigger = {
+	gold >= $STORY$.var:gold_cost
+}
+
+pod_combat_can_afford_move_piety_trigger = {
+	piety >= $STORY$.var:piety_cost
+}
+
+pod_combat_can_afford_move_prestige_trigger = {
+	prestige >= $STORY$.var:prestige_cost
+}
+
+# The actor's unlock proof, read off the per-character baked list rather than
+# the dispatcher - rationale on POD_can_execute_combat_move_trigger below.
+pod_combat_actor_has_baked_unlock_trigger = {
+	$ACTOR$ = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = $STORY$ } }
+}
+
+# yes while the move still has something to do: its stance / tier / retaliation
+# riders are not ALL already held at equal or higher strength. Only meaningful
+# for moves whose entire payload is such a rider, so both callers front it with
+# pod_combat_move_has_independent_payload_trigger.
+pod_combat_move_payload_useful_trigger = {
+	# Team-targeted pure utility: admit if ANY affected slot benefits (not
+	# just the one selected slot).
+	trigger_if = {
+		limit = { $STORY$ = { OR = { var:targeting = flag:team_ally  var:targeting = flag:team_enemy  var:targeting = flag:team_all } } }
+		pod_combat_team_utility_move_admissible_trigger = { STORY = $STORY$ }
+	}
+	# AI single_ally pure utility: admit if some ally benefits (the ally is
+	# chosen after move selection, so the per-slot checks in the else do not
+	# apply here).
+	trigger_else_if = {
+		limit = {
+			NOT = { pod_combat_is_player_turn_trigger = yes }
+			$STORY$ = { var:targeting = flag:single_ally }
+		}
+		pod_combat_ai_has_ally_benefiting_trigger = { STORY = $STORY$ }
+	}
+	trigger_else = {
+		trigger_if = {
+			limit = {
+				pod_combat_is_player_turn_trigger = yes
+				$STORY$ = { var:targeting = flag:single_ally }
+			}
+			NAND = {
+				$STORY$ = { has_variable = set_guard }
+				var:pod_combat_session ?= { has_variable = pod_combat_target_is_guarding }
+			}
+			NAND = {
+				$STORY$ = { has_variable = dodge }
+				var:pod_combat_session ?= { has_variable = pod_combat_target_is_dodging }
+			}
+			NAND = {
+				$STORY$ = { has_variable = stealth }
+				var:pod_combat_session ?= { has_variable = pod_combat_target_is_stealthed }
+			}
+		}
+		trigger_if = {
+			limit = {
+				$STORY$ = { NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally } }
+			}
+			NAND = {
+				$STORY$ = { has_variable = set_guard }
+				var:pod_combat_session ?= { has_variable = pod_combat_actor_is_guarding }
+			}
+			NAND = {
+				$STORY$ = { has_variable = dodge }
+				var:pod_combat_session ?= { has_variable = pod_combat_actor_is_dodging }
+			}
+			NAND = {
+				$STORY$ = { has_variable = stealth }
+				var:pod_combat_session ?= { has_variable = pod_combat_actor_is_stealthed }
+			}
+		}
+		NAND = {
+			$STORY$ = { has_variable = retaliate_if_hit }
+			var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_hit }
+		}
+		NAND = {
+			$STORY$ = { has_variable = retaliate_if_missed }
+			var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_miss }
+		}
+		NAND = {
+			$STORY$ = { has_variable = retaliate_if_attacked }
+			var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_any }
+		}
+
+		# Tier-redundancy guard - reject a tier buff/debuff at or below the
+		# current tier (upgrade-only contract; canonical rationale on
+		# pod_combat_upgrade_tier_var_effect in pod_combat_move_effects.txt).
+		# Strict `<` matches the AI guard.
+		# Gate mechanics: pod_combat_tier_upgrade_only_trigger (below) for the hit
+		# tiers, pod_combat_soak_tier_upgrade_only_trigger for soak. The two read
+		# different stores - the fight workspace and the combatant's soak bridge -
+		# and each reaches its own through a pointer hop; neither reads ambient.
+		# Round and combat tiers are gated alike: a held rider of either duration is
+		# equally dead, since the write refuses an equal-tier raise and the round
+		# clear is a fixed turn boundary, not a duration a re-apply could refresh.
+		# Covers single-target tiers only; AoE downgrades are guarded at write time.
+		# Player-selected ally buffs compare the selected target. AI single_ally
+		# never reaches this sub-block - it branches above.
+		trigger_if = {
+			limit = {
+				pod_combat_is_player_turn_trigger = yes
+				$STORY$ = { var:targeting = flag:single_ally }
+			}
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_round_tier }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_combat_tier }
+		}
+		trigger_if = {
+			limit = {
+				$STORY$ = { NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally } }
+			}
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_round_tier }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_combat_tier }
+		}
+		# Debuff-tier redundancy checks only the ONE selected enemy; a team AoE
+		# debuff must not be rejected because that one target already has the tier.
+		trigger_if = {
+			limit = { $STORY$ = { NOR = { var:targeting = flag:team_enemy  var:targeting = flag:team_all } } }
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
+			pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_round_tier }
+			pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_combat_tier }
+		}
+	}
+}
+
+# yes when the move is a heal-only move aimed at the actor itself - the shape
+# whose "already at full" case is worth blocking. single_ally / team_ally heals
+# are excluded: the actor's own HP is not the target there, and the player may
+# intentionally top up a wounded ally while full.
+pod_combat_move_is_self_only_heal_trigger = {
+	$STORY$ = {
+		OR = {
+			has_variable = hp_heal
+			has_variable = morale_heal
+		}
+		NOT = { has_variable = hp_damage }
+		NOT = { has_variable = morale_damage }
+		OR = {
+			NOT = { has_variable = targeting }
+			var:targeting = flag:self
+		}
+	}
+}
+
+# yes when such a self-heal would actually move a number.
+pod_combat_self_heal_has_effect_trigger = {
+	OR = {
+		# Superficial heals stop at sup_ceiling (= max_hp -
+		# agg_boxes): aggravated wounds pin the track top, so
+		# this can be a no-op even while hp < max_hp.
+		AND = {
+			$STORY$ = {
+				has_variable = hp_heal
+				var:heal_type = flag:superficial
+			}
+			pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
+		}
+		# Aggravated heals any wound (aggravated first), capped at max_hp.
+		AND = {
+			$STORY$ = {
+				has_variable = hp_heal
+				var:heal_type = flag:aggravated
+			}
+			pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+		}
+		# Guard the workspace mirror: it is unset before the first
+		# load_workspace this fight (STEP mode, AI-won initiative;
+		# first fight of a save), yet the PC move bar evals this
+		# gate per-frame. CK3 blocks do not short-circuit, so the
+		# bare compare would spam error.log. Unset = not healable.
+		AND = {
+			$STORY$ = { has_variable = morale_heal }
+			# Dotted, NOT wrapped: pod_combat_actor_max_morale_value is
+			# host-anchored (it reaches the workspace through the pointer
+			# itself), so wrapping the comparison drags the right-hand side
+			# into fight scope, where its own guard finds nothing and it
+			# silently degrades to the base cap. The hp siblings above read
+			# host-scoped SVs directly for the same reason.
+			trigger_if = {
+				limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_morale } }
+				var:pod_combat_session.var:pod_combat_actor_morale < pod_combat_actor_max_morale_value
+			}
+			trigger_else = { always = no }
+		}
+	}
+}
+
+# Player-turn targeting probes: did the player select a slot this move can
+# legally aim at, and is it still standing? Each owns its save_temporary_scope_as,
+# which must run before any_in_list flips scope into per-slot iteration so the
+# target pointer chain stays readable in the loop body. Saving inside a
+# custom_description is fine (00_POD_building_triggers.txt:593 does the same).
+pod_combat_player_has_enemy_target_trigger = {
+	save_temporary_scope_as = host
+	has_variable = pod_combat_my_control_slot
+	var:pod_combat_my_control_slot ?= { has_variable = slot_target_team }
+	scope:host.var:pod_combat_session ?= {
+		any_in_list = {
+			variable = pod_combat_active_slots
+			var:combat_team = scope:host.var:pod_combat_my_control_slot.var:slot_target_team
+			var:team_position = scope:host.var:pod_combat_my_control_slot.var:slot_target_position
+			pod_combat_slot_is_enemy_trigger = yes
+			pod_combat_slot_is_alive_trigger = yes
+		}
+	}
+}
+
+# Mirror of the enemy probe, narrowed to ally slots: the player team minus
+# whoever is acting.
+pod_combat_player_has_ally_target_trigger = {
+	save_temporary_scope_as = host
+	has_variable = pod_combat_my_control_slot
+	var:pod_combat_my_control_slot ?= { has_variable = slot_target_team }
+	scope:host.var:pod_combat_session ?= {
+		any_in_list = {
+			variable = pod_combat_active_slots
+			var:combat_team = scope:host.var:pod_combat_my_control_slot.var:slot_target_team
+			var:team_position = scope:host.var:pod_combat_my_control_slot.var:slot_target_position
+			pod_combat_slot_is_player_team_trigger = yes
+			NOT = { var:team_position = scope:host.var:pod_combat_my_control_slot.var:team_position }
+			pod_combat_slot_is_alive_trigger = yes
+		}
+	}
+}
+
+# Protect-the-PC moves target player/0 - direct pointer check rather than
+# any_in_list, since it's a single-slot probe.
+pod_combat_pc_slot_alive_trigger = {
+	var:pod_combat_session ?= { has_variable = pod_combat_pc_slot }
+	var:pod_combat_session.var:pod_combat_pc_slot ?= { has_variable = slot_char pod_combat_slot_is_alive_trigger = yes }
+}
+
+# Room on the side the summon would seat into. Resolve the destination before
+# checking its counter: summon_hostile seats opposite the caster.
+pod_combat_summon_capacity_available_trigger = {
+	OR = {
+		AND = {
+			pod_combat_summon_destination_is_player_team_trigger = { MOVE_STORY = $STORY$ }
+			var:pod_combat_session ?= { var:pod_combat_player_team_size < pod_combat_max_team_size }
+		}
+		AND = {
+			pod_combat_summon_destination_is_enemy_team_trigger = { MOVE_STORY = $STORY$ }
+			var:pod_combat_session ?= { var:pod_combat_enemy_team_size < pod_combat_max_team_size }
 		}
 	}
 }
@@ -43,7 +316,16 @@ pod_combat_actor_has_used_move_trigger = {
 # (cheapest-first for the AI's per-candidate walk). The AP + energy gates
 # stay in the WRAPPERS - adding them here too would double-evaluate them.
 # $STORY$ = the POD_combat_move story_cycle; $ACTOR$ = the acting character
-# (unlock/energy side); workspace reads resolve against root = the host.
+# (unlock/energy side). Ambient is the combat-host CHARACTER on both entry paths -
+# the PC's move bar through POD_can_execute_combat_move_trigger, the AI through
+# scope:combat_host - which is why the resource gates below read gold/piety/prestige
+# bare. The workspace lives on the FIGHT, so every workspace read here hops
+# var:pod_combat_session. A bare workspace read is absent on every evaluation, and an
+# unentered trigger_if PASSES, so the gate stops applying with nothing in error.log.
+# LOCKSTEP: a gate added here that can block the PC needs a matching failure line in
+# pod_combat_move_usability_tt (pod_combat_skill_guis.txt), or its blocked move greys
+# out on the bar with no reason shown. Reuse the shared predicates above so the gate
+# and the tooltip line test the same thing.
 pod_combat_move_dynamic_gates_trigger = {
 	# CK3 resource costs are PC-only - AI combatants spend nothing, so
 	# gold/piety/prestige gates apply only on the player turn.
@@ -52,7 +334,7 @@ pod_combat_move_dynamic_gates_trigger = {
 			$STORY$ = { has_variable = gold_cost }
 			pod_combat_is_player_turn_trigger = yes
 		}
-		gold >= $STORY$.var:gold_cost
+		pod_combat_can_afford_move_gold_trigger = { STORY = $STORY$ }
 	}
 
 	trigger_if = {
@@ -60,7 +342,7 @@ pod_combat_move_dynamic_gates_trigger = {
 			$STORY$ = { has_variable = piety_cost }
 			pod_combat_is_player_turn_trigger = yes
 		}
-		piety >= $STORY$.var:piety_cost
+		pod_combat_can_afford_move_piety_trigger = { STORY = $STORY$ }
 	}
 
 	trigger_if = {
@@ -68,14 +350,28 @@ pod_combat_move_dynamic_gates_trigger = {
 			$STORY$ = { has_variable = prestige_cost }
 			pod_combat_is_player_turn_trigger = yes
 		}
-		prestige >= $STORY$.var:prestige_cost
+		pod_combat_can_afford_move_prestige_trigger = { STORY = $STORY$ }
 	}
 
 	# State-condition gate (cond_mode = gate): usable only when the condition
-	# holds. Dynamic, both PC and AI.
+	# holds. The AI chooses a single-ally target after move selection, so its
+	# target-side condition is tested against candidate ally slots here; every
+	# other gate reads the ordinary actor/target workspace.
 	trigger_if = {
 		limit = { $STORY$ = { has_variable = cond_mode  var:cond_mode = flag:gate } }
-		pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ PREDICATE = $STORY$.var:cond_predicate }
+		trigger_if = {
+			limit = {
+				NOT = { pod_combat_is_player_turn_trigger = yes }
+				$STORY$ = {
+					var:targeting = flag:single_ally
+					var:cond_target = flag:target
+				}
+			}
+			pod_combat_ai_has_available_ally_trigger = { STORY = $STORY$ }
+		}
+		trigger_else = {
+			pod_combat_move_condition_met_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ PREDICATE = $STORY$.var:cond_predicate }
+		}
 	}
 
 	# once_per usage limiter: block re-use within the move's round / combat
@@ -89,8 +385,9 @@ pod_combat_move_dynamic_gates_trigger = {
 
 	# Duplicate-stance guards follow the actual beneficiary. On the player turn
 	# a selected single_ally is already loaded into target workspace;
-	# AI chooses its ally only after move selection, so those candidates skip
-	# this redundancy check and rely on the idempotent write helpers.
+	# the AI picks its ally only after move selection, so those candidates branch
+	# below to pod_combat_ai_has_ally_benefiting_trigger, which runs the same upgrade
+	# tests against each candidate ally's own slot vars.
 	# Only reject when the move's ENTIRE payload is a redundant stance/tier/
 	# retaliation rider. A move carrying an independent payload always passes; its
 	# idempotent / upgrade-only / take-strongest rider writers no-op the dead
@@ -99,108 +396,7 @@ pod_combat_move_dynamic_gates_trigger = {
 		limit = { NOT = { pod_combat_move_has_independent_payload_trigger = { STORY = $STORY$ } } }
 		custom_description = {
 			text = pod_combat_move_redundant_tt
-			# Team-targeted pure utility: admit if ANY affected slot benefits (not
-			# just the one selected slot).
-			trigger_if = {
-				limit = { $STORY$ = { OR = { var:targeting = flag:team_ally  var:targeting = flag:team_enemy  var:targeting = flag:team_all } } }
-				pod_combat_team_utility_move_admissible_trigger = { STORY = $STORY$ }
-			}
-			# AI single_ally pure utility: admit if some ally benefits (the ally is
-			# chosen after move selection, so the per-slot checks in the else do not
-			# apply here).
-			trigger_else_if = {
-				limit = {
-					NOT = { pod_combat_is_player_turn_trigger = yes }
-					$STORY$ = { var:targeting = flag:single_ally }
-				}
-				pod_combat_ai_has_ally_benefiting_trigger = { STORY = $STORY$ }
-			}
-			trigger_else = {
-				trigger_if = {
-					limit = {
-						pod_combat_is_player_turn_trigger = yes
-						$STORY$ = { var:targeting = flag:single_ally }
-					}
-					NAND = {
-						$STORY$ = { has_variable = set_guard }
-						has_variable = pod_combat_target_is_guarding
-					}
-					NAND = {
-						$STORY$ = { has_variable = dodge }
-						has_variable = pod_combat_target_is_dodging
-					}
-					NAND = {
-						$STORY$ = { has_variable = stealth }
-						has_variable = pod_combat_target_is_stealthed
-					}
-				}
-				trigger_if = {
-					limit = {
-						$STORY$ = { NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally } }
-					}
-					NAND = {
-						$STORY$ = { has_variable = set_guard }
-						has_variable = pod_combat_actor_is_guarding
-					}
-					NAND = {
-						$STORY$ = { has_variable = dodge }
-						has_variable = pod_combat_actor_is_dodging
-					}
-					NAND = {
-						$STORY$ = { has_variable = stealth }
-						has_variable = pod_combat_actor_is_stealthed
-					}
-				}
-				NAND = {
-					$STORY$ = { has_variable = retaliate_if_hit }
-					has_variable = pod_combat_actor_retaliate_hit
-				}
-				NAND = {
-					$STORY$ = { has_variable = retaliate_if_missed }
-					has_variable = pod_combat_actor_retaliate_miss
-				}
-				NAND = {
-					$STORY$ = { has_variable = retaliate_if_attacked }
-					has_variable = pod_combat_actor_retaliate_any
-				}
-
-				# Tier-redundancy guard - reject a tier buff/debuff at or below the
-				# current tier (upgrade-only contract; canonical rationale on
-				# pod_combat_upgrade_tier_var_effect in pod_combat_move_effects.txt).
-				# Strict `<` matches the AI guard.
-				# Gate mechanics: pod_combat_tier_upgrade_only_trigger (below).
-				# Covers workspace single-target tiers only; AoE downgrades are guarded at
-				# write time. Player-selected ally buffs compare the selected target. AI
-				# ally selection happens later, so its idempotent write is the final guard.
-				trigger_if = {
-					limit = {
-						pod_combat_is_player_turn_trigger = yes
-						$STORY$ = { var:targeting = flag:single_ally }
-					}
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_buff_combat_tier }
-				}
-				trigger_if = {
-					limit = {
-						$STORY$ = { NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally } }
-					}
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = actor TIER_VAR = hit_buff_combat_tier }
-				}
-				# Debuff-tier redundancy checks only the ONE selected enemy; a team AoE
-				# debuff must not be rejected because that one target already has the tier.
-				trigger_if = {
-					limit = { $STORY$ = { NOR = { var:targeting = flag:team_enemy  var:targeting = flag:team_all } } }
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
-					pod_combat_soak_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_round_tier }
-					pod_combat_tier_upgrade_only_trigger = { STORY = $STORY$ SIDE = target TIER_VAR = hit_debuff_combat_tier }
-				}
-			}
+			pod_combat_move_payload_useful_trigger = { STORY = $STORY$ }
 		}
 	}
 
@@ -212,60 +408,15 @@ pod_combat_move_dynamic_gates_trigger = {
 	# stay clickable - the actor's HP isn't the target, and the player
 	# may intentionally heal a wounded ally while full.
 	trigger_if = {
-		limit = {
-			$STORY$ = {
-				OR = {
-					has_variable = hp_heal
-					has_variable = morale_heal
-				}
-				NOT = { has_variable = hp_damage }
-				NOT = { has_variable = morale_damage }
-				OR = {
-					NOT = { has_variable = targeting }
-					var:targeting = flag:self
-				}
-			}
-		}
+		limit = { pod_combat_move_is_self_only_heal_trigger = { STORY = $STORY$ } }
 		custom_description = {
 			text = pod_combat_cant_heal_already_full_desc
-			OR = {
-				# Superficial heals stop at sup_ceiling (= max_hp -
-				# agg_boxes): aggravated wounds pin the track top, so
-				# this can be a no-op even while hp < max_hp.
-				AND = {
-					$STORY$ = {
-						has_variable = hp_heal
-						var:heal_type = flag:superficial
-					}
-					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
-				}
-				# Aggravated heals any wound (aggravated first), capped at max_hp.
-				AND = {
-					$STORY$ = {
-						has_variable = hp_heal
-						var:heal_type = flag:aggravated
-					}
-					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
-				}
-				# Guard the workspace mirror: it is unset before the first
-				# load_workspace this fight (STEP mode, AI-won initiative;
-				# first fight of a save), yet the PC move bar evals this
-				# gate per-frame. CK3 blocks do not short-circuit, so the
-				# bare compare would spam error.log. Unset = not healable.
-				AND = {
-					$STORY$ = { has_variable = morale_heal }
-					trigger_if = {
-						limit = { has_variable = pod_combat_actor_morale }
-						var:pod_combat_actor_morale < pod_combat_actor_max_morale_value
-					}
-					trigger_else = { always = no }
-				}
-			}
+			pod_combat_self_heal_has_effect_trigger = { STORY = $STORY$ }
 		}
 	}
 
-	# Targeting validity, player turn only - the PC picked a slot via
-	# pod_combat_pc_target_*. AI eval skips this (the AI swap effects
+	# Targeting validity, player turn only - the player picked a slot, stored as
+	# slot_target_* on the acting slot. AI eval skips this (the AI swap effects
 	# choose the target after move choice).
 	trigger_if = {
 		limit = {
@@ -274,21 +425,9 @@ pod_combat_move_dynamic_gates_trigger = {
 		}
 		# custom_description swaps the disabled-button tooltip to "Select
 		# an enemy target" instead of raw trigger text.
-		# save_temporary_scope_as captures the host before any_in_list
-		# flips scope into per-slot iteration, so pod_combat_pc_target_*
-		# stays readable in the loop body. Same pattern as
-		# pod_combat_ai_has_available_ally_trigger in pod_combat_triggers.txt.
-		save_temporary_scope_as = host
 		custom_description = {
 			text = pod_combat_targeting_need_enemy_tt
-			has_variable = pod_combat_pc_target_team
-			any_in_list = {
-				variable = pod_combat_active_slots
-				var:combat_team = scope:host.var:pod_combat_pc_target_team
-				var:team_position = scope:host.var:pod_combat_pc_target_position
-				pod_combat_slot_is_enemy_trigger = yes
-				pod_combat_slot_is_alive_trigger = yes
-			}
+			pod_combat_player_has_enemy_target_trigger = yes
 		}
 	}
 
@@ -297,20 +436,11 @@ pod_combat_move_dynamic_gates_trigger = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_ally }
 		}
-		# Mirror of the single_enemy branch above; team_position >= 1
-		# narrows to ally slots (player team minus the PC).
-		save_temporary_scope_as = host
+		# Mirror of the single_enemy branch above, narrowed to ally slots: the
+		# player team minus whoever is acting.
 		custom_description = {
 			text = pod_combat_targeting_need_ally_tt
-			has_variable = pod_combat_pc_target_team
-			any_in_list = {
-				variable = pod_combat_active_slots
-				var:combat_team = scope:host.var:pod_combat_pc_target_team
-				var:team_position = scope:host.var:pod_combat_pc_target_position
-				pod_combat_slot_is_player_team_trigger = yes
-				var:team_position >= 1
-				pod_combat_slot_is_alive_trigger = yes
-			}
+			pod_combat_player_has_ally_target_trigger = yes
 		}
 	}
 
@@ -319,12 +449,9 @@ pod_combat_move_dynamic_gates_trigger = {
 			pod_combat_is_player_turn_trigger = yes
 			$STORY$ = { var:targeting = flag:single_pc }
 		}
-		# Protect-the-PC moves target player/0 - direct pointer check
-		# rather than any_in_list, since it's a single-slot probe.
 		custom_description = {
 			text = pod_combat_targeting_need_pc_alive_tt
-			has_variable = pod_combat_pc_slot
-			var:pod_combat_pc_slot = { has_variable = slot_char pod_combat_slot_is_alive_trigger = yes }
+			pod_combat_pc_slot_alive_trigger = yes
 		}
 	}
 
@@ -335,10 +462,12 @@ pod_combat_move_dynamic_gates_trigger = {
 		}
 		# At least one alive enemy slot. No pc_target dependency -> no
 		# scope save (all filters are on the slot story itself).
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_enemy_trigger = yes
-			pod_combat_slot_is_alive_trigger = yes
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_enemy_trigger = yes
+				pod_combat_slot_is_alive_trigger = yes
+			}
 		}
 	}
 
@@ -350,9 +479,11 @@ pod_combat_move_dynamic_gates_trigger = {
 		# At least one alive slot. Vacuous during a live fight (the caster itself
 		# qualifies - team_all always has the caster to hit), but it fails closed
 		# during a tooltip build, where the slot list reads empty.
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_alive_trigger = yes
+		var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+			}
 		}
 	}
 
@@ -364,7 +495,7 @@ pod_combat_move_dynamic_gates_trigger = {
 			NOT = { pod_combat_is_player_turn_trigger = yes }
 			$STORY$ = { var:targeting = flag:single_ally }
 		}
-		pod_combat_ai_has_available_ally_trigger = yes
+		pod_combat_ai_has_available_ally_trigger = { STORY = $STORY$ }
 	}
 
 	# AI-side single_ally BENEFIT need-gate: beyond "an ally exists", only pick a
@@ -393,28 +524,29 @@ pod_combat_move_dynamic_gates_trigger = {
 		pod_combat_ai_has_ally_benefiting_trigger = { STORY = $STORY$ }
 	}
 
-	# Summon-capacity gate. Resolve the destination before checking its team counter:
-	# summon_hostile seats opposite the caster. The glue repeats this pre-check, but
-	# the usability gate prevents a live-looking button from wasting AP/energy.
+	# Duel rule: this fight bars summoning outright (COMBAT_REFERENCE.info section 3,
+	# "Duel rule: summoning"). Ahead of the capacity gate so a barred move states the
+	# rule rather than reporting a team that happens to be full as well.
+	trigger_if = {
+		limit = { $STORY$ = { has_variable = summons_combatant } }
+		custom_description = {
+			text = pod_combat_cant_summon_duel_barred_tt
+			NOT = { pod_combat_duel_bans_summons_trigger = yes }
+		}
+	}
+
+	# Summon-capacity gate. The glue repeats this pre-check, but the usability gate
+	# prevents a live-looking button from wasting AP/energy.
 	# current_actor_team = the caster's side on either turn; has_variable-guarded since
 	# the combat window can re-evaluate is_valid between rounds when it is briefly unset.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = summons_combatant }
-			has_variable = pod_combat_current_actor_team
+			var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team }
 		}
 		custom_description = {
 			text = pod_combat_cant_summon_team_full_tt
-			OR = {
-				AND = {
-					pod_combat_summon_destination_is_player_team_trigger = { MOVE_STORY = $STORY$ }
-					var:pod_combat_player_team_size < pod_combat_max_team_size
-				}
-				AND = {
-					pod_combat_summon_destination_is_enemy_team_trigger = { MOVE_STORY = $STORY$ }
-					var:pod_combat_enemy_team_size < pod_combat_max_team_size
-				}
-			}
+			pod_combat_summon_capacity_available_trigger = { STORY = $STORY$ }
 		}
 	}
 
@@ -429,9 +561,12 @@ pod_combat_move_dynamic_gates_trigger = {
 # + the shared dynamic gate list above.
 POD_can_execute_combat_move_trigger = {
 	# $STORY$ = the POD_combat_move story_cycle
-	# $ACTOR$ = character whose unlock gate (splat/trait/perk) is tested.
-	#          On AI turns this differs from the host (PC); workspace
-	#          reads (AP, energy) still resolve against root = the host.
+	# $ACTOR$ = the character the move is being validated FOR - its unlock gate,
+	#          its energy reserve, its dynamic gates. Differs from root on AI
+	#          turns, and now also on the human path, where the execute SGUI
+	#          passes the driven combatant rather than the clicking client.
+	#          AP is NOT actor-wrapped and does not need to be: it is a fight
+	#          var, so root and actor deref the same object.
 
 	NOT = { pod_combat_is_over_trigger = yes }
 
@@ -439,8 +574,9 @@ POD_can_execute_combat_move_trigger = {
 	# pod_combat_unlocked_moves list (built at fight start) instead of
 	# re-running the unlock dispatcher every GUI frame (the documented PC-turn
 	# hotspot; unlocks are static mid-combat). Per-character, not a shared
-	# story flag. (AI move 	# selection does NOT use this trigger - it validates picks via loadout membership.)
-	$ACTOR$ = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = $STORY$ } }
+	# story flag. (AI move selection does NOT use this trigger - it validates
+	# picks via loadout membership.)
+	pod_combat_actor_has_baked_unlock_trigger = { STORY = $STORY$ ACTOR = $ACTOR$ }
 
 	trigger_if = {
 		limit = {
@@ -511,17 +647,33 @@ pod_combat_move_is_usable_now_trigger = {
 # Passes unless the move's $TIER_VAR$ is at or below the live workspace tier
 # (upgrade-only contract; canonical rationale on pod_combat_upgrade_tier_var_effect
 # in pod_combat_move_effects.txt).
+# The hit-tier workspace lives on the FIGHT while ambient here is the combat-host
+# CHARACTER on both entry paths, so both reads hop pod_combat_session, exactly as the
+# soak twin below and the stance NANDs at the call sites do. A bare read resolves
+# against the character, is absent on every evaluation, and an unentered trigger_if
+# reports PASS with nothing in error.log.
+# Round and combat tiers are compared alike. Neither clear is a countdown a re-apply
+# could postpone: pod_combat_clear_actor_round_buffs_effect strips the round tier
+# unconditionally at the holder's turn boundary, and pod_combat_upgrade_tier_var_effect
+# refuses any write that is not a strict raise, so an equal-tier re-apply writes
+# nothing at either duration. The round gate still re-opens every turn, because the
+# clear runs before the workspace reload and the mirror is absence-faithful.
 # Single trigger_if (not NAND) so the var reads only happen when both the move
-# attribute and the workspace var exist, avoiding "variable not set" warnings.
+# attribute and the workspace var exist, avoiding "variable not set" warnings. The
+# explicit trigger_else states the fail-open the bare form left implicit: with no
+# fight, no loaded workspace, or no such rider on the move, nothing may be blocked.
 pod_combat_tier_upgrade_only_trigger = {
 	# $STORY$ = move story; $SIDE$ = actor|target; $TIER_VAR$ = tier var name.
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = $TIER_VAR$ }
-			has_variable = pod_combat_$SIDE$_$TIER_VAR$
+			var:pod_combat_session ?= { has_variable = pod_combat_$SIDE$_$TIER_VAR$ }
 		}
-		var:pod_combat_$SIDE$_$TIER_VAR$ < $STORY$.var:$TIER_VAR$
+		# Dotted, not wrapped: $STORY$ is a passed scope and resolves absolutely, so
+		# entering the fight buys nothing and the compare stays one line.
+		var:pod_combat_session.var:pod_combat_$SIDE$_$TIER_VAR$ < $STORY$.var:$TIER_VAR$
 	}
+	trigger_else = { always = yes }
 }
 
 # Soak twin of the guard above. Soak tiers are not mirrored onto the workspace -
@@ -534,15 +686,15 @@ pod_combat_soak_tier_upgrade_only_trigger = {
 	trigger_if = {
 		limit = {
 			$STORY$ = { has_variable = $TIER_VAR$ }
-			has_variable = pod_combat_$SIDE$_char
-			exists = var:pod_combat_$SIDE$_char
+			var:pod_combat_session ?= { has_variable = pod_combat_$SIDE$_char }
+			exists = var:pod_combat_session.var:pod_combat_$SIDE$_char
 		}
 		# Nested, not a fourth clause in the limit above: CK3 does not
 		# short-circuit a limit, so a bridge-var read placed there would
 		# evaluate even when the char pointer is unset. This trigger sits on
 		# the PC move bar's per-frame is_valid, including the between-rounds
 		# window where the workspace pointers are cleared.
-		var:pod_combat_$SIDE$_char = {
+		var:pod_combat_session.var:pod_combat_$SIDE$_char ?= {
 			trigger_if = {
 				limit = { has_variable = $BRIDGE_VAR$ }
 				var:$BRIDGE_VAR$ < $STORY$.var:$TIER_VAR$
@@ -574,8 +726,9 @@ pod_combat_move_has_independent_payload_trigger = {
 			has_variable = summons_combatant
 			has_variable = steal_gold
 			has_variable = gain_dread
-			has_variable = bonus_effect
+			has_variable_list = bonus_clauses
 			has_variable = marker_modifier
+			has_variable = remove_marker
 		}
 	}
 }
@@ -601,40 +754,46 @@ pod_combat_move_has_independent_payload_trigger = {
 # damage; the OR lets the §9 on_hp_damage drain rider fire once after the loop. A
 # fully soaked/missed AoE latches nothing, so the drain correctly does not heal.
 pod_combat_result_code_indicates_hp_damage_trigger = {
-	OR = {
-		AND = {
-			has_variable = pod_combat_last_outcome
-			var:pod_combat_last_outcome = flag:attack
-			has_variable = pod_combat_last_attack_result
-			var:pod_combat_last_attack_result = flag:hp_damage
+	var:pod_combat_session ?= {
+		OR = {
+			AND = {
+				has_variable = pod_combat_last_outcome
+				var:pod_combat_last_outcome = flag:attack
+				has_variable = pod_combat_last_attack_result
+				var:pod_combat_last_attack_result = flag:hp_damage
+			}
+			has_variable = pod_combat_aoe_any_hp_damage
 		}
-		has_variable = pod_combat_aoe_any_hp_damage
 	}
 }
 
 # Physical contact: hp_damage plus blocked / soaked. For "fires on
 # touch even if absorbed" riders (e.g. poison delivered on the strike).
 pod_combat_result_code_indicates_contact_trigger = {
-	has_variable = pod_combat_last_outcome
-	var:pod_combat_last_outcome = flag:attack
-	has_variable = pod_combat_last_attack_result
-	OR = {
-		var:pod_combat_last_attack_result = flag:hp_damage
-		var:pod_combat_last_attack_result = flag:guard_blocked
-		var:pod_combat_last_attack_result = flag:soaked
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_last_outcome
+		var:pod_combat_last_outcome = flag:attack
+		has_variable = pod_combat_last_attack_result
+		OR = {
+			var:pod_combat_last_attack_result = flag:hp_damage
+			var:pod_combat_last_attack_result = flag:guard_blocked
+			var:pod_combat_last_attack_result = flag:soaked
+		}
 	}
 }
 
 # Evaded the attack - miss, dodge consumed, stealth auto-miss. Used by
 # retaliate_if_missed and rider_condition = on_miss.
 pod_combat_result_code_indicates_miss_trigger = {
-	has_variable = pod_combat_last_outcome
-	var:pod_combat_last_outcome = flag:attack
-	has_variable = pod_combat_last_attack_result
-	OR = {
-		var:pod_combat_last_attack_result = flag:missed
-		var:pod_combat_last_attack_result = flag:dodged
-		var:pod_combat_last_attack_result = flag:stealthed
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_last_outcome
+		var:pod_combat_last_outcome = flag:attack
+		has_variable = pod_combat_last_attack_result
+		OR = {
+			var:pod_combat_last_attack_result = flag:missed
+			var:pod_combat_last_attack_result = flag:dodged
+			var:pod_combat_last_attack_result = flag:stealthed
+		}
 	}
 }
 
@@ -643,9 +802,11 @@ pod_combat_result_code_indicates_miss_trigger = {
 # belongs to neither contact nor miss) and any future code qualify without a
 # second edit here. Used by retaliate_if_attacked.
 pod_combat_result_code_indicates_attack_trigger = {
-	has_variable = pod_combat_last_outcome
-	var:pod_combat_last_outcome = flag:attack
-	has_variable = pod_combat_last_attack_result
+	var:pod_combat_session ?= {
+		has_variable = pod_combat_last_outcome
+		var:pod_combat_last_outcome = flag:attack
+		has_variable = pod_combat_last_attack_result
+	}
 }
 
 # Firing gate for the always-retaliate charge: the attack resolved AND no
@@ -655,7 +816,7 @@ pod_combat_result_code_indicates_attack_trigger = {
 # on the log row is a single slot, so two counters would overwrite each other).
 pod_combat_reaction_any_condition_trigger = {
 	pod_combat_result_code_indicates_attack_trigger = yes
-	NOT = { has_variable = pod_combat_last_retal_fired }
+	NOT = { var:pod_combat_session ?= { has_variable = pod_combat_last_retal_fired } }
 }
 
 ######################################################
@@ -710,27 +871,27 @@ pod_combat_move_condition_met_trigger = {
 
 		# global (host round)
 		flag:first_round = {
-			trigger_if = { limit = { has_variable = pod_combat_round } var:pod_combat_round = 1 }
+			trigger_if = { limit = { var:pod_combat_session ?= { has_variable = pod_combat_round } } var:pod_combat_session ?= { var:pod_combat_round = 1 } }
 			trigger_else = { always = no }
 		}
 		flag:round_min = {
-			trigger_if = { limit = { has_variable = pod_combat_round } var:pod_combat_round >= $STORY$.var:cond_threshold }
+			trigger_if = { limit = { var:pod_combat_session ?= { has_variable = pod_combat_round } } var:pod_combat_session ?= { var:pod_combat_round >= $STORY$.var:cond_threshold } }
 			trigger_else = { always = no }
 		}
 
 		# HP, live from the character's PoD wound track
 		flag:undamaged = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { POD_empty_damage_boxes = POD_health_track_length }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session.var:pod_combat_target_char ?= { POD_empty_damage_boxes = POD_health_track_length }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { POD_empty_damage_boxes = POD_health_track_length } }
 		}
 		flag:hp_missing = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { POD_empty_damage_boxes <= { value = POD_health_track_length  subtract = $STORY$.var:cond_threshold } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session.var:pod_combat_target_char ?= { POD_empty_damage_boxes <= { value = POD_health_track_length  subtract = $STORY$.var:cond_threshold } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { POD_empty_damage_boxes <= { value = POD_health_track_length  subtract = $STORY$.var:cond_threshold } } }
@@ -739,35 +900,35 @@ pod_combat_move_condition_met_trigger = {
 		# morale, via the host workspace mirror
 		flag:full_morale = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_morale }
-				var:pod_combat_target_morale = pod_combat_target_max_morale_value
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_morale } }
+				var:pod_combat_session.var:pod_combat_target_morale = pod_combat_target_max_morale_value
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
-			trigger_else_if = { limit = { has_variable = pod_combat_actor_morale } var:pod_combat_actor_morale = pod_combat_actor_max_morale_value }
+			trigger_else_if = { limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_morale } } var:pod_combat_session.var:pod_combat_actor_morale = pod_combat_actor_max_morale_value }
 			trigger_else = { always = no }
 		}
 		flag:morale_missing = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_morale }
-				var:pod_combat_target_morale <= { value = pod_combat_target_max_morale_value  subtract = $STORY$.var:cond_threshold }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_morale } }
+				var:pod_combat_session.var:pod_combat_target_morale <= { value = pod_combat_target_max_morale_value  subtract = $STORY$.var:cond_threshold }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
-			trigger_else_if = { limit = { has_variable = pod_combat_actor_morale } var:pod_combat_actor_morale <= { value = pod_combat_actor_max_morale_value  subtract = $STORY$.var:cond_threshold } }
+			trigger_else_if = { limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_morale } } var:pod_combat_session.var:pod_combat_actor_morale <= { value = pod_combat_actor_max_morale_value  subtract = $STORY$.var:cond_threshold } }
 			trigger_else = { always = no }
 		}
 
 		# stance flags (has_variable is unset-safe)
 		flag:has_guard = {
-			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_guarding }
-			trigger_else = { has_variable = pod_combat_actor_is_guarding }
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } var:pod_combat_session ?= { has_variable = pod_combat_target_is_guarding } }
+			trigger_else = { var:pod_combat_session ?= { has_variable = pod_combat_actor_is_guarding } }
 		}
 		flag:has_dodge = {
-			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_dodging }
-			trigger_else = { has_variable = pod_combat_actor_is_dodging }
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } var:pod_combat_session ?= { has_variable = pod_combat_target_is_dodging } }
+			trigger_else = { var:pod_combat_session ?= { has_variable = pod_combat_actor_is_dodging } }
 		}
 		flag:has_stealth = {
-			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } has_variable = pod_combat_target_is_stealthed }
-			trigger_else = { has_variable = pod_combat_actor_is_stealthed }
+			trigger_if = { limit = { $STORY$ = { var:cond_target = flag:target } } var:pod_combat_session ?= { has_variable = pod_combat_target_is_stealthed } }
+			trigger_else = { var:pod_combat_session ?= { has_variable = pod_combat_actor_is_stealthed } }
 		}
 
 		# Character status (vanilla character triggers; scope-switch to the char by
@@ -775,24 +936,24 @@ pod_combat_move_condition_met_trigger = {
 		# minimum: prestige_level / piety_level are 0-5 ranks, dread is 0-100.
 		flag:prestige_level_min = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { prestige_level >= $STORY$.var:cond_threshold }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { prestige_level >= $STORY$.var:cond_threshold } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { prestige_level >= $STORY$.var:cond_threshold } }
 		}
 		flag:piety_level_min = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { piety_level >= $STORY$.var:cond_threshold }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { piety_level >= $STORY$.var:cond_threshold } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { piety_level >= $STORY$.var:cond_threshold } }
 		}
 		flag:dread_min = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { dread >= $STORY$.var:cond_threshold }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { dread >= $STORY$.var:cond_threshold } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { dread >= $STORY$.var:cond_threshold } }
@@ -804,15 +965,15 @@ pod_combat_move_condition_met_trigger = {
 		# the opinion magnitude; the negative side flips the sign in the compare.
 		flag:relation_positive = {
 			trigger_if = {
-				limit = { has_variable = pod_combat_target_char }
-				$ACTOR$ = { opinion = { target = root.var:pod_combat_target_char  value >= $STORY$.var:cond_threshold } }
+				limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				$ACTOR$ = { opinion = { target = root.var:pod_combat_session.var:pod_combat_target_char  value >= $STORY$.var:cond_threshold } }
 			}
 			trigger_else = { always = no }
 		}
 		flag:relation_negative = {
 			trigger_if = {
-				limit = { has_variable = pod_combat_target_char }
-				$ACTOR$ = { opinion = { target = root.var:pod_combat_target_char  value <= { value = $STORY$.var:cond_threshold  multiply = -1 } } }
+				limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				$ACTOR$ = { opinion = { target = root.var:pod_combat_session.var:pod_combat_target_char  value <= { value = $STORY$.var:cond_threshold  multiply = -1 } } }
 			}
 			trigger_else = { always = no }
 		}
@@ -822,16 +983,16 @@ pod_combat_move_condition_met_trigger = {
 		# weapon slot, armor = the armor slot). Boolean, so cond_threshold is unused.
 		flag:has_weapon_artifact = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = primary_armament } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = primary_armament } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { any_character_artifact = { is_equipped = yes  artifact_slot_type = primary_armament } } }
 		}
 		flag:has_armor_artifact = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = armor } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { any_character_artifact = { is_equipped = yes  artifact_slot_type = armor } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { any_character_artifact = { is_equipped = yes  artifact_slot_type = armor } } }
@@ -844,26 +1005,26 @@ pod_combat_move_condition_met_trigger = {
 		# (pod_combat_condition_dispatch_triggers.txt).
 		flag:has_trait = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { pod_combat_cond_has_trait_trigger = { STORY = $STORY$ } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { pod_combat_cond_has_trait_trigger = { STORY = $STORY$ } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { pod_combat_cond_has_trait_trigger = { STORY = $STORY$ } } }
 		}
 		flag:target_known_secret = {
 			trigger_if = {
-				limit = { has_variable = pod_combat_target_char }
+				limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
 				$ACTOR$ = { pod_combat_cond_known_secret_trigger = { STORY = $STORY$ } }
 			}
 			trigger_else = { always = no }
 		}
-		# Marker character modifier left by an earlier move (marker_modifier
-		# setter, §12c). Same routing as has_trait; the sub-dispatch resolves
-		# cond_param to the literal modifier key.
+		# Character modifier, either a combat marker or an allow-listed PoD-owned
+		# state such as Wolf Form. Same routing as has_trait; the sub-dispatch
+		# resolves cond_param to the literal modifier key.
 		flag:has_modifier = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { pod_combat_cond_has_modifier_trigger = { STORY = $STORY$ } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { pod_combat_cond_has_modifier_trigger = { STORY = $STORY$ } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { pod_combat_cond_has_modifier_trigger = { STORY = $STORY$ } } }
@@ -872,8 +1033,8 @@ pod_combat_move_condition_met_trigger = {
 		# cond_param to the literal perk key.
 		flag:has_perk = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { pod_combat_cond_has_perk_trigger = { STORY = $STORY$ } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { pod_combat_cond_has_perk_trigger = { STORY = $STORY$ } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { pod_combat_cond_has_perk_trigger = { STORY = $STORY$ } } }
@@ -881,8 +1042,8 @@ pod_combat_move_condition_met_trigger = {
 
 		flag:fera_form = {
 			trigger_if = {
-				limit = { $STORY$ = { var:cond_target = flag:target }  has_variable = pod_combat_target_char }
-				var:pod_combat_target_char = { pod_combat_cond_fera_form_trigger = { STORY = $STORY$ } }
+				limit = { $STORY$ = { var:cond_target = flag:target }  var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
+				var:pod_combat_session ?= { var:pod_combat_target_char = { pod_combat_cond_fera_form_trigger = { STORY = $STORY$ } } }
 			}
 			trigger_else_if = { limit = { $STORY$ = { var:cond_target = flag:target } } always = no }
 			trigger_else = { $ACTOR$ = { pod_combat_cond_fera_form_trigger = { STORY = $STORY$ } } }
@@ -909,11 +1070,11 @@ pod_combat_move_condition_met_trigger = {
 		flag:outnumbered = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
 				pod_combat_alive_player_count_value < pod_combat_alive_enemy_count_value
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
 				pod_combat_alive_enemy_count_value < pod_combat_alive_player_count_value
 			}
 			trigger_else = { always = no }
@@ -921,12 +1082,16 @@ pod_combat_move_condition_met_trigger = {
 		flag:ally_knocked_out = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
-				any_in_list = { variable = pod_combat_active_slots  pod_combat_slot_is_ko_trigger = yes  var:combat_team = flag:player  NOT = { var:slot_char = { this = scope:pod_combat_cond_actor } } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
+				var:pod_combat_session ?= {
+					any_in_list = { variable = pod_combat_active_slots  pod_combat_slot_is_ko_trigger = yes  var:combat_team = flag:player  NOT = { var:slot_char = { this = scope:pod_combat_cond_actor } } }
+				}
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
-				any_in_list = { variable = pod_combat_active_slots  pod_combat_slot_is_ko_trigger = yes  var:combat_team = flag:enemy  NOT = { var:slot_char = { this = scope:pod_combat_cond_actor } } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
+				var:pod_combat_session ?= {
+					any_in_list = { variable = pod_combat_active_slots  pod_combat_slot_is_ko_trigger = yes  var:combat_team = flag:enemy  NOT = { var:slot_char = { this = scope:pod_combat_cond_actor } } }
+				}
 			}
 			trigger_else = { always = no }
 		}
@@ -940,11 +1105,11 @@ pod_combat_move_condition_met_trigger = {
 		flag:alive_enemies_min = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
 				pod_combat_alive_enemy_count_value >= $STORY$.var:cond_threshold
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
 				pod_combat_alive_player_count_value >= $STORY$.var:cond_threshold
 			}
 			trigger_else = { always = no }
@@ -952,11 +1117,11 @@ pod_combat_move_condition_met_trigger = {
 		flag:alive_enemies_max = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
 				pod_combat_alive_enemy_count_value <= $STORY$.var:cond_threshold
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
 				pod_combat_alive_player_count_value <= $STORY$.var:cond_threshold
 			}
 			trigger_else = { always = no }
@@ -964,11 +1129,11 @@ pod_combat_move_condition_met_trigger = {
 		flag:alive_allies_min = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
 				pod_combat_alive_player_count_value >= { value = $STORY$.var:cond_threshold  add = 1 }
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
 				pod_combat_alive_enemy_count_value >= { value = $STORY$.var:cond_threshold  add = 1 }
 			}
 			trigger_else = { always = no }
@@ -976,11 +1141,11 @@ pod_combat_move_condition_met_trigger = {
 		flag:alive_allies_max = {
 			$ACTOR$ = { save_temporary_scope_as = pod_combat_cond_actor }
 			trigger_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:player } } }
 				pod_combat_alive_player_count_value <= { value = $STORY$.var:cond_threshold  add = 1 }
 			}
 			trigger_else_if = {
-				limit = { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } }
+				limit = { var:pod_combat_session ?= { any_in_list = { variable = pod_combat_active_slots  var:slot_char = { this = scope:pod_combat_cond_actor }  var:combat_team = flag:enemy } } }
 				pod_combat_alive_enemy_count_value <= { value = $STORY$.var:cond_threshold  add = 1 }
 			}
 			trigger_else = { always = no }
@@ -1004,12 +1169,22 @@ pod_combat_move_condition_met_trigger = {
 #     pod_combat_current_actor_team is read).
 
 pod_combat_aoe_team_enemy_filter_trigger = {
-	NOT = { var:combat_team = scope:host.var:pod_combat_current_actor_team }
+	trigger_if = {
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		NOT = { var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team }
+	}
+	# Affect no slot with no actor. Unreachable during real execution (§11 always
+	# has one), but this is evaluated per frame from the PC move bar.
+	trigger_else = { always = no }
 }
 
 pod_combat_aoe_team_ally_filter_trigger = {
 	# Includes the actor's own slot - team_ally heals/buffs cover self.
-	var:combat_team = scope:host.var:pod_combat_current_actor_team
+	trigger_if = {
+		limit = { scope:host.var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
+		var:combat_team = scope:host.var:pod_combat_session.var:pod_combat_current_actor_team
+	}
+	trigger_else = { always = no }
 }
 
 # The slots a team_all sweep iterates: both teams minus the caster. team_all
@@ -1080,21 +1255,23 @@ pod_combat_slot_soak_tier_rider_upgrades_trigger = {
 pod_combat_team_utility_move_admissible_trigger = {
 	save_temporary_scope_as = host
 	trigger_if = {
-		limit = { NOT = { has_variable = pod_combat_current_actor_team } }
+		limit = { NOT = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } } }
 		always = yes
 	}
 	trigger_else_if = {
 		limit = { $STORY$ = { var:targeting = flag:team_ally } }
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_alive_trigger = yes
-			pod_combat_aoe_team_ally_filter_trigger = yes
-			OR = {
-				pod_combat_slot_stance_rider_useful_trigger = { STORY = $STORY$ }
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_round_tier }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_combat_tier }
+		scope:host.var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_aoe_team_ally_filter_trigger = yes
+				OR = {
+					pod_combat_slot_stance_rider_useful_trigger = { STORY = $STORY$ }
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_buff_round }
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_buff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_buff_combat }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_round_tier }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_buff_combat_tier }
+				}
 			}
 		}
 	}
@@ -1102,28 +1279,32 @@ pod_combat_team_utility_move_admissible_trigger = {
 		# team_all broadcasts debuff tiers to everyone, caster included, so it
 		# admits on the same debuff-upgrade test as team_enemy over every slot.
 		limit = { $STORY$ = { var:targeting = flag:team_all } }
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_alive_trigger = yes
-			OR = {
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_round_tier }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_combat_tier }
+		scope:host.var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				OR = {
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_round_tier }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_combat_tier }
+				}
 			}
 		}
 	}
 	trigger_else_if = {
 		limit = { $STORY$ = { var:targeting = flag:team_enemy } }
-		any_in_list = {
-			variable = pod_combat_active_slots
-			pod_combat_slot_is_alive_trigger = yes
-			pod_combat_aoe_team_enemy_filter_trigger = yes
-			OR = {
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
-				pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_round_tier }
-				pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_combat_tier }
+		scope:host.var:pod_combat_session ?= {
+			any_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_slot_is_alive_trigger = yes
+				pod_combat_aoe_team_enemy_filter_trigger = yes
+				OR = {
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_round_tier  BRIDGE_VAR = pod_combat_tier_soak_debuff_round }
+					pod_combat_slot_soak_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = soak_debuff_combat_tier BRIDGE_VAR = pod_combat_tier_soak_debuff_combat }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_round_tier }
+					pod_combat_slot_tier_rider_upgrades_trigger = { STORY = $STORY$ TIER_VAR = hit_debuff_combat_tier }
+				}
 			}
 		}
 	}
@@ -1131,24 +1312,32 @@ pod_combat_team_utility_move_admissible_trigger = {
 }
 
 # Weight-modifier context (scope:ai_candidate_move = scored move; scope:combat_host
-# = workspace mirrors, both saved by the AI selector). True if a stance/tier/retal
-# rider the candidate carries is already covered - part of a hybrid is wasted.
-# Retaliation is presence-only. Buff tiers check the actor; debuff tiers the target.
+# = the host carrying the fight pointer, both saved by the AI selector). True when a
+# rider the candidate carries is already covered, so part of a hybrid's payload is
+# dead weight and a cleaner move should win the roll.
+# Stance and retaliation are presence-only: re-entering a binary stance or re-arming a
+# take-strongest reaction is a pure no-op. Combat-duration tiers delegate to the same
+# gate the admissibility check uses, so the hard reject and this soft nudge cannot
+# drift apart on what "already covered" means.
+# ROUND tiers are deliberately absent: a round hit buff is already priced twice, by
+# @ai_round_buff_spam and @ai_round_buff_lateap, and a third -8 against a band width of
+# 10 bands the hybrid out instead of shading its odds. Soak is left to
+# @ai_soak_buff_capped, which prices the same waste off the resulting soak percentage
+# rather than off the tier number.
 pod_combat_ai_candidate_has_redundant_rider_trigger = {
-	# Weight-modifier context (scope:ai_candidate_move = scored move; scope:combat_host
-	# = workspace mirrors, both saved by the AI selector). True when a stance or retal
-	# rider the candidate carries is already active on the actor - re-entering a binary
-	# stance / re-arming (take-strongest) is a pure no-op, so part of a hybrid
-	# is wasted. Tier riders are NOT checked here: the active-tier state lives on the
-	# actor slot (no host mirror at scoring time) and a same-tier re-apply refreshes
-	# duration, so it is not waste - the undersized-buff modifier steers tier choice.
 	OR = {
-		AND = { scope:ai_candidate_move = { has_variable = set_guard } scope:combat_host = { has_variable = pod_combat_actor_is_guarding } }
-		AND = { scope:ai_candidate_move = { has_variable = dodge }     scope:combat_host = { has_variable = pod_combat_actor_is_dodging } }
-		AND = { scope:ai_candidate_move = { has_variable = stealth }   scope:combat_host = { has_variable = pod_combat_actor_is_stealthed } }
-		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_hit }    scope:combat_host = { has_variable = pod_combat_actor_retaliate_hit } }
-		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_missed } scope:combat_host = { has_variable = pod_combat_actor_retaliate_miss } }
-		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_attacked } scope:combat_host = { has_variable = pod_combat_actor_retaliate_any } }
+		AND = { scope:ai_candidate_move = { has_variable = set_guard } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_is_guarding } }
+		AND = { scope:ai_candidate_move = { has_variable = dodge }     scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_is_dodging } }
+		AND = { scope:ai_candidate_move = { has_variable = stealth }   scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_is_stealthed } }
+		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_hit }    scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_hit } }
+		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_missed } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_miss } }
+		AND = { scope:ai_candidate_move = { has_variable = retaliate_if_attacked } scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_actor_retaliate_any } }
+		# Host-wrapped because the gate's contract is ambient = the host character. No
+		# has_variable partner: the gate already passes when the candidate carries no
+		# such tier, so NOT is true exactly when the tier is carried AND already held at
+		# or above that magnitude.
+		scope:combat_host = { NOT = { pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = actor TIER_VAR = hit_buff_combat_tier } } }
+		scope:combat_host = { NOT = { pod_combat_tier_upgrade_only_trigger = { STORY = scope:ai_candidate_move SIDE = target TIER_VAR = hit_debuff_combat_tier } } }
 	}
 }
 
@@ -1201,14 +1390,21 @@ pod_combat_log_seg_burst_gate_trigger = {
 # (pod_combat_ai_band_floor), so a wrong hit can push the move clean out of the pool
 # rather than merely shading its odds.
 pod_combat_ai_has_usable_larger_buff_tier_trigger = {
-	# O(1) read of the per-action cache folded by
-	# pod_combat_ai_precompute_max_tiers_effect: the largest tier of $STAT_VAR$ the
-	# actor can USE right now. `exists a strictly-larger usable tier` is exactly
+	# Read of the per-action cache folded by pod_combat_ai_precompute_max_tiers_effect: 
+	# the largest tier of $STAT_VAR$ the actor can USE right now.
+	# `exists a strictly-larger usable tier` is exactly
 	# `max_usable > candidate`, so no per-candidate loadout rescan is needed.
-	# The cache var is always seeded, so only the candidate side needs guarding.
+	# The cache lives on the fight, seeded by the precompute at the top of the
+	# action. Both sides are gated in the limit: the candidate may not carry the
+	# stat, and the cache is absent until the precompute has run - which a
+	# tooltip-build walk reaches before there is a fight at all. A sibling
+	# has_variable would not do, since triggers do not short-circuit.
 	trigger_if = {
-		limit = { scope:ai_candidate_move = { has_variable = $STAT_VAR$ } }
-		scope:combat_host.var:pod_combat_ai_maxtier_$STAT_VAR$ > scope:ai_candidate_move.var:$STAT_VAR$
+		limit = {
+			scope:ai_candidate_move = { has_variable = $STAT_VAR$ }
+			scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_ai_maxtier_$STAT_VAR$ }
+		}
+		scope:combat_host.var:pod_combat_session.var:pod_combat_ai_maxtier_$STAT_VAR$ > scope:ai_candidate_move.var:$STAT_VAR$
 	}
 	trigger_else = { always = no }
 }
