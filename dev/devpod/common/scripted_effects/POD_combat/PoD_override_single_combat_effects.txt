@@ -9,7 +9,11 @@
 # self-match is invalidated in Part 2 instead and never reaches it. Case
 # rationale sits on the Part-3 gate. Params match the original.
 #
-# Post-combat flow lives in pod_combat.9999 (reads the PC's pod_combat_sc_context
+# One more case sits inside Part 3: on a character's first minigame fight the
+# launch is DEFERRED behind the intro event pod_combat.0200 and performed from
+# its Begin option instead (pod_combat_sc_intro_or_launch_effect below).
+#
+# Post-combat flow lives in pod_combat.9999 (reads the PC's pod_combat_session
 # pointer to restore scopes + fire the follow-up). Wounds are written LIVE during
 # move execution, so end-of-combat applies death-only outcomes; full handoff in
 # COMBAT_REFERENCE.info.
@@ -66,9 +70,24 @@ configure_start_single_combat_effect = {
 					scope:sc_defender = { is_ai = no }
 				}
 			}
-			# Guard against re-entry if a previous combat somehow left state.
-			scope:sc_attacker = { NOT = { has_variable = pod_combat_active } }
-			scope:sc_defender = { NOT = { has_variable = pod_combat_active } }
+			# Don't intercept for a principal who is already in a fight. The trigger
+			# reaches the fight through that character's session pointer and answers
+			# false for a pointer at an ended story, so leftover state cannot
+			# permanently lock someone out of duelling. (The defender arm is weak for
+			# an AI, which never holds a pointer; engaged_in_single_combat below is
+			# the real block there.)
+			# SEATED, not merely reaching a fight: a director holds a session pointer
+			# while occupying no slot, and refusing to intercept for them would drop
+			# their duel silently through to vanilla single combat.
+			scope:sc_attacker = { NOT = { pod_combat_is_seated_trigger = yes } }
+			scope:sc_defender = { NOT = { pod_combat_is_seated_trigger = yes } }
+			# A first-fight intro deferral is in flight for this character: the
+			# fight has not been built yet, so nothing above can see it. Route the
+			# duel to the vanilla body instead - the intro's Begin option is about
+			# to build a minigame fight, and a second one starting underneath the
+			# open card would leave two fights contending for one window.
+			scope:sc_attacker = { NOT = { has_variable = pod_combat_intro_pending } }
+			scope:sc_defender = { NOT = { has_variable = pod_combat_intro_pending } }
 			# Don't intercept story-predetermined duels - PoD's vanilla
 			# body in Part 4 already honors FIXED correctly.
 			NOT = { scope:fixed = flag:sc_attacker }
@@ -110,10 +129,13 @@ configure_start_single_combat_effect = {
 		# One branch per side so the duel builder runs in the PC's scope.
 		# INVALIDATION_EVENT isn't passed: Part 2 already fired it on the
 		# attacker==defender self-match, and the launcher doesn't reuse it.
+		#
+		# Both arms go through pod_combat_sc_intro_or_launch_effect, which either
+		# launches straight away or defers behind the one-shot first-fight intro.
 		if = {
 			limit = { scope:sc_attacker = { is_ai = no } }
 			scope:sc_attacker = {
-				pod_combat_sc_launch_minigame_effect = {
+				pod_combat_sc_intro_or_launch_effect = {
 					OPPONENT = scope:sc_defender
 					OUTPUT_EVENT = $OUTPUT_EVENT$
 					FATALITY = $FATALITY$
@@ -126,7 +148,7 @@ configure_start_single_combat_effect = {
 			# PC is the defender. (PC-vs-PC duels are excluded by the
 			# limit clause above and routed to vanilla instead.)
 			scope:sc_defender = {
-				pod_combat_sc_launch_minigame_effect = {
+				pod_combat_sc_intro_or_launch_effect = {
 					OPPONENT = scope:sc_attacker
 					OUTPUT_EVENT = $OUTPUT_EVENT$
 					FATALITY = $FATALITY$
@@ -286,7 +308,7 @@ configure_start_single_combat_effect = {
 # Runs in the PC's scope and builds the fight in three steps:
 # POD_combat_create_duel_effect (which opens the shell event pod_combat.9995
 # on the still-untouched parent scope table, then creates the
-# POD_combat_sc_context story with the sc_* refs, rule flags and follow-up
+# POD_combat_fight story with the sc_* refs, rule flags and follow-up
 # id), the enemy seat, and finalize. The param contract is on
 # pod_combat_sc_launch_minigame_effect below.
 ##################################################
@@ -298,7 +320,7 @@ pod_combat_sc_launch_minigame_effect = {
 	# POD_combat_create_duel_effect owns both halves of the hand-off. It opens
 	# the shell card (pod_combat.9995) that carries this event's scope table
 	# through the fight to the follow-up, and it creates the
-	# POD_combat_sc_context story on Charon, snapshotting the sc_* parties +
+	# POD_combat_fight story on Charon, snapshotting the sc_* parties +
 	# rule flags + follow-up event id onto it and pinning the pointer var on
 	# the PC. pod_combat.9999 reads the follow-up id back through that
 	# pointer at combat end. See COMBAT_REFERENCE.info §3 for the
@@ -332,5 +354,54 @@ pod_combat_sc_launch_minigame_effect = {
 		}
 		POD_combat_duel_add_enemy_effect = { CHARACTER = $OPPONENT$ }
 		POD_combat_finalize_duel_effect = yes
+	}
+}
+
+##################################################
+# First-fight gate - intro popup or straight to the launcher
+##################################################
+
+pod_combat_sc_intro_or_launch_effect = {
+	# Runs in the PC's scope with the launcher's own parameter set, and on all but
+	# a character's first minigame fight simply forwards to it.
+	#
+	# On that first fight it fires the intro (pod_combat.0200) INSTEAD, and the
+	# intro's Begin option runs the launch. The deferral is what makes "set your
+	# moves first" possible at all: trigger_event only queues, so a popup fired
+	# beside the launch would open on a fight that has already started, and the
+	# loadout editor is hidden outright once the fight is live. Deferring costs
+	# nothing on the hand-off side - the intro inherits this chain's whole scope
+	# table and holds it until the click, so the shell card still snapshots the
+	# caller's scopes when the builder finally runs.
+	#
+	# Flag gate and flag set are co-located here (PoD's struggle-intro shape).
+	# The pending var is the Part-3 gate's read; it is cleared by whichever arm of
+	# pod_combat_intro_begin_fight_effect resolves the click.
+	#
+	# Post-launch decoration in the ~90 callers (POD_combat_set_custom_title and
+	# the team-name setters) is ?=-guarded on the duel story, so on the deferred
+	# branch it no-ops: a character's first fight runs with the default window
+	# title. Cosmetic, once per character.
+	#
+	# The tooltip line is hoisted here so both branches read identically in the
+	# ~90 duel options that route through this file; the launcher's own copy of
+	# the same key is suppressed inside the hidden_effect below.
+	custom_tooltip = pod_combat_duel_begins_tt
+	hidden_effect = {
+		if = {
+			limit = { NOT = { has_character_flag = pod_combat_intro_event_flag } }
+			add_character_flag = pod_combat_intro_event_flag
+			set_variable = { name = pod_combat_intro_pending value = yes }
+			trigger_event = { id = pod_combat.0200 }
+		}
+		else = {
+			pod_combat_sc_launch_minigame_effect = {
+				OPPONENT     = $OPPONENT$
+				OUTPUT_EVENT = $OUTPUT_EVENT$
+				FATALITY     = $FATALITY$
+				FIXED        = $FIXED$
+				LOCALE       = $LOCALE$
+			}
+		}
 	}
 }
