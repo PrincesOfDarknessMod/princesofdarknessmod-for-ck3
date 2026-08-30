@@ -1350,9 +1350,27 @@ pod_combat_set_outcome_pair_effect = {
 	}
 }
 
+# Public entry, called by the pod_combat_auto_resolve scripted GUI. The
+# re-entry guard is the point of the split: the button's is_valid tests the
+# same flag, but a second click landing before the GUI re-evaluates would
+# re-roll the outcome and re-deal the scramble wounds below. Same hazard
+# pod_combat_end_combat_effect guards at its own top.
 pod_combat_auto_resolve_effect = {
+	if = {
+		limit = { NOT = { pod_combat_is_over_trigger = yes } }
+		pod_combat_auto_resolve_run_effect = yes
+	}
+}
+
+pod_combat_auto_resolve_run_effect = {
 	# Save PC scope alias to avoid bare `root` references in set_variable.
 	save_scope_as = combat_pc
+	# The wound pipeline's in-combat discriminator, needed by the scramble
+	# pass below: REASON = duel is weapon-shaped, so with combat_host unset
+	# POD_increase_wounds_effect takes its OUTSIDE-combat arms (the attacker's
+	# artifact soak shred) and the classifier promotes the wound to aggravated
+	# for a bane or elemental weapon. Also the log-append contract.
+	save_scope_as = combat_host
 
 	# Winner / loser are written by the shared pod_combat_set_outcome_pair_effect
 	# (PC vs the enemy leader, crediting the first ALIVE enemy when the leader
@@ -1376,6 +1394,12 @@ pod_combat_auto_resolve_effect = {
 			pod_combat_enemy_side_cannot_win_trigger = no
 		}
 		pod_combat_set_outcome_pair_effect = { PC_WON = no }
+		# A verdict is a maximum-margin outcome for the scramble below: the
+		# side that could never have won takes the worst of it, and the side
+		# it could not touch walks away clean. Immunities still zero out
+		# whatever cannot actually be hurt.
+		save_scope_value_as = { name = ar_player_base value = pod_combat_auto_resolve_wound_max }
+		save_scope_value_as = { name = ar_enemy_base  value = 0 }
 	}
 	else_if = {
 		limit = {
@@ -1383,6 +1407,8 @@ pod_combat_auto_resolve_effect = {
 			pod_combat_player_side_cannot_win_trigger = no
 		}
 		pod_combat_set_outcome_pair_effect = { PC_WON = yes }
+		save_scope_value_as = { name = ar_player_base value = 0 }
+		save_scope_value_as = { name = ar_enemy_base  value = pod_combat_auto_resolve_wound_max }
 	}
 	else = {
 		# Prowess is read live off each combatant, so a battered team
@@ -1465,13 +1491,36 @@ pod_combat_auto_resolve_effect = {
 		# Resolve. Winner/loser written atomically via the shared helper. PC win
 		# (>= on the prowess-sum roll) -> PC beats the enemy leader; else the
 		# first ALIVE enemy wins.
+		#
+		# The same two scores then band the scramble wounds below, so the
+		# margin the fight was decided by is the margin it is paid for. The
+		# win/lose aliases exist so the band values do not need a
+		# which-side-won branch of their own.
 		if = {
 			limit = { scope:player_score >= scope:enemy_score }
 			pod_combat_set_outcome_pair_effect = { PC_WON = yes }
+			save_scope_value_as = { name = ar_win_score  value = scope:player_score }
+			save_scope_value_as = { name = ar_lose_score value = scope:enemy_score }
+			save_scope_value_as = { name = ar_player_base value = pod_combat_auto_resolve_winner_wounds_value }
+			save_scope_value_as = { name = ar_enemy_base  value = pod_combat_auto_resolve_loser_wounds_value }
 		}
 		else = {
 			pod_combat_set_outcome_pair_effect = { PC_WON = no }
+			save_scope_value_as = { name = ar_win_score  value = scope:enemy_score }
+			save_scope_value_as = { name = ar_lose_score value = scope:player_score }
+			save_scope_value_as = { name = ar_player_base value = pod_combat_auto_resolve_loser_wounds_value }
+			save_scope_value_as = { name = ar_enemy_base  value = pod_combat_auto_resolve_winner_wounds_value }
 		}
+	}
+
+	# The final scramble. Practice spars skip it outright rather than leaning
+	# on the end-of-fight snapshot restore to undo it - restoring the boxes
+	# would still leave the wound toasts, the trait xp and the treatment hooks
+	# behind. Pushed before the combat-ended bookend so the rows read in order
+	# (the log list is appended oldest-first and rendered bottomtotop).
+	if = {
+		limit = { NOT = { pod_combat_is_practice_trigger = yes } }
+		pod_combat_auto_resolve_apply_wounds_effect = yes
 	}
 
 	# Rationale on pod_combat_zero_loser_leader_morale_effect.
@@ -1487,6 +1536,203 @@ pod_combat_auto_resolve_effect = {
 		pod_combat_push_system_log_effect = { MESSAGE_KEY = combat_ended_defeat }
 	}
 	# Combat window stays open - player clicks "End Combat" to dismiss.
+}
+
+# ─── AUTO-RESOLVE SCRAMBLE WOUNDS ────────────────────────────────
+# Host scope. Wounds every combatant left standing when the fight is
+# auto-resolved, 0-4 boxes banded off the same roll that decided the winner.
+#
+# Requires scope:ar_player_base / scope:ar_enemy_base (all three auto-resolve
+# branches converge on them), scope:pod_combat_player_principal /
+# scope:pod_combat_enemy_victor (written by pod_combat_set_outcome_pair_effect
+# in every branch) and scope:combat_host.
+#
+# Two omissions are deliberate, both because the outcome is already fixed by
+# the time this runs: no KO marking (pod_combat_mark_slot_ko_effect would fire
+# ally-down morale shocks that then feed the end-of-fight Mental Strain pass),
+# and no morale spill (a played hit spills morale, a scramble wound does not).
+# Nothing downstream reads slot_alive - the finalize pass, the death sweep and
+# the strain pass all filter on the CHARACTER being alive.
+#
+# Fatality modes need no special-casing here. REASON = duel classifies
+# superficial for a normal attacker, so the wound cannot trip PoD's death
+# check on its own, and pod_combat_nonfatal_active is stamped anyway, so the
+# inline check is suppressed regardless. fatality = no is capped afterwards by
+# pod_combat_finalize_combat_health_effect's peel and aggravated
+# de-escalation.
+#
+# Two ways it still contributes to a death in a fatal mode, both intended and
+# both no different from the fight having run a few more rounds: superficial
+# overflow converts to aggravated when the track fills, and an attacker whose
+# BODY promotes damage (infernal glory, plague-crow talons, archid strength)
+# aggravates this the same way it aggravates their played hits. Their WEAPON
+# does not - that arm needs the per-dispatch marker, which only a move sets.
+pod_combat_auto_resolve_apply_wounds_effect = {
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				# Still standing only: a KO'd slot already took its beating in
+				# play, and cleanup despawns summons, so wounding one is noise.
+				pod_combat_slot_is_alive_trigger = yes
+				exists = var:slot_char
+				pod_combat_slot_char_is_alive_trigger = yes
+				pod_combat_slot_char_is_summon_trigger = no
+				# Clones are the one body the death gate does not cover:
+				# POD_health_death_check_effect admits them through an OR beside
+				# POD_can_die_from_wounds, which is where pod_combat_nonfatal_active
+				# lives. With a 2-box track and a 1-box aggravated threshold, a
+				# scramble wound would kill one INLINE, mid-walk, even in a
+				# fatality = no duel that promised nobody dies.
+				var:slot_char = { POD_is_clone_trigger = no }
+			}
+			# One contained call: an inline scope switch here would corrupt the
+			# iteration scope for anything after it (COMBAT_REFERENCE.info §7).
+			pod_combat_auto_resolve_slot_wound_effect = yes
+		}
+	}
+	# The combat window is still open and its bars read the mirror vars.
+	pod_combat_refresh_hp_mirror_effect = yes
+}
+
+# Slot scope. Picks the side's base and the opposing principal to credit.
+# The attacker guard is the death sweep's own shape (trigger_if, because
+# triggers do not short-circuit): scope:pod_combat_enemy_victor is seeded with
+# the enemy leader whether or not that leader is alive, and a victim with no
+# living opponent to blame is skipped rather than wounded by nobody.
+pod_combat_auto_resolve_slot_wound_effect = {
+	if = {
+		limit = {
+			pod_combat_slot_is_player_team_trigger = yes
+			trigger_if = {
+				limit = { exists = scope:pod_combat_enemy_victor }
+				scope:pod_combat_enemy_victor = { is_alive = yes }
+			}
+			trigger_else = { always = no }
+		}
+		pod_combat_auto_resolve_wound_one_effect = {
+			BASE = scope:ar_player_base
+			ATTACKER = scope:pod_combat_enemy_victor
+		}
+	}
+	else_if = {
+		limit = {
+			pod_combat_slot_is_enemy_trigger = yes
+			trigger_if = {
+				limit = { exists = scope:pod_combat_player_principal }
+				scope:pod_combat_player_principal = { is_alive = yes }
+			}
+			trigger_else = { always = no }
+		}
+		pod_combat_auto_resolve_wound_one_effect = {
+			BASE = scope:ar_enemy_base
+			ATTACKER = scope:pod_combat_player_principal
+		}
+	}
+}
+
+# Slot scope. One combatant's jitter roll, wound and log row.
+#   $BASE$     - that side's banded base, 0-4
+#   $ATTACKER$ - the opposing principal, already checked alive
+# The var:slot_char entry is the last statement that reads a slot field, per
+# the slot-loop rule above; the log push after it only reads saved scopes.
+pod_combat_auto_resolve_wound_one_effect = {
+	save_scope_value_as = {
+		name = ar_count
+		value = {
+			value = $BASE$
+			add = { integer_range = { min = pod_combat_auto_resolve_jitter_min max = pod_combat_auto_resolve_jitter_max } }
+			min = 0
+			max = pod_combat_auto_resolve_wound_max
+		}
+	}
+	if = {
+		limit = { scope:ar_count >= 1 }
+		# Skipping a zero count is load-bearing, not a shortcut: the wound
+		# pipeline runs its immunity and Clay Man ladder BEFORE it looks at the
+		# amount, so a 0-box call still toasts an immune victim and still spends
+		# an amulet charge.
+		var:slot_char = {
+			save_scope_as = ar_victim
+			# The log reads the victim's track before and after rather than the
+			# pipeline's own scope:landed_damage, which is the post-soak PACKET
+			# size and knows nothing about where the points landed. Boxes are
+			# what the health track shows, and REASON = duel does not guarantee
+			# superficial ones: an attacker whose body promotes damage
+			# aggravates the whole packet, and any overflow past the last empty
+			# box lands aggravated on its own. Same reason the attack path
+			# diffs boxes for its damage number instead of trusting the count.
+			save_scope_value_as = { name = ar_pre_boxes value = POD_total_damage_boxes }
+			save_scope_value_as = { name = ar_pre_agg   value = POD_aggravated_damage_boxes }
+			POD_increase_wounds_hostile_effect = {
+				ATTACKER = $ATTACKER$
+				REASON = duel
+				COUNT = scope:ar_count
+			}
+			save_scope_value_as = {
+				name = ar_boxes
+				value = {
+					value = POD_total_damage_boxes
+					subtract = scope:ar_pre_boxes
+					min = 0
+				}
+			}
+			save_scope_value_as = {
+				name = ar_agg_boxes
+				value = {
+					value = POD_aggravated_damage_boxes
+					subtract = scope:ar_pre_agg
+					min = 0
+				}
+			}
+		}
+		pod_combat_push_auto_resolve_log_effect = yes
+	}
+}
+
+# Any scope. The scramble's log row, one per wounded combatant. Reads
+# scope:ar_victim / ar_boxes / ar_agg_boxes and scope:combat_host.
+# Unlike the push_system_log pair this READS scope:combat_host instead of
+# re-saving it from the caller - it is called from inside the slot walk, where
+# a re-save would point the append at the slot story. Reuses the dot-tick row
+# fields (actor / dot_tick_amount) so no new entry var needs bridging.
+pod_combat_push_auto_resolve_log_effect = {
+	hidden_effect_new_object = {
+		character:POD_wraith_01 = {
+			create_story = {
+				type = POD_combat_log_entry
+				save_scope_as = new_log_entry
+			}
+		}
+		scope:new_log_entry = {
+			if = {
+				# Any aggravated box makes the row an aggravated one, so the
+				# icon matches what the health track will show.
+				limit = { scope:ar_agg_boxes > 0 }
+				set_variable = { name = system_message  value = flag:auto_resolve_wound_agg }
+				set_variable = { name = dot_tick_amount value = scope:ar_boxes }
+			}
+			else_if = {
+				limit = { scope:ar_boxes > 0 }
+				set_variable = { name = system_message  value = flag:auto_resolve_wound }
+				set_variable = { name = dot_tick_amount value = scope:ar_boxes }
+			}
+			else = {
+				# Rolled, but no box moved: soaked away, or the victim is
+				# immune to the attacker's damage entirely.
+				set_variable = { name = system_message value = flag:auto_resolve_unharmed }
+			}
+			set_variable = { name = actor value = scope:ar_victim }
+			# -1 keeps the row in the neutral system lane, as the named
+			# system rows do; the combatant is named in the text instead.
+			set_variable = { name = actor_side value = -1 }
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_round } }
+				set_variable = { name = round value = scope:combat_host.var:pod_combat_session.var:pod_combat_round }
+			}
+		}
+		pod_combat_append_capped_log_entry_effect = yes
+	}
 }
 
 # ─── COMBAT LOG ────────────────────────────────────────────────────
