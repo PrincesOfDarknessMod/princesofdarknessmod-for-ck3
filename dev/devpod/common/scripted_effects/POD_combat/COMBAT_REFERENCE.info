@@ -2918,6 +2918,84 @@ lowest-position alive enemy slot's char (falling back to the enemy
 leader only when every enemy is KO'd), so a downed leader is never
 recorded as the victor.
 
+`pod_combat_auto_resolve_effect` is now a thin re-entry guard around
+`pod_combat_auto_resolve_run_effect`. The button's `is_valid` tests the
+same `pod_combat_is_over` flag, but a second click landing before the GUI
+re-evaluates would otherwise re-roll the outcome and re-deal the wounds
+below — the same hazard `pod_combat_end_combat_effect` guards at its own
+top.
+
+#### The final scramble
+
+Auto-resolving is not free. `pod_combat_auto_resolve_apply_wounds_effect`
+wounds **every combatant still standing**, winner's side included, for
+0-4 boxes banded off the same roll that decided the fight. Two seats are
+skipped: **summons**, which cleanup despawns anyway, and **clones**, the
+one body PoD's death check admits past the non-fatal gate (it ORs
+`POD_is_clone_trigger` beside `POD_can_die_from_wounds`, where
+`pod_combat_nonfatal_active` lives, and a clone's 2-box track with a
+1-box aggravated threshold would die inline).
+
+* Each side gets a **base** — 2/2 in a close fight, 3/1 when the winning
+  score reaches 1.5x the loser's, 4/0 at 2.5x. A score spans
+  `[prowess_sum, 2 * prowess_sum]`, so two evenly matched teams can reach
+  the wide band but never the blowout band. The winner's base is the
+  loser's complement, so the pair always sums to
+  `pod_combat_auto_resolve_wound_max`. The bands are compared, never
+  divided: both scores are legitimately 0 when a side has no live
+  prowess, and that coin flip has to read as a close fight.
+* Each combatant then rolls **jitter** (`-1..+1`), clamped to 0-4.
+* A **spirit-gate verdict** is treated as maximum margin: the side that
+  could never have won takes base 4, the side it could not touch takes 0.
+* **Practice spars skip the pass entirely** rather than leaning on the
+  snapshot restore to undo it — restoring the boxes would still leave the
+  wound toasts, the trait xp and the treatment hooks behind.
+
+The wound goes through the full pipeline
+(`POD_increase_wounds_hostile_effect`, `REASON = duel`), so the 0-4 is
+**pre-soak** and an immune victim takes nothing — consistent with the
+spirit verdict above. The attacker credited is the opposing side's
+outcome principal, guarded alive with the deferred-death sweep's own
+`trigger_if` shape. Three constraints are load-bearing:
+
+1. **`scope:combat_host` must be saved before the wound call** — it is,
+   at the top of the run effect. `REASON = duel` is weapon-shaped, so
+   without it `POD_increase_wounds_effect` takes its *outside*-combat arms
+   (the attacker's artifact soak shred) and the classifier's elemental and
+   bane-weapon arms promote the wound to aggravated. Attacker *body*
+   powers (infernal glory, plague-crow talons, archid strength) still
+   aggravate it, exactly as they do a played hit.
+2. **A zero count must skip the call.** The pipeline runs its immunity and
+   Clay Man ladder before it looks at the amount, so a 0-box call still
+   toasts an immune victim and still spends an amulet charge.
+3. **The log row reads boxes, not the packet.** `scope:landed_damage` is
+   the post-soak packet size and carries no wound class, so the row
+   instead diffs `POD_total_damage_boxes` / `POD_aggravated_damage_boxes`
+   around the call and picks the aggravated key when any aggravated box
+   landed. That matters because `REASON = duel` is not reliably
+   superficial: an attacker body power aggravates the whole packet, and
+   overflow past the last empty box lands aggravated on its own. Same
+   reason the attack path diffs boxes for its own damage number.
+4. **One contained call per slot iteration.** The wound enters
+   `var:slot_char` as the last statement that reads a slot field (§7,
+   *Scope traps inside slot loops*), and the log row is pushed by
+   `pod_combat_push_auto_resolve_log_effect`, which *reads*
+   `scope:combat_host` instead of re-saving it from its caller — the
+   push_system_log pair would point the append at the slot story.
+
+No KO marking and no morale spill, both because the outcome is already
+fixed: `pod_combat_mark_slot_ko_effect` would fire ally-down morale shocks
+that then feed the end-of-fight Mental Strain pass. Nothing downstream
+reads `slot_alive` — the finalize pass, the death sweep and the strain
+pass all filter on the character being alive.
+
+Fatality modes need no special-casing. `pod_combat_nonfatal_active` is
+still stamped, so the inline death check cannot fire; `fatality = no` is
+capped afterwards by the peel and aggravated de-escalation. In a fatal
+mode superficial overflow does convert to aggravated and **can** complete
+a death at the writeback — intended, and no different from the fight
+having run a few more rounds.
+
 ### Ending the combat
 
 `pod_combat_end_combat_effect` is re-entry guarded on the FIGHT's
