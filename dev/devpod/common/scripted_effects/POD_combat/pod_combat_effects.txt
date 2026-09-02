@@ -75,6 +75,25 @@ pod_combat_clear_per_target_state_effect = {
 		remove_variable = pod_combat_last_retal_morale
 		remove_variable = pod_combat_last_result_agg
 		remove_variable = pod_combat_last_soaked_count
+		remove_variable = pod_combat_last_primary_damage
+		remove_variable = pod_combat_last_primary_attack_result
+		remove_variable = pod_combat_last_primary_result_agg
+		remove_variable = pod_combat_last_primary_soaked_count
+		remove_variable = pod_combat_last_typed_bonus_damage_1
+		remove_variable = pod_combat_last_typed_bonus_attack_result_1
+		remove_variable = pod_combat_last_typed_bonus_result_agg_1
+		remove_variable = pod_combat_last_typed_bonus_soaked_count_1
+		remove_variable = pod_combat_last_typed_bonus_damage_class_1
+		remove_variable = pod_combat_last_typed_bonus_damage_2
+		remove_variable = pod_combat_last_typed_bonus_attack_result_2
+		remove_variable = pod_combat_last_typed_bonus_result_agg_2
+		remove_variable = pod_combat_last_typed_bonus_soaked_count_2
+		remove_variable = pod_combat_last_typed_bonus_damage_class_2
+		remove_variable = pod_combat_last_typed_bonus_damage_3
+		remove_variable = pod_combat_last_typed_bonus_attack_result_3
+		remove_variable = pod_combat_last_typed_bonus_result_agg_3
+		remove_variable = pod_combat_last_typed_bonus_soaked_count_3
+		remove_variable = pod_combat_last_typed_bonus_damage_class_3
 		remove_variable = pod_combat_last_heal_amount
 		remove_variable = pod_combat_last_heal_side
 		remove_variable = pod_combat_last_morale_damage_amount
@@ -691,8 +710,8 @@ pod_combat_route_to_pod_damage_effect = {
 	#
 	# Return contract - scope values only, NO host-var side effects:
 	#   scope:damage_dealt       = post-soak/multiplier amount (0 if fully soaked)
-	#   scope:attack_result_flag = flag:hp_damage / soaked (callers always see
-	#                              exactly one of the two)
+	#   scope:attack_result_flag = flag:hp_damage / soaked / immune (callers
+	#                              always see exactly one of the three)
 	#   scope:result_agg         = yes/no - PoD's aggravated classification for
 	#                              THIS victim + REASON (the actual-result box)
 	#   scope:soaked_count       = points absorbed by PoD's per-point soak roll
@@ -700,8 +719,8 @@ pod_combat_route_to_pod_damage_effect = {
 	#                              and captured before the boxes are written, so
 	#                              it survives a kill.
 	# Each caller decides whether to lift these into pod_combat_last_*;
-	# see the lift sites in pod_combat_apply_damage_payload_effect (main
-	# attack), §8 self-damage (discards), and the retaliation helper.
+	# see the aggregate payload + packet wrappers below, §8 self-damage
+	# (discards), and the retaliation helper.
 
 	# Actual-result capture, BEFORE the wound call (a kill wipes the victim
 	# state the classifier reads). wound_attacker is saved first because the
@@ -822,6 +841,11 @@ pod_combat_route_to_pod_damage_effect = {
 			# Morale spillover scales off actual (post-soak) damage.
 			# (Mental Strain from morale is applied once at combat end
 			# from final morale - see pod_combat_apply_morale_strain_effect.)
+			# Computed PER PACKET, so a move carrying typed riders spills once per
+			# packet. That equals the merged spill only while
+			# pod_combat_morale_from_hp_ratio is an integer; a fractional ratio would
+			# round each packet down separately. PoD's own damage toast is likewise
+			# one per packet.
 			save_scope_value_as = {
 				name = morale_spill
 				value = {
@@ -1094,9 +1118,10 @@ pod_combat_check_guard_effect = {
 
 # ── DAMAGE PAYLOAD ─────────────────────────────────────────────────
 # Fires only on contact_result = 0 (hit); the resolver handled the rest.
-# Owns the log entry, so it lifts the route helper's scope exports into
-# pod_combat_last_damage + the outcome/attack_result pair (other lift
-# sites are listed on pod_combat_route_to_pod_damage_effect).
+# Lifts ONE wound packet into the action's aggregate gameplay/result state. An
+# action's typed damage bonuses each call it again on the same contact roll, so
+# a move can reach it up to four times per victim and every write below either
+# accumulates or takes explicit precedence.
 pod_combat_apply_damage_payload_effect = {
 	# $TARGET_SIDE$ = "actor" or "target"
 	# $AMOUNT$      = damage amount (raw, pre-soak)
@@ -1106,27 +1131,68 @@ pod_combat_apply_damage_payload_effect = {
 		AMOUNT      = $AMOUNT$
 		REASON      = $REASON$
 	}
-	var:pod_combat_session ?= { set_variable = { name = pod_combat_last_damage        value = scope:damage_dealt } }
-	var:pod_combat_session ?= { set_variable = { name = pod_combat_last_outcome       value = flag:attack } }
-	var:pod_combat_session ?= { set_variable = { name = pod_combat_last_attack_result value = scope:attack_result_flag } }
-	# Actual-result box for the log row (route's scope:result_agg). if/else
-	# rather than presence-only: a multi-hit sequence must not inherit the
-	# previous hit's marker.
+	var:pod_combat_session ?= {
+		if = {
+			limit = { has_variable = pod_combat_last_damage }
+			change_variable = { name = pod_combat_last_damage add = scope:damage_dealt }
+		}
+		else = {
+			set_variable = { name = pod_combat_last_damage value = scope:damage_dealt }
+		}
+		set_variable = { name = pod_combat_last_outcome value = flag:attack }
+
+		# Packet result precedence for one combined action: any landed damage wins,
+		# then a full soak, then immunity. A later weaker packet never erases the
+		# stronger result an earlier packet established.
+		#
+		# Read the route helper's own verdict rather than the magnitude: its
+		# dead-target branch reports hp_damage with the overkill count, which is 0
+		# when the victim had no empty boxes left, and that must not read as immune.
+		if = {
+			limit = { scope:attack_result_flag = flag:hp_damage }
+			set_variable = { name = pod_combat_last_attack_result value = flag:hp_damage }
+		}
+		else_if = {
+			limit = { scope:attack_result_flag = flag:soaked }
+			if = {
+				limit = { has_variable = pod_combat_last_attack_result }
+				if = {
+					limit = { NOT = { var:pod_combat_last_attack_result = flag:hp_damage } }
+					set_variable = { name = pod_combat_last_attack_result value = flag:soaked }
+				}
+			}
+			else = {
+				set_variable = { name = pod_combat_last_attack_result value = flag:soaked }
+			}
+		}
+		else_if = {
+			limit = { NOT = { has_variable = pod_combat_last_attack_result } }
+			set_variable = { name = pod_combat_last_attack_result value = flag:immune }
+		}
+	}
+	# The aggregate action is aggravated when any packet that actually landed was
+	# aggravated. Packet-specific log snapshots are written by the wrappers below.
 	if = {
-		limit = { scope:result_agg = yes }
+		limit = {
+			scope:damage_dealt > 0
+			scope:result_agg = yes
+		}
 		var:pod_combat_session ?= { set_variable = { name = pod_combat_last_result_agg value = yes } }
 	}
-	else = {
-		var:pod_combat_session ?= { remove_variable = pod_combat_last_result_agg }
-	}
-	# Partial-soak count for the damage line's "N soaked" note. Same if/else
-	# discipline as result_agg above, for the same reason.
+	# Partial-soak counts sum across packets. Retained as a fallback for a caller
+	# that writes no packet snapshot; each log segment reads its own packet's
+	# count from the wrappers below, so nothing in gameplay reads this sum today.
 	if = {
 		limit = { scope:soaked_count > 0 }
-		var:pod_combat_session ?= { set_variable = { name = pod_combat_last_soaked_count value = scope:soaked_count } }
-	}
-	else = {
-		var:pod_combat_session ?= { remove_variable = pod_combat_last_soaked_count }
+		var:pod_combat_session ?= {
+			if = {
+				limit = { has_variable = pod_combat_last_soaked_count }
+				change_variable = { name = pod_combat_last_soaked_count add = scope:soaked_count }
+			}
+			else = {
+				set_variable = { name = pod_combat_last_soaked_count value = scope:soaked_count }
+			}
+		}
 	}
 	# Trace accounting. The pick record is emitted BEFORE the move executes (it
 	# describes the state the weights scored against), so a per-hit soak result
@@ -1137,8 +1203,119 @@ pod_combat_apply_damage_payload_effect = {
 		limit = { exists = global_var:pod_combat_tune_ai_trace }
 		pod_combat_trace_add_effect = { NAME = soaked  VALUE = scope:soaked_count }
 		pod_combat_trace_add_effect = { NAME = landed  VALUE = scope:damage_dealt }
-		pod_combat_trace_add_effect = { NAME = hits    VALUE = 1 }
 	}
+}
+
+# Packet snapshots for the combat log. The generic payload above owns the
+# aggregate action result; these wrappers preserve the independent primary and
+# typed-bonus results so one packet cannot relabel the other's wound boxes.
+pod_combat_capture_primary_damage_packet_effect = {
+	var:pod_combat_session ?= {
+		set_variable = { name = pod_combat_last_primary_damage value = scope:damage_dealt }
+		# Off the route verdict, not the magnitude - see the aggregate above.
+		if = {
+			limit = { scope:attack_result_flag = flag:hp_damage }
+			set_variable = { name = pod_combat_last_primary_attack_result value = flag:hp_damage }
+		}
+		else_if = {
+			limit = { scope:attack_result_flag = flag:soaked }
+			set_variable = { name = pod_combat_last_primary_attack_result value = flag:soaked }
+		}
+		else = {
+			set_variable = { name = pod_combat_last_primary_attack_result value = flag:immune }
+		}
+		if = {
+			limit = {
+				scope:damage_dealt > 0
+				scope:result_agg = yes
+			}
+			set_variable = { name = pod_combat_last_primary_result_agg value = yes }
+		}
+		if = {
+			limit = { scope:soaked_count > 0 }
+			set_variable = { name = pod_combat_last_primary_soaked_count value = scope:soaked_count }
+		}
+	}
+}
+
+pod_combat_capture_typed_bonus_damage_packet_effect = {
+	# $CLASS$ = the literal class the §6 arm dispatched.
+	# Claims the first free of three log slots, so slot order is the class order
+	# §6 fires in. The runtime deals as many typed packets as a move has filled
+	# buckets; the log renders three, and the generator caps authored moves there.
+	# Host scope, like every other packet wrapper - the stamp re-enters the fight.
+	if = {
+		limit = { var:pod_combat_session ?= { NOT = { has_variable = pod_combat_last_typed_bonus_attack_result_1 } } }
+		pod_combat_stamp_typed_bonus_slot_effect = { SLOT = 1 CLASS = $CLASS$ }
+	}
+	else_if = {
+		limit = { var:pod_combat_session ?= { NOT = { has_variable = pod_combat_last_typed_bonus_attack_result_2 } } }
+		pod_combat_stamp_typed_bonus_slot_effect = { SLOT = 2 CLASS = $CLASS$ }
+	}
+	else_if = {
+		limit = { var:pod_combat_session ?= { NOT = { has_variable = pod_combat_last_typed_bonus_attack_result_3 } } }
+		pod_combat_stamp_typed_bonus_slot_effect = { SLOT = 3 CLASS = $CLASS$ }
+	}
+	else = { debug_log = "pod_combat: a typed bonus packet landed with all three log slots taken; it is dealt and aggregated but not shown on the row" }
+}
+
+# One typed packet's snapshot. $SLOT$ = 1|2|3, $CLASS$ = the literal class key.
+# The route helper's scope exports are the inputs. The fight-scope wrapper is
+# load-bearing, not decoration: a spliced pod_combat_last_* name has to sit
+# inside it for the scope checker to see where the write lands.
+pod_combat_stamp_typed_bonus_slot_effect = {
+	var:pod_combat_session ?= {
+		set_variable = { name = pod_combat_last_typed_bonus_damage_$SLOT$ value = scope:damage_dealt }
+		# Off the route verdict, not the magnitude - see pod_combat_apply_damage_payload_effect.
+		if = {
+			limit = { scope:attack_result_flag = flag:hp_damage }
+			set_variable = { name = pod_combat_last_typed_bonus_attack_result_$SLOT$ value = flag:hp_damage }
+		}
+		else_if = {
+			limit = { scope:attack_result_flag = flag:soaked }
+			set_variable = { name = pod_combat_last_typed_bonus_attack_result_$SLOT$ value = flag:soaked }
+		}
+		else = {
+			set_variable = { name = pod_combat_last_typed_bonus_attack_result_$SLOT$ value = flag:immune }
+		}
+		if = {
+			limit = {
+				scope:damage_dealt > 0
+				scope:result_agg = yes
+			}
+			set_variable = { name = pod_combat_last_typed_bonus_result_agg_$SLOT$ value = yes }
+		}
+		if = {
+			limit = { scope:soaked_count > 0 }
+			set_variable = { name = pod_combat_last_typed_bonus_soaked_count_$SLOT$ value = scope:soaked_count }
+		}
+		# The literal flag from the dispatching arm, never a copy of a flag var.
+		set_variable = { name = pod_combat_last_typed_bonus_damage_class_$SLOT$ value = flag:$CLASS$ }
+	}
+}
+pod_combat_apply_primary_damage_payload_effect = {
+	# $TARGET_SIDE$ = "actor" or "target"
+	# $AMOUNT$      = raw damage for the move's main packet
+	# $REASON$      = PoD death_reason suffix
+	pod_combat_apply_damage_payload_effect = {
+		TARGET_SIDE = $TARGET_SIDE$
+		AMOUNT      = $AMOUNT$
+		REASON      = $REASON$
+	}
+	pod_combat_capture_primary_damage_packet_effect = yes
+}
+
+pod_combat_apply_typed_bonus_damage_payload_effect = {
+	# $TARGET_SIDE$ = "actor" or "target"
+	# $AMOUNT$      = raw damage for the typed bonus packet
+	# $REASON$      = PoD death_reason suffix
+	# $CLASS$       = the packet's damage class, stamped on its log slot
+	pod_combat_apply_damage_payload_effect = {
+		TARGET_SIDE = $TARGET_SIDE$
+		AMOUNT      = $AMOUNT$
+		REASON      = $REASON$
+	}
+	pod_combat_capture_typed_bonus_damage_packet_effect = { CLASS = $CLASS$ }
 }
 
 # Self-seeding accumulator for the per-turn trace counters: change_variable has
@@ -1903,12 +2080,72 @@ pod_combat_push_log_effect = {
 			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_aoe_iter_burst_index } }
 			set_variable = { name = aoe_burst_index value = scope:combat_host.var:pod_combat_session.var:pod_combat_aoe_iter_burst_index }
 		}
+		# The head shows only the main wound packet: the aggregate last_damage sums
+		# every packet, so a typed rider would relabel the whole number. The
+		# fallback is for a caller that writes no packet snapshot; no such caller
+		# exists today, since the dispatcher always fires the primary wrapper first.
 		if = {
+			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_primary_damage } }
+			set_variable = { name = damage value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_primary_damage }
+		}
+		else_if = {
 			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_damage } }
 			set_variable = { name = damage value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_damage }
 		}
 		else = {
 			set_variable = { name = damage value = 0 }
+		}
+		# Typed conditional damage is a separately routed wound packet, not part of
+		# the head. Up to three are captured, one per class the move filled, in the
+		# order §6 fired them; each carries its own result, wound box and soak so a
+		# rider can read Immune beside a landed primary. The claim marker is
+		# attack_result, which the stamp always writes alongside damage and class -
+		# so one presence test covers all three, and soaked_count is stamped even at
+		# 0 to keep every read in the renderer dense.
+		if = {
+			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_attack_result_1 } }
+			set_variable = { name = typed_bonus_damage_1        value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_1 }
+			set_variable = { name = typed_bonus_attack_result_1 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_attack_result_1 }
+			set_variable = { name = typed_bonus_damage_class_1  value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_class_1 }
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_result_agg_1 } }
+				set_variable = { name = typed_bonus_result_agg_1 value = 1 }
+			}
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_soaked_count_1 } }
+				set_variable = { name = typed_bonus_soaked_count_1 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_soaked_count_1 }
+			}
+			else = { set_variable = { name = typed_bonus_soaked_count_1 value = 0 } }
+		}
+		if = {
+			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_attack_result_2 } }
+			set_variable = { name = typed_bonus_damage_2        value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_2 }
+			set_variable = { name = typed_bonus_attack_result_2 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_attack_result_2 }
+			set_variable = { name = typed_bonus_damage_class_2  value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_class_2 }
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_result_agg_2 } }
+				set_variable = { name = typed_bonus_result_agg_2 value = 1 }
+			}
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_soaked_count_2 } }
+				set_variable = { name = typed_bonus_soaked_count_2 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_soaked_count_2 }
+			}
+			else = { set_variable = { name = typed_bonus_soaked_count_2 value = 0 } }
+		}
+		if = {
+			limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_attack_result_3 } }
+			set_variable = { name = typed_bonus_damage_3        value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_3 }
+			set_variable = { name = typed_bonus_attack_result_3 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_attack_result_3 }
+			set_variable = { name = typed_bonus_damage_class_3  value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_damage_class_3 }
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_result_agg_3 } }
+				set_variable = { name = typed_bonus_result_agg_3 value = 1 }
+			}
+			if = {
+				limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_typed_bonus_soaked_count_3 } }
+				set_variable = { name = typed_bonus_soaked_count_3 value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_typed_bonus_soaked_count_3 }
+			}
+			else = { set_variable = { name = typed_bonus_soaked_count_3 value = 0 } }
 		}
 		# heal / morale-damage / morale-heal ride their own vars (not
 		# pod_combat_last_damage) so hybrid moves keep both amounts.
@@ -1966,6 +2203,12 @@ pod_combat_push_log_effect = {
 		}
 		if = {
 			limit = {
+				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_primary_attack_result }
+			}
+			set_variable = { name = attack_result value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_primary_attack_result }
+		}
+		else_if = {
+			limit = {
 				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_attack_result }
 			}
 			set_variable = { name = attack_result value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_attack_result }
@@ -1994,22 +2237,39 @@ pod_combat_push_log_effect = {
 			}
 			set_variable = { name = retal_morale value = 1 }
 		}
-		# Actual-result marker for the main damage line: what PoD's classifier
-		# decided for this victim (PODCombatLogResultText swaps the wound-box
-		# icon on it). Absent = superficial.
+		# Actual-result marker for the main damage packet. Prefer its snapshot so
+		# a landed aggravated typed rider cannot relabel superficial main damage.
 		if = {
 			limit = {
-				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_result_agg }
+				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_primary_result_agg }
 			}
 			set_variable = { name = result_agg value = 1 }
 		}
-		# Partial-soak count for the main damage line. PODCombatLogResultText
+		else_if = {
+			limit = {
+				scope:combat_host.var:pod_combat_session ?= {
+					NOT = { has_variable = pod_combat_last_primary_damage }
+					has_variable = pod_combat_last_result_agg
+				}
+			}
+			set_variable = { name = result_agg value = 1 }
+		}
+		# Partial-soak count for the main packet. PODCombatLogResultText
 		# appends an "N soaked" note so a smaller-than-listed number reads as
 		# soak rather than a bug. Only meaningful on hp_damage rows: a fully
 		# soaked hit renders the bold Soaked outcome instead.
 		if = {
 			limit = {
-				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_soaked_count }
+				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_last_primary_soaked_count }
+			}
+			set_variable = { name = soaked_count value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_primary_soaked_count }
+		}
+		else_if = {
+			limit = {
+				scope:combat_host.var:pod_combat_session ?= {
+					NOT = { has_variable = pod_combat_last_primary_damage }
+					has_variable = pod_combat_last_soaked_count
+				}
 			}
 			set_variable = { name = soaked_count value = scope:combat_host.var:pod_combat_session.var:pod_combat_last_soaked_count }
 		}
@@ -2046,6 +2306,33 @@ pod_combat_push_log_effect = {
 		}
 		else = {
 			set_variable = { name = seg_bake_prior value = 0 }
+		}
+		if = {
+			limit = { has_variable = typed_bonus_attack_result_1 }
+			set_variable = { name = seg_typed_bonus_damage_1_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_typed_bonus_damage_1_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = { has_variable = typed_bonus_attack_result_2 }
+			set_variable = { name = seg_typed_bonus_damage_2_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_typed_bonus_damage_2_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
+		}
+		if = {
+			limit = { has_variable = typed_bonus_attack_result_3 }
+			set_variable = { name = seg_typed_bonus_damage_3_on value = 1 }
+			if = {
+				limit = { var:seg_bake_prior > 0 }
+				set_variable = { name = seg_typed_bonus_damage_3_sep value = 1 }
+			}
+			change_variable = { name = seg_bake_prior add = 1 }
 		}
 		if = {
 			limit = {

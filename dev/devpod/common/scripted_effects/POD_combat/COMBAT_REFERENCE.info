@@ -416,6 +416,7 @@ latch a stale bonus onto the next action.
 | Variable | Kind | Consumed by |
 |---|---|---|
 | `pod_combat_bonus_damage` | magnitude | §6 damage adder |
+| `pod_combat_bonus_typed_damage_<class>` | magnitude | §6 separately routed typed-damage packet, one bucket per damage class |
 | `pod_combat_bonus_hit` | magnitude | §5d hit bump (reverted at §17) |
 | `pod_combat_bonus_morale_damage` | magnitude | §7, folded into the base deal call |
 | `pod_combat_bonus_self_heal` / `_heal_target` | magnitude | §9b |
@@ -433,10 +434,15 @@ latch a stale bonus onto the next action.
 | `pod_combat_bonus_uses_weapon` | presence | `pod_combat_move_swings_weapon_trigger` |
 | `pod_combat_bonus_class` | flag | §6 / counter kind / DoT kind (the `change_class` element) |
 
-Thirteen magnitudes, eight tiers, five presences, one flag. Magnitudes
-accumulate through the guarded add (`if has_variable` -> `change_variable`,
-`else` -> `set_variable`), so several clauses naming the same effect sum into
-one apply. The eight tiers do NOT: a tier is ordinal (1/2/3 = small/medium/
+Thirteen magnitude names, eight tiers, five presences, one flag - but the
+typed-damage magnitude is a FAMILY of twelve literal buckets, one per damage
+class, so the clear lists spell out twenty-four names. Magnitudes accumulate
+through the guarded add (`if has_variable` -> `change_variable`, `else` ->
+`set_variable`), so several clauses naming the same effect sum into one apply.
+Typed-damage clauses sum only into their own class bucket; clauses of different
+classes land in different buckets and §6 fires each as its own wound packet.
+There is no typed class flag: the bucket NAME carries the class, which is what
+removed the old last-writer-wins hazard. The eight tiers do NOT: a tier is ordinal (1/2/3 = small/medium/
 large), so tier 1 plus tier 2 has to leave 2, not 3. They take the max
 instead, and `pod_combat_upgrade_tier_from_bonus_effect` then folds the
 winner into the recipient's `<stat>_<dir>_<duration>_tier` under the same
@@ -459,7 +465,10 @@ there - teardown runs after the push) and repointing the loc trigger and the
 `pod_combat_values.txt` tier SVs at the entry var.
 Presences and the flag are set-once by construction. `pod_combat_bonus_class`
 is written with a literal `value = flag:X` rather than a scope-value copy,
-which is what preserves flag identity for the switches that compare it.
+which is what preserves flag identity for the switches that compare it. The
+same rule governs the typed packet's log class: §6 hands each packet its class
+as a macro literal, and the capture stamps `flag:$CLASS$` rather than copying a
+var, so the log dispatcher's flag compares keep matching.
 
 #### Result / display (on the fight story)
 
@@ -547,7 +556,7 @@ ordering rules** below before moving anything.
 | §1 | Spend `ap_cost` AP (`pod_combat_spend_ap_effect`). |
 | §1b | If `once_per` is present, append this move story to the actor slot's round- or combat-duration used list. The usability gate rejects later attempts; the round list clears during initiative setup. |
 | §2 | Reset the result axes (`pod_combat_clear_last_result_vars_effect`), set `pod_combat_last_damage = 0`, and clear the pure-control delivery-failure latch. Absence of a `pod_combat_last_*` var now means "no outcome yet" for this move. |
-| §2b | **Bonus clause pre-evaluation.** A move carries N stackable bonus clauses on its `bonus_clauses` list (`POD_combat_move_clause` stories), each with its own condition AND its own payload. Walk them once, here in host scope (root = host, acting char = `pod_combat_actor_char`), and fold every MET clause into a per-effect fight transient: 13 magnitude vars `pod_combat_bonus_<effect>` accumulated with the guarded add, 8 tier vars accumulated TAKE-MAX instead (see **Bonus-clause transients**), 5 presence vars (`pod_combat_bonus_aggravated` for `change_type`, plus `_stance_guard` / `_stance_dodge` / `_stance_stealth` / `_uses_weapon`) and the flag var `pod_combat_bonus_class` for `change_class` - see **Bonus-clause transients** in §1. Same-effect clauses SUM - except the eight tier vars, where they take the highest tier - different effects each land in their own var, and each later phase then fires exactly ONCE off `has_variable` of its own transient: §5d `hit`, §6 `damage`/`change_type`/`change_class`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`self_morale_heal`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13 `retaliate_boost` (folded into the charge the move arms), §13b-bonus `dot`, §13b-bonus-morale `morale_dot`, §14 `ap_refund` / `ap_drain` (both stamp a transient - `pod_combat_last_ap_refund`, `pod_combat_last_ap_drain` - so the log renders what actually fired; the drain lift carries base + clause sum). Summing before one apply is load-bearing, not tidiness: the energy scaling ceilings per call, the DoT seed overwrites, and the damage adder would clobber. **The clear is unconditional and sits OUTSIDE the walk**, so it runs for a clause-less move too - with no move-level compare left anywhere, a transient stranded by an aborted clause move would otherwise replay on whatever executed next. (Gate mode is enforced pre-execution in the usability triggers, not here; a gate row MAY also carry bonus clauses.) `uses_weapon` is the one effect with no phase branch of its own: it grants the weapon swing instead, which §2c and §6 pick up through `pod_combat_move_swings_weapon_trigger` - so §2b running before §2c is load-bearing for it. |
+| §2b | **Bonus clause pre-evaluation.** A move carries N stackable bonus clauses on its `bonus_clauses` list (`POD_combat_move_clause` stories), each with its own condition AND its own payload. Walk them once, here in host scope (root = host, acting char = `pod_combat_actor_char`), and fold every MET clause into a per-effect fight transient: 13 magnitude names `pod_combat_bonus_<effect>` accumulated with the guarded add - one of which, typed damage, is a family of twelve literal per-class buckets `pod_combat_bonus_typed_damage_<class>` - 8 tier vars accumulated TAKE-MAX instead (see **Bonus-clause transients**), 5 presence vars (`pod_combat_bonus_aggravated` for `change_type`, plus `_stance_guard` / `_stance_dodge` / `_stance_stealth` / `_uses_weapon`) and the flag var `pod_combat_bonus_class` for `change_class` - see **Bonus-clause transients** in §1. A parametrized `damage` clause needs no class flag: it accumulates into the bucket NAMED for its class, so clauses of different classes cannot clobber each other and a 0-magnitude clause seats no bucket at all. Same-effect clauses SUM - except the eight tier vars, where they take the highest tier, and typed damage, where the sum is per class bucket - different effects each land in their own var, and each later phase then fires exactly ONCE off `has_variable` of its own transient: §5d `hit`, §6 untyped/typed `damage` / `change_type` / `change_class`, §7 `morale_damage` (folded into the base deal call), §9b `self_heal`/`heal_target`/`self_morale_heal`/`energy_gain`/`energy_drain`, §12 `stance_*`, §13 `retaliate_boost` (folded into the charge the move arms), §13b-bonus `dot`, §13b-bonus-morale `morale_dot`, §14 `ap_refund` / `ap_drain` (both stamp a transient - `pod_combat_last_ap_refund`, `pod_combat_last_ap_drain` - so the log renders what actually fired; the drain lift carries base + clause sum). Summing before one apply is load-bearing, not tidiness: the energy scaling ceilings per call, the DoT seed overwrites, and the damage adder would clobber. **The clear is unconditional and sits OUTSIDE the walk**, so it runs for a clause-less move too - with no move-level compare left anywhere, a transient stranded by an aborted clause move would otherwise replay on whatever executed next. (Gate mode is enforced pre-execution in the usability triggers, not here; a gate row MAY also carry bonus clauses.) `uses_weapon` is the one effect with no phase branch of its own: it grants the weapon swing instead, which §2c and §6 pick up through `pod_combat_move_swings_weapon_trigger` - so §2b running before §2c is load-bearing for it. |
 | §2c | **Weapon profile.** For a move that swings the actor's weapon - the static `uses_weapon` flag, or the `uses_weapon` bonus whose condition held at §2b, both answered by `pod_combat_move_swings_weapon_trigger` - resolve the actor's equipped `primary_armament` (subject to `can_benefit_from_artifact`) into six per-action transients on the **fight story**: `pod_combat_weapon_class` (the retype), `pod_combat_weapon_bonus_damage`, `pod_combat_weapon_undodgeable`, `pod_combat_weapon_heal_on_damage`, `pod_combat_weapon_energy_on_damage`, `pod_combat_weapon_soak_penalty` (the last three consumed in the §9c recovery riders and the dispatch-site shred stamp; note that the fight-owned `pod_combat_weapon_soak_penalty` is a DIFFERENT variable from the character-side `pod_combat_weapon_soak_pen` the §6 dispatch site copies onto the attacker for PoD's wound call). Unconditional set-or-clear, so an unarmed actor or a non-weapon move actively clears the previous action's profile. The retype is only ever seeded over a move whose own class is `superficial` - an authored element or `aggravated` is the move's identity and outranks the weapon. Torn down in §17 and, as insurance, in `pod_combat_cleanup_effect`. See **Weapon artifact overrides**. |
 | §9c | **Weapon recovery riders.** `artifact_weapon_heal_on_damage` / `_energy_on_damage`, gated on `pod_combat_result_code_indicates_hp_damage_trigger` - the same predicate the `on_hp_damage` rider resolves to, which reads the live result pair on a single target and the `pod_combat_aoe_any_hp_damage` latch on a sweep. So recovery fires **once per action, not once per victim**, and a fully-soaked blow (`flag:soaked`) feeds nothing. Reuses `pod_combat_restore_hp_superficial_effect` and `POD_splat_agnostic_energy_gain` (actor scope-switch mandatory), and shares `pod_combat_last_energy_gain` with the §9b bonus - adding to it rather than overwriting, so a move carrying both logs the sum. Sits before §15, so the actor cannot have been killed by a counter and needs no `is_alive` guard. Inherited quirks: the heal lift fires the §16 AoE wrap-up row even at 0, and on a sweep stamps a heal outcome on that row (both pre-existing §9b behaviours); the energy line logs the requested amount, not the pool-capped delta. |
 | §3 | Pay `energy_cost` from the actor's splat pool. Scope-switches to `var:pod_combat_actor_char` first (`POD_splat_agnostic_energy_cost` drains the *current* scope's pool — without the switch every AI cast would drain the PC). Also bumps the AI energy-attrition counter. |
@@ -557,10 +566,10 @@ ordering rules** below before moving anything.
 | §5b2 | **Pure-control contact delivery.** An explicitly typed single-enemy move with no HP/morale payload carries `requires_control_contact`; run the unified capability resolver here. On failure, set a latch that suppresses its guard strip, tiers, mind control, AP drain, and initiative debuff. AP/energy/once-per are still spent, actor stealth is consumed, and the log keeps only the miss/block outcome rather than claiming payloads landed. |
 | §5c | **Tier buffs/debuffs.** Buffs → actor except `single_ally` → selected target; debuffs → target. Each write is **upgrade-only** (first application or a strictly higher tier), and a failed §5b2 delivery skips all declared tiers. Hit/soak recalc and the PoD soak bridge follow the actual beneficiary. See **Tier system**. |
 | §5d | For a fired `bonus_effect = hit`, add `bonus_value` to `pod_combat_current_hit_chance` for this move and re-cap it at `pod_combat_hit_chance_max`. §17 rebuilds the ordinary tier+stealth value afterward so the bonus cannot leak to a later move. |
-| §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves the hit and writes the result axes `pod_combat_last_outcome = flag:attack` + `pod_combat_last_attack_result` on the fight story. See **Damage pipeline**. |
+| §6 | **HP damage dispatch.** Routes `single_enemy` vs the `team_enemy` / `team_all` AoE sweeps. Resolves contact once, applies the main packet (base + untyped bonus + weapon bonus), then walks the twelve typed-damage buckets in class-table order and applies each filled one as its own PoD wound packet with its own class, immunity, soak and actual-result snapshot. The actor's `pod_combat_force_agg` / weapon markers are stripped ONCE before the first typed packet, so an authored rider is never reclassified by the main packet's promotion or retype. There is no immunity waste guard on a typed packet: an immune class logs `Immune` rather than standing down. Aggregate result vars cover every packet for gameplay; the log uses separate primary and per-slot typed snapshots, three slots deep. The `team_all` caster's own share is dealt outside this dispatch and so receives no typed packet, no untyped bonus and no weapon bonus. See **Damage pipeline**. |
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
-| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, so a heal is never legal on `team_all`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. |
+| §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, so a heal is never legal on `team_all`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. The rider reads the AGGREGATE result, which covers every packet: a typed rider that lands while the move's own packet was fully soaked, or even while the victim was immune to the move's class, still satisfies `on_hp_damage`. The same is true of the §9c weapon riders, the AoE `pod_combat_aoe_any_hp_damage` latch and §15's contact partition. |
 | §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
@@ -576,7 +585,7 @@ ordering rules** below before moving anything.
 | §14b | `summons_combatant`: run the move's allow-listed character-creation recipe, then seat the result on the resolved friendly or `summon_hostile` destination (`pod_combat_summon_combatant_glue_effect`). The controlled-animal recipe creates a fixed-Prowess physical animal in PoD's Wolf Form, or a stronger one-slot swarm when the summoner owns `plague_of_beasts_perk`. After the damage phases (a same-cast AoE can't hit the new unit), before §15 (it can't counter on its summon turn); it acts next round. |
 | §15 | **Reaction phase.** Only a move carrying `hp_damage` whose targeting is neither `team_enemy` nor `team_all` checks the target's armed retaliation (`pod_combat_check_retaliation_effect`). Pure morale/control and team AoE moves do not trigger reactions. At most one counter fires: a specific hit/miss charge answers first and holds the always-charge. See **Reactions**. |
 | §16 | Push the combat-log row (`pod_combat_push_log_effect`). AoE-aware gate, below. |
-| §17 | Bonus teardown: if §5d temporarily changed hit chance, rebuild the actor's ordinary tier+stealth value first (that revert MUST stay above the clears, since it reads `pod_combat_bonus_hit`); then clear the **whole** per-effect transient set - all 13 magnitudes, all 8 tiers, all 5 presences and `pod_combat_bonus_class`, spelled out literally. A missed name latches into the next action, whose apply site gates on nothing but `has_variable`. §2b repeats the same clear unconditionally, for the move that aborted before reaching here. Also belt-and-braces-removes the actor's transient `pod_combat_force_agg` marker (normally dropped at the dispatch site) for any future early-exit path. |
+| §17 | Bonus teardown: if §5d temporarily changed hit chance, rebuild the actor's ordinary tier+stealth value first (that revert MUST stay above the clears, since it reads `pod_combat_bonus_hit`); then clear the **whole** per-effect transient set - all 12 untyped magnitudes, all 12 typed-damage class buckets, all 8 tiers, all 5 presences and `pod_combat_bonus_class`, spelled out literally. A missed name latches into the next action, whose apply site gates on nothing but `has_variable`. §2b repeats the same clear unconditionally, for the move that aborted before reaching here. Also belt-and-braces-removes the actor's transient `pod_combat_force_agg` marker (normally dropped at the dispatch site) for any future early-exit path. |
 
 ### The §16 log gate
 
@@ -692,8 +701,12 @@ result-axis flags):
    logged `guard_blocked`). Else result `0` (hit).
 
 Every non-hit branch sets the result axes and `pod_combat_last_damage =
-0`. Only result `0` reaches the payload
-(`pod_combat_apply_damage_payload_effect`). HP/contact dispatch and
+0`. Only result `0` reaches the primary payload wrapper
+(`pod_combat_apply_primary_damage_payload_effect`). Met `damage` clauses with a
+non-blank `bonus_param` then reuse that successful contact: each class bucket
+§2b filled routes through `pod_combat_apply_typed_bonus_damage_payload_effect`
+as its own wound packet, in class-table order. A blank parameter keeps the
+legacy path and adds the bonus to the main packet instead. HP/contact dispatch and
 explicit pure-control delivery consume actor stealth after resolution
 regardless of outcome (once per HP AoE burst). The separate morale-only
 pipeline consumes the target's stealth/dodge but does not break actor
@@ -706,7 +719,7 @@ initiative segments are suppressed because those effects did not land.
 
 #### The class dispatch — damage class → PoD death reason
 
-Every HP-damage move carries a **single-axis damage classification** in
+Every HP-damage move carries a **single-axis main-damage classification** in
 `var:damage_type`: `superficial` (stamped as the default by
 `POD_combat_move_set_hp_damage`), `aggravated`, or one of ten elements
 (fire / cold / lightning / sun / silver / gold / holy / balefire /
@@ -733,6 +746,21 @@ splat-weakness multipliers and aggravated classification:
 | `poison` | `poison` |
 | `cold_iron` | `cold_iron` |
 
+A typed `damage` clause names one of the same twelve classes in its
+`bonus_param`. It shares the move's contact roll but uses this table for its
+own PoD route, so its immunity, weakness multiplier, soak and aggravated
+classification can differ from the main packet. The main packet's transient
+weapon retype, forced-aggravated marker and weapon soak penetration are removed
+once, before the first of these explicitly-authored packets resolves.
+
+A move may carry up to three DISTINCT classes, each its own bucket, packet and
+log segment; clauses naming the same class sum into one packet. The runtime
+itself has twelve buckets and would fire all of them, but the log renders three
+typed segments, so the generator caps an authored move at three. Unlike
+`change_class` and the weapon retype there is no immunity waste guard: a rider
+is additive, so a class the victim shrugs off costs the move nothing and simply
+reads `Immune` on its own segment.
+
 An **element** rides its real `death_reason` into PoD core, which
 decides aggravated / superficial / **immune** **per target** from the
 splat-vulnerability matrix in the live
@@ -752,11 +780,13 @@ target"; the authoritative per-victim verdict is the matrix above, not
 this trigger).
 
 The same kind table is mirrored by the weapon-retype switch beside it in
-`pod_combat_apply_single_hp_damage_effect`,
+`pod_combat_apply_single_hp_damage_effect`, the twelve-call chain in
+`pod_combat_apply_typed_bonus_damage_effect` (the typed packets),
 `pod_combat_deal_typed_retal_damage_effect` (typed counters) and
-`pod_combat_deal_dot_tick_from_host_effect` (DoT ticks) — keep the four
-switches in step. To add a class, follow **Adding a new damage class**
-in §11.
+`pod_combat_deal_dot_tick_from_host_effect` (DoT ticks) — keep all of them in
+step with the main dispatch, together with the §2b bucket arms that feed the
+typed chain. To add a class, follow **Adding a new damage class** in §11, which
+lists every site.
 
 
 ### Weapon artifact overrides
@@ -1031,14 +1061,23 @@ aggravated_delta)`, so aggravated push-out is not mistaken for a soak.
 Morale spillover scales off the actual post-soak damage
 (`pod_combat_morale_from_hp_ratio`).
 
-`pod_combat_apply_damage_payload_effect` lifts `scope:soaked_count` into
-`pod_combat_last_soaked_count`, which `push_log` stamps onto the entry as
-`soaked_count`. `PODCombatLogResultText` then renders a partial-soak
-variant of the damage line (the usual `-N` + wound-box icon, followed by
-a weak-italic "M soaked" note) so a reduced number reads as soak rather
-than a bug. Full soaks still render the bold `Soaked`
-outcome, and the two sets are disjoint (the partial branches require
-`attack_result = hp_damage` and `damage > 0`).
+`pod_combat_apply_damage_payload_effect` sums every packet's
+`scope:soaked_count` into `pod_combat_last_soaked_count`, retained as a
+fallback for a caller that writes no packet snapshot rather than as a gameplay
+input. Its packet wrappers preserve `pod_combat_last_primary_soaked_count` and
+`pod_combat_last_typed_bonus_soaked_count_<k>`. `push_log` stamps the primary
+count onto `entry.var:soaked_count` and each typed count onto
+`entry.var:typed_bonus_soaked_count_<k>`, so each renderer explains only its own
+post-soak magnitude. The main `PODCombatLogResultText` and the three
+`PODCombatLogSegTypedBonusDamage<k>` segments each have partial-soak variants (the
+usual `-N` + wound-box icon, followed by a weak-italic "M soaked" note). Full
+soaks render `Soaked` on the corresponding packet instead.
+
+Soak is rolled per packet, and so is PoD's own damage toast and the morale
+spillover: an action carrying three typed riders raises four wound toasts and
+spills four times. The spill total matches a single merged packet only because
+`pod_combat_morale_from_hp_ratio` is an integer; a fractional ratio would round
+each packet down separately.
 
 #### The spirit gate
 
@@ -1068,12 +1107,18 @@ per-victim classification) can differ — a holy hit is aggravated on a
 vampire, superficial on a changeling, and immune on a werewolf or
 mundane target. The route helper's
 `scope:result_agg` export captures what PoD actually decided; the
-payload lift stores it as fight `pod_combat_last_result_agg`, `push_log`
-stamps it onto the row as `entry.var:result_agg`, and
-`PODCombatLogResultText` picks the aggravated wound-box icon off it, so
-the log always matches the health track. The same stamp drives the retal
-rider's `retal_agg`. The log shows only the *resulting* damage — element
-display lives on the move cards, the sheet, and the tooltips.
+payload lift stores an aggregate `pod_combat_last_result_agg`, retained as a
+fallback rather than read by gameplay. The packet wrappers additionally store
+`_last_primary_result_agg` and `_last_typed_bonus_result_agg_<k>`; `push_log`
+maps those to `entry.var:result_agg` and `entry.var:typed_bonus_result_agg_<k>`.
+The head and each typed segment therefore choose their aggravated wound boxes
+independently, and each typed segment also labels its authored class. The same
+actual-result shape drives the retal rider's `retal_agg`.
+
+Both the aggregate and the packet snapshots classify off the route helper's own
+`scope:attack_result_flag`, not off the magnitude: its dead-target branch reports
+`hp_damage` with the overkill count, which is 0 when the victim had no empty
+boxes left, and reading the magnitude would relabel that as `immune`.
 
 ---
 
@@ -1737,20 +1782,24 @@ contact nor the miss partition below.
 
 **Actual-result markers** ride alongside the axes, stamped from PoD's
 per-victim classification rather than the move's damage class (see
-**Damage pipeline**): `pod_combat_last_result_agg` →
-`entry.var:result_agg` splits the main damage line's wound-box icon, and
+**Damage pipeline**). `pod_combat_last_result_agg` remains the aggregate
+marker; `pod_combat_last_primary_result_agg` →
+`entry.var:result_agg` splits the main packet's wound-box icon, and
+`pod_combat_last_typed_bonus_result_agg_<k>` →
+`entry.var:typed_bonus_result_agg_<k>` splits each typed packet's icon.
 `pod_combat_last_retal_agg` / `_last_retal_morale` →
 `entry.var:retal_agg` / `retal_morale` split the retal rider's. Absent =
 superficial only after a positive HP/counter branch has already won;
 miss, immunity, full soak, and zero-damage retaliation dispatch through
 their own branches.
 
-`pod_combat_last_soaked_count` → `entry.var:soaked_count` is the same
-shape: on an `hp_damage` row it selects a partial-soak variant of the
-damage line that appends the absorbed count. It is a dispatcher split,
-not a segment, so it needs no `seg_*` bake and no `.gui` change. The
-retal rider deliberately carries no equivalent — its grammar drops
-magnitudes, and its number is already post-soak.
+The aggregate `pod_combat_last_soaked_count` is likewise retained as a
+fallback. The packet snapshots map independently:
+`pod_combat_last_primary_soaked_count` → `entry.var:soaked_count` selects a
+partial-soak main line, while `pod_combat_last_typed_bonus_soaked_count_<k>` →
+`entry.var:typed_bonus_soaked_count_<k>` selects that typed segment's
+partial-soak variant. The retal rider deliberately carries no equivalent — its grammar
+drops magnitudes, and its number is already post-soak.
 
 ### How helpers write the axes
 
@@ -1759,8 +1808,9 @@ magnitudes, and its number is already post-soak.
   writes `outcome = flag:attack` and `attack_result = flag:$CODE$`
   together. Landed damage lifts the route helper's
   `scope:attack_result_flag` (`hp_damage` / `soaked` / `immune`) in
-  `pod_combat_apply_damage_payload_effect` and writes the same two axes
-  directly. Readers can therefore trust that `attack_result` is
+  `pod_combat_apply_damage_payload_effect` and writes the aggregate axes.
+  The primary and typed wrappers copy that packet's axes into their parallel
+  log snapshots. Readers can therefore trust that `attack_result` is
   meaningful whenever `outcome = attack`.
 - **Secondary outcomes** (HP heal, morale damage, morale heal) use
   `pod_combat_set_outcome_if_unset_effect = { CODE = ... }`, which
@@ -1775,8 +1825,8 @@ magnitudes, and its number is already post-soak.
 
 ### Reset, sentinel, and the utility default
 
-§2 of `POD_execute_combat_move` removes all three axis vars and the
-actual-result markers (via
+§2 of `POD_execute_combat_move` removes all three axis vars, the aggregate
+result fields, and both packet snapshots (via
 `pod_combat_clear_last_result_vars_effect`). **Absence is the sentinel**
 for "no result yet" — helpers write the matching axis as the move
 resolves. At log-push time `push_log` defaults `entry.var:outcome` to
@@ -1840,14 +1890,20 @@ Two callers create the entries:
   resolved move: a live `move` story reference (the GUI reads the damage
   class, targeting, and the primitive flags off it), `actor` /
   `target` char refs, `actor_side`, optional `aoe_burst_index`, the
-  amount fields (`damage`, `heal_amount`,
+  amount fields (`damage`, `typed_bonus_damage_<k>`, `heal_amount`,
   `morale_damage_amount`, `morale_heal_amount`, `self_damage`,
   `retal_damage`, `energy_gain`, `energy_drain`, `ap_refund`,
-  `soaked_count`), the
+  `soaked_count`, `typed_bonus_soaked_count_<k>`), the
   three result-axis vars (`outcome` /
   `attack_result` / `retal_fired`, see **Result model**), the
-  actual-result markers (`result_agg` / `retal_agg` / `retal_morale`),
-  and the segment-visibility bake described below.
+  actual-result markers (`result_agg` / `typed_bonus_result_agg_<k>` /
+  `retal_agg` / `retal_morale`), each typed packet's
+  `typed_bonus_attack_result_<k>` / `typed_bonus_damage_class_<k>`,
+  and the segment-visibility bake described below. The typed fields exist
+  for `k` = 1..3, stamped only for the slots a row actually claimed;
+  `attack_result_<k>` is the claim marker and the stamp always writes it
+  alongside that slot's damage, class and soak count, so one presence test
+  covers the set and every read in the renderer is dense.
 - **`pod_combat_push_system_log_effect`** (and the `_named` sibling,
   which also stamps `actor`) — a move-less row carrying only a
   `system_message` flag.
@@ -1857,7 +1913,8 @@ Two callers create the entries:
 The result column is composed from **one head plus a sequence of
 segments**, each separated by a ` · ` divider:
 
-- The **head** is `PODCombatLogResultText`, a three-axis dispatcher. It
+- The **head** is `PODCombatLogResultText`, a three-axis dispatcher over the
+  primary packet. It
   resolves the primary line off `entry.var:outcome` and
   `entry.var:attack_result` (with the wound-box icon split on the
   entry's actual-result marker `result_agg`, so the icon matches what
@@ -1869,6 +1926,7 @@ segments**, each separated by a ` · ` divider:
 
 | Segment | Renders when the move has |
 |---------|--------------------------|
+| `PODCombatLogSegTypedBonusDamage1` / `2` / `3` | a typed conditional-damage packet was routed into that slot; each shows its own landed/soaked/immune result, actual wound box, amount, absorbed count and authored class. Three near-identical dispatchers, because a customizable_loc takes no parameters and `PODSegText` can only vary the dispatcher name |
 | `PODCombatLogSegRecoil` | self-damage > 0 on the entry |
 | `PODCombatLogSegHitTier` | a hit buff/debuff tier |
 | `PODCombatLogSegSoakTier` | a soak buff/debuff tier |
@@ -1915,6 +1973,10 @@ are immutable after push, so each read is a single variable check.
 
 The bake conditions:
 
+- **Typed bonus damage** (three, baked in slot order before every other
+  segment): that slot's packet result was captured. This is per-target outcome
+  data and is never AoE burst-gated. A typed row is always `outcome = attack`,
+  so `seg_bake_prior` starts at 1 and slot 1 always draws its separator.
 - **Heal / morale riders**: amount captured and `> 0`, `NAND` outcome
   equals the rider's own primary (so a pure-heal row doesn't
   double-print the heal). `NAND`, not `NOT` — `outcome` is always
@@ -1953,7 +2015,7 @@ render time, so a widget mounted out of order prints its ` · ` in the
 wrong place, and a baked segment with no mounted widget pair renders
 nothing while still counting toward every later segment's separator (a
 silent "leading ` · `" bug that looks like a loc problem). Every baked
-segment has a mounted pair today, Recoil through Marker.
+segment has a mounted pair today, Typed Bonus Damage 1-3 through Marker.
 
 #### System and bookend rows
 
@@ -2252,6 +2314,13 @@ morale damage via `SIDE = actor`, and debuff **tiers** via
 into `pod_combat_last_self_damage`, so the existing recoil rider on the §16
 wrap-up row reports it; the lift is additive, since the move may also carry a
 `self_damage` rider.
+
+**The caster's share is the move's base `hp_damage` and nothing else.** It is
+dealt outside `pod_combat_dispatch_damage_pipeline_effect`, so none of the §6
+adders reach it: not the untyped `damage` bonus, not the weapon's bonus damage,
+and not the typed damage packets. Only the KIND propagates (weapon retype and a
+granted `change_class`). A `team_all` move with a met typed rider therefore
+wounds every ally and enemy with the extra packet but not its caster.
 
 `bypass_dodge` / `bypass_stealth` are **not** self-applied: they describe how
 the attack meets each victim's defenses rather than a debuff the blast inflicts,
@@ -3258,7 +3327,7 @@ the devpod-old copy is the porting reference).
 |---|---|
 | `pod_combat_move_execution_triggers.txt` | Affordability, capability-flag gates, rider condition triggers, AoE team-side filters, result-code partition triggers. Opens with a SHARED GATE PREDICATES section: one named trigger per player-visible block reason, called by both the live gate and the render-only tooltip SGUI that voices it (see *Move tooltip variants*). |
 | `pod_combat_move_unlock_triggers.txt` | Unlock authority: one manually maintained character-scoped rule per move, plus `pod_combat_actor_unlocks_move_trigger`, the `config_section`/`skill_key` story adapter used by editor, preset, PC-bake, and AI-seeding paths. Every move, including universal moves, needs an explicit dispatcher leaf. The permissive fallbacks are safety guards, not authoring shortcuts. |
-| `pod_combat_condition_dispatch_triggers.txt` | Selectively generated. `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` / `pod_combat_cond_has_modifier_trigger` / `pod_combat_cond_has_perk_trigger` / `pod_combat_cond_fera_form_trigger` are literal-key switches for the move's `cond_param`, because CK3 requires a literal trait, secret type, modifier or perk key (and a per-form trigger name for shapeshift forms). Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails closed. Selective integration adds required cases without deleting intentional live cases that are not represented by the current CSV projection. |
+| `pod_combat_condition_dispatch_triggers.txt` | Selectively generated. `pod_combat_cond_has_trait_trigger` / `pod_combat_cond_known_secret_trigger` / `pod_combat_cond_has_modifier_trigger` / `pod_combat_cond_has_perk_trigger` / `pod_combat_cond_fera_form_trigger` are literal-key switches for the move's `cond_param`, because CK3 requires a literal trait, secret type, modifier or perk key (and a per-form trigger name for shapeshift forms). Called from `pod_combat_move_condition_met_trigger`; an unknown `cond_param` fails closed. |
 | `pod_combat_triggers.txt` | High-level "is combat active" / "is this move equipped" infrastructure triggers. Also home to the damage-class partition triggers (`pod_combat_move_class_is_elemental_trigger` / `pod_combat_class_always_aggravated_trigger`), single-ally AI candidate-gate evaluation, and `pod_combat_ai_move_admissible_trigger` - the AI's entire move-admission gate set, which the move roll calls as its `limit`. Also holds `pod_combat_move_exploits_target_weakness_trigger`, the AI's weakness-exploitation bridge: it pairs each `damage_type` flag (silver / gold / sun / fire / holy / poison / cold iron) with PoD's own `POD_weak_to_<class>_trigger` and owns no weakness definitions of its own, so the AI's idea of a weakness cannot drift from the wound pipeline's. |
 | `pod_combat_weapon_triggers.txt` | Reads of the actor's equipped `primary_armament` for the `uses_weapon` path: whether the action swings a weapon at all (`pod_combat_move_swings_weapon_trigger`, static flag or fired `uses_weapon` bonus), whether the actor is armed with a weapon it can actually benefit from, whether that weapon carries any override worth taking, and the two per-victim waste guards (`pod_combat_weapon_retype_is_wasted_trigger` for the live weapon profile, `pod_combat_stamped_type_is_wasted_trigger` for a kind already stamped on the fight story) that stand a retype, a granted `change_class` element or a weapon-derived retaliation kind down against an immune victim. The stamped one is current-scope-relative, so every caller invokes it from HOST scope; from a slot or a move story it finds no session pointer and answers "not wasted" for every victim. The shared bane dataset lives outside `POD_combat/` in `POD_weapon_artifact_triggers.txt`, since PoD's own wound classifier reads it too. |
 | `POD_health_track_triggers.txt` (PoD file, delta) | Current combat damage matrix: per-splat aggravated classification and default immunities for the elemental death reasons, poison/cold-iron weakness helpers, holy/true-faith classification (including vampires/abominations, demons, kuei-jin, wraiths, and true Fae), and the `pod_combat_force_agg` change-type bridge. |
@@ -3827,14 +3896,23 @@ combat-log dispatcher.
    `superficial` stamp would clobber an earlier class write. Add the
    literal class flag to validator suppression with the rest of the
    engine change.
-2. **The five kind switches** — add one `flag:X` → `REASON` arm to
-   each, kept in step. Three live under the "HP DAMAGE DISPATCH" banner
+2. **The kind switches** — add one `flag:X` → `REASON` arm to each, kept
+   in step. Three live under the "HP DAMAGE DISPATCH" banner
    in `pod_combat_move_effects.txt`
    (`pod_combat_apply_single_hp_damage_effect`: the `change_class`
    conversion, the weapon retype, and the authored class), plus
    `pod_combat_deal_typed_retal_damage_effect` (typed counters,
    `pod_combat_effects.txt`) and
    `pod_combat_deal_dot_tick_from_host_effect` (DoT ticks, same file).
+   The typed-damage bonus adds three more sites in
+   `pod_combat_move_effects.txt`, all of which must gain the class or a
+   `damage` clause naming it fails **silently**: the §2b `bonus_param`
+   switch arm (whose `fallback` folds an unknown class into the untyped
+   main-packet adder), one `remove_variable` line in EACH of the two
+   bucket clear lists (§2b and §17), and one call line in the
+   `pod_combat_apply_typed_bonus_damage_effect` chain. Miss the clear and
+   the bucket latches onto the next action; miss the chain call and the
+   bucket is filled but never fired.
 3. **Kind seeding**: `pod_combat_seed_kind_from_class_effect` and
    `pod_combat_override_kind_from_bonus_class_effect`
    (`pod_combat_move_effects.txt`), plus
@@ -3851,7 +3929,11 @@ combat-log dispatcher.
    damage-element vocabulary a clause's `bonus_param` may name, which is
    maintained upstream with the move catalogue.
 4. **Class partition triggers**: `pod_combat_triggers.txt` — add the
-   class to `pod_combat_move_class_is_elemental_trigger`, and to
+   class to `pod_combat_move_flag_is_elemental_trigger` (which
+   `pod_combat_move_class_is_elemental_trigger` and the twelve-value
+   `pod_combat_move_flag_is_damage_class_trigger` both build on, the
+   latter being what the stat card uses to decide a `damage` clause is
+   typed), and to
    `pod_combat_class_always_aggravated_trigger` only if it belongs in
    that **typical-target AI/log heuristic**. That trigger is not
    universal truth: it includes fire and balefire despite incorporeal
@@ -3892,7 +3974,13 @@ combat-log dispatcher.
    label. Do **not** add a bare flag-name key (`fire`, `silver`, …
    collide with vanilla loc keys) — only `superficial`/`aggravated` ever
    reach `GetFlagName` (the `_basic` keys), because the SGUI dispatch
-   sends every elemental move to its per-element key.
+   sends every elemental move to its per-element key. Two further keys are
+   looked up by `Concatenate` on the class name and render the RAW KEY when
+   missing, which is silent: `pod_combat_damage_type_X` (the stat card's
+   `change_class` and typed-damage clause lines) and
+   `pod_combat_log_typed_class_X` (the typed packet's combat-log label).
+   The two namespaces differ deliberately - the log prints its own wound
+   box, so its wound-class labels are words where the card's are boxes.
 11. **Game concept**: the combat concept deltas in PoD's
    `00_POD_game_concepts.txt` — add a concept entry so the class
    name is hover-able as a concept tooltip.
