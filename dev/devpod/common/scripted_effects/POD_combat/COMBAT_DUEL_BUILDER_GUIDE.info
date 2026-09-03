@@ -63,6 +63,11 @@ direct call skips the interception gates and the normal duel bookkeeping:
 | `remove_single_combat_info_effect`, shirtlessness / signature-weapon setup | yes | no |
 | Terrain background captured at setup | yes | reconstructed at end, degraded |
 | Ends via | the shell card's Conclude option | the shell card's Conclude option |
+| First fight for this character | deferred behind the intro popup `pod_combat.0200`, which launches from its Begin option (once per character) | never deferred |
+
+The deferral in the last row is invisible to callers: the intro holds your
+scope table and the builder runs from its option, so the shell card snapshots
+exactly what it would have on the direct route. See COMBAT_REFERENCE section 10.
 
 So a custom roster no longer costs you the parent scopes. What it still
 costs is the single-combat bookkeeping in the middle rows: seat a group
@@ -86,10 +91,18 @@ Three steps, four effects:
 
 | Effect | When | What it does |
 |---|---|---|
-| `POD_combat_create_duel_effect` | once, first | Opens the shell card that carries your scope table to the follow-up, tears down any leaked prior fight, scaffolds host state, creates the duel story (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
+| `POD_combat_create_duel_effect` | once, first | Opens the shell card that carries your scope table to the follow-up, tears down any leaked prior fight, creates the fight story and scaffolds fight state on it (saved as `scope:pod_combat_duel`), seats the PC at **player team, position 0** |
 | `POD_combat_duel_add_ally_effect` | any number | Appends a character at the next free **player** position (1, 2, 3, ...) and bumps `pod_combat_player_team_size` |
 | `POD_combat_duel_add_enemy_effect` | 1+ times | Appends a character at the next free **enemy** position (0, 1, 2, ...) and bumps `pod_combat_enemy_team_size`; the **first** enemy goes to enemy position 0 |
 | `POD_combat_finalize_duel_effect` | once, last | Derives the leader pointers, shapeshifts AI fera, inits every slot, computes hit chances, stamps the death gate / practice snapshots, runs the init-time KO check, opens the combat window (`pod_combat_active`), rolls initiative and **starts round 1** |
+
+> The warform pre-pass here is `is_ai = yes` only, deliberately: a human may
+> prefer to stay in homid, or to shift once the fight is under way. That later
+> shift is no longer inert - `pod_combat_delirium_effects.txt` re-derives PoD's
+> Delirium at the turn boundaries and immediately from the shapeshift
+> interaction's own tail hook, so a builder does not have to pre-shift its
+> principals to get the right numbers.
+
 
 `finalize` starts round 1; it does not run the fight. From there the fight
 advances on player clicks (End Turn / Advance) until one side is wiped.
@@ -149,16 +162,18 @@ mid-fight* below).
 
 ## Atomicity and reentrancy
 
-The builder keeps its half-built state on the host with no in-progress
+The builder keeps its half-built state on the fight story with no in-progress
 marker, so a partial or repeated build is not self-correcting:
 
 - **Calling `create_duel` during a live fight tears the live fight down.**
-  Its defensive teardown fires on `has_variable = pod_combat_active`,
+  Its defensive teardown fires on bare `has_variable = pod_combat_session`
+  - deliberately the widest question available, so it also reclaims a fight
+  that ended without cleanup and one whose story is already gone -
   clearing the death gate, the duel marker and every slot story. That is
   correct recovery from a crashed prior fight and destructive to a real one.
 - **Calling `create_duel` twice before finalizing leaks.** `pod_combat_active`
   is not set yet, so the second call skips the teardown, creates a second
-  `POD_combat_sc_context` story and overwrites the pointer var. The first
+  `POD_combat_fight` story and overwrites the pointer var. The first
   story is orphaned on Charon for the rest of the save, and its card is
   orphaned too -- concluding through it is a no-op, since the ownership
   gate compares against the live pointer.
@@ -274,13 +289,53 @@ flag has no effect on the outcome. Pass `no`.
 |---|---|
 | `no` | Non-fatal, but **not damage-free**. Real wounds land live and a track can fill, so a combatant can be KO'd mid-fight; `pod_combat_nonfatal_active` blocks PoD's inline death check, and at normal combat end each combatant's track is capped by peeling one wound (superficial first) so one empty box remains. Nobody dies. |
 | `practice` | Sparring: real wounds land live, the fight is unkillable, and each combatant's wound track is snapshot at start and restored at the end. The wound-pipeline side effects (infection / treatment / epilepsy events, balefire stacks, Clay-Man charge) are suppressed via `pod_combat_practice_active`, and no lasting Mental Strain is applied. **Not a full rollback**: energy and other move costs, and gains that are not part of the wound track, persist. |
-| `possible` | Real fight. Wounds land live and a filled track can kill during the fight. |
+| `possible` | Real fight. Wounds land live, a filled track KOs during the fight, and the kill is applied once at the end if that track was lethal. |
 | `default` | PoD's default. Resolves to a forced kill only if `pod_combat_fatality_default_will_die_trigger` holds (the attacker's government is tribal -- or, for a landless, courtless, hostless attacker, the defender's). Otherwise it behaves like `possible`. |
-| `always` | After a **decisive** outcome, the principal **loser** is force-killed at the end (`is_alive`-guarded, so a live wound death is not re-applied), with kinslayer / cranial-trophies handling. It does not execute KO'd allies or summons, and a **draw has no forced victim** -- the whole death block is gated on `exists = scope:sc_victor`. |
+| `always` | After a **decisive** outcome, the principal **loser** is force-killed at the end regardless of wound math (`is_alive`-guarded), with kinslayer / cranial-trophies handling. A **draw has no forced victim** -- that block is gated on `exists = scope:sc_victor`, though the deferred-death sweep below still runs. |
 
-`possible`, `default` and `always` all allow a **live wound death** during
-the fight, before any end-of-combat handling. If the character who dies is
-the PC host, see *Abnormal ending: host death* below.
+**No fatality mode kills during the fight.** Every fight stamps
+`pod_combat_nonfatal_active` on every combatant, so PoD's inline wound-death
+check cannot fire mid-action -- otherwise a guaranteed-resurrection opponent
+(wraith, spectre, `extra_life_*`, ...) full-heals on each killing blow and the
+duel never ends. A lethally-wounded combatant is KO'd instead, and
+`pod_combat_resolve_suppressed_deaths_effect` runs PoD's own death check once
+per combatant at the writeback, after the gate is stripped. `no` and
+`practice` are exempt (nobody dies at all); registered summons are exempt
+(cleanup disappears them). See *Deferred death resolution* in
+COMBAT_REFERENCE.
+
+A host death is therefore normally a writeback event, not a mid-fight one --
+but the PC can still die mid-fight from something outside the wound pipeline,
+so see *Abnormal ending: host death* below.
+
+### Optional rule -- barring summons
+
+Summoning is allowed by default. To bar every `summons_combatant` move for
+both sides, opt in **before** the launch -- ahead of
+`configure_start_single_combat_effect` on the standard route, or ahead of
+`POD_combat_create_duel_effect` on a raw builder call:
+
+```
+POD_combat_ban_duel_summons_effect = yes
+configure_start_single_combat_effect = { ... }
+```
+
+It is not a `create_duel` parameter, and deliberately so: it has to survive
+the first-fight intro deferral, which only the caller's scope table crosses.
+Setting it after the launch (the way `POD_combat_set_custom_title` is set)
+would silently do nothing on a character's first fight.
+
+The barred move is greyed on the PC's bar with a reason, dropped from the
+AI's candidate pool, and refused again inside the summon glue; the
+auto-resolve spirit verdict stops counting an equipped friendly summon as an
+answer to an incorporeal enemy. Mid-fight **arrivals** are unaffected --
+`pod_combat_add_*_midfight_effect` and the scheduled reinforcements still
+seat normally, because the rule governs what a combatant may do, not who may
+enter.
+
+The opt-in rides the shell card's scope table into the follow-up, so a
+rematch launched from there inherits the bar. `POD_combat_allow_duel_summons_effect = yes`
+drops it.
 
 ### LOCALE
 
@@ -508,11 +563,12 @@ invariants).
 
 ## What `create_duel` sets up for you
 
-- **The duel story** -- a `POD_combat_sc_context` story_cycle on Charon
+- **The fight story** -- a `POD_combat_fight` story_cycle on Charon
   (`POD_wraith_01`), saved as `scope:pod_combat_duel`. It holds your
-  INITIATOR / ATTACKER / DEFENDER / rule flags / OUTPUT_EVENT. The PC
-  carries one pointer var (`pod_combat_sc_context`) to it; cleanup at
-  combat end is a single `end_story`.
+  INITIATOR / ATTACKER / DEFENDER / rule flags / OUTPUT_EVENT, and it is
+  also where all per-fight state lives. The PC carries one pointer var
+  (`pod_combat_session`) to it; cleanup at combat end is a single
+  `end_story`, whose `on_end` cascades every slot story and log row.
 - **A version check** -- if the move catalogue on the save is stale
   (older `POD_combat_version`), it rebuilds before the fight so you never
   run with broken move-story references. The rebuild is **skipped if any
@@ -657,6 +713,9 @@ POD_combat_duel_add_enemy_effect = { CHARACTER = scope:.. }   # enemy/0..49, fir
 
 # 3. go live (once, last) -- opens the window, starts round 1
 POD_combat_finalize_duel_effect = yes
+
+# optional, BEFORE step 1 -- bar every summon move for both sides
+POD_combat_ban_duel_summons_effect = yes
 ```
 
 Rules: PC scope | don't re-add the PC | first enemy = enemy/0 and must be
