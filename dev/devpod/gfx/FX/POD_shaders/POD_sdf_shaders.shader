@@ -55,6 +55,45 @@ PixelShader =
 		]]
 	}
 
+	MainCode PS_PODSDF_FLAT
+	{
+		Input = "VS_OUTPUT_PDX_GUI"
+		Output = "PDX_COLOR"
+		Code
+		[[
+			float get_texture_sdf(PdxTextureSampler2D Texture, float2 uv) {
+				float sdf = PdxTex2D(Texture, uv).r;
+				if ( uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1. ) {
+					return 0.;
+				}
+				else {
+					return sdf;
+				}
+			}
+
+			float df(float2 uv, float2 texSize) {
+				float sdf = get_texture_sdf(ModifyTexture0, uv);
+
+				return 0.5 - sdf;
+			}
+			
+			PDX_MAIN {
+				float2 TextureSize = SpriteSize.xy;
+				
+				float sdf = df(Input.UV0,TextureSize);
+				
+				float edge0 = SpriteBorder[1].x; // spriteborder_left
+				float edge1 = SpriteBorder[1].y; // spriteborder_top
+				float sdf_alpha = smoothstep(edge0, edge1, sdf);
+				
+				float4 col = SpriteModifyTexturesColors[2].rgba;
+				float gui_alpha = SampleImageSprite(Texture,Input.UV0).a;
+
+				return float4(col.rgb, sdf_alpha * gui_alpha * col.a);
+			}
+		]]
+	}
+
 	MainCode PS_PODSDF_LOADINGSCREEN
 	{
 		Input = "VS_OUTPUT_PDX_GUI"
@@ -633,6 +672,19 @@ Effect PdxGuiPreMultipliedAlphaDisabled
 	VertexShader = "VS_Default"
 	PixelShader = "PS_Default"
 	BlendState = PreMultipliedAlpha
+	
+	Defines = { "DISABLED" }
+}
+
+Effect PODSDFFlat
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODSDF_FLAT"
+}
+Effect PODSDFFlatDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODSDF_FLAT"
 	
 	Defines = { "DISABLED" }
 }
