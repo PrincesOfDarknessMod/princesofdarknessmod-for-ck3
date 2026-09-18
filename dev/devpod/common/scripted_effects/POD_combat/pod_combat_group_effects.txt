@@ -26,6 +26,11 @@
 #                      and pod_combat_enemy_leader_slot (enemy/0).
 ##############################################################################################
 
+# Portrait form cache flag lifetime (days). The leak guard for an abandoned fight:
+# the window pins the clock, so it never lands mid-fight. Rationale on the cache
+# writers beside pod_combat_write_slot_hp_mirror_effect.
+@pod_combat_form_cache_days = 3
+
 ##############################################################################################
 # SECTION 1: WORKSPACE LOAD EFFECTS
 # Copy a slot's state into the actor or target workspace, via dispatch
@@ -782,7 +787,52 @@ pod_combat_write_slot_hp_mirror_effect = {
 	set_variable = { name = slot_mirror_maxhp value = pod_combat_slot_max_hp_value }
 }
 
-# Host scope. Refresh every active slot. O(active_slots) once per call. The loop
+# Portrait form cache
+# Stamps the answers of PoD's two form tests
+# (POD_portrait_no_human_body_trigger / POD_portrait_no_clothing_form_trigger) on
+# the combatant as flags.
+pod_combat_write_slot_form_cache_effect = {
+	# Runs in a slot-story scope. Flag mutation errors on a dead reference, and a
+	# launcher can seat a character who is already dead (see slot init).
+	var:slot_char ?= {
+		if = {
+			limit = { is_alive = yes }
+			pod_combat_write_char_form_cache_effect = yes
+		}
+	}
+}
+
+pod_combat_write_char_form_cache_effect = {
+	if = {
+		limit = { POD_portrait_no_human_body_live_trigger = yes }
+		add_character_flag = { flag = pod_combat_form_no_human_body days = @pod_combat_form_cache_days }
+	}
+	else = {
+		remove_character_flag = pod_combat_form_no_human_body
+	}
+	if = {
+		limit = { POD_portrait_no_clothing_form_live_trigger = yes }
+		add_character_flag = { flag = pod_combat_form_no_clothing days = @pod_combat_form_cache_days }
+	}
+	else = {
+		remove_character_flag = pod_combat_form_no_clothing
+	}
+	add_character_flag = { flag = pod_combat_form_cache_valid days = @pod_combat_form_cache_days }
+}
+
+pod_combat_clear_char_form_cache_effect = {
+	# Runs in a CHARACTER scope from the per-combatant teardown loops. A dead
+	# combatant's flags are inert and flag mutation errors on a dead reference.
+	if = {
+		limit = { is_alive = yes }
+		remove_character_flag = pod_combat_form_cache_valid
+		remove_character_flag = pod_combat_form_no_human_body
+		remove_character_flag = pod_combat_form_no_clothing
+	}
+}
+
+# Host scope. Refresh every active slot's HP mirror and portrait form cache.
+# O(active_slots) once per call. The loop
 # body is a scripted-effect CALL with no inline scope switch, so it is clear of
 # the every_in_list iteration-scope trap (the call runs in the iterated slot
 # scope and reads 'this').
@@ -791,6 +841,7 @@ pod_combat_refresh_hp_mirror_effect = {
 		every_in_list = {
 			variable = pod_combat_active_slots
 			pod_combat_write_slot_hp_mirror_effect = yes
+			pod_combat_write_slot_form_cache_effect = yes
 		}
 	}
 }
@@ -1084,11 +1135,13 @@ pod_combat_init_slot_from_character_effect = {
 	}
 	# Hit chance calculated later after all combatants are initialized
 
-	# HP display mirror. Seed the wound-bar mirror
-	# vars (slot scope here) for the first render and any mid-fight summon seat;
-	# this effect runs per-slot via init_all_slots (finalize) AND for mid-fight
-	# seats. Refreshed thereafter at the save_workspace / tick_dots chokepoints.
+	# HP display mirror and portrait form cache. Seed both (slot scope here) for
+	# the first render and any mid-fight summon seat; this effect runs per-slot via
+	# init_all_slots (finalize) AND for mid-fight seats. Refreshed thereafter at
+	# the save_workspace / tick_dots chokepoints. The form cache also needs the AI
+	# warform pre-pass to have run, which finalize guarantees (see the header).
 	pod_combat_write_slot_hp_mirror_effect = yes
+	pod_combat_write_slot_form_cache_effect = yes
 }
 
 ##############################################################################################
@@ -1654,7 +1707,7 @@ POD_combat_finalize_duel_effect = {
 		}
 	}
 	
-	scope:pod_combat_target = {
+	scope:pod_combat_target ?= {
 		if = {
 			limit = {
 				has_perk = honour_bound_perk
@@ -2259,11 +2312,9 @@ pod_combat_calc_turn_orders_effect = {
 
 # GUI-facing turn-order list for the initiative track: same membership as the
 # alive ranked slots, ordered by slot_turn_order (GUI datamodels render list
-# order; they cannot sort). Rebuilt every round right after the ranks are
-# stamped. One pass per rank; ranks are contiguous 1..N over alive slots, so
-# the while exits when the cursor passes the last rank. The alive filter also
-# screens out STALE slot_turn_order values on slots KO'd in earlier rounds
-# (the stamp pass only writes alive slots, it never clears dead ones).
+# order; they cannot sort). Rebuilt right after the ranks are stamped, but ONLY
+# when the membership or order moved (pod_combat_turn_order_list_stale_trigger
+# against the per-slot slot_turn_order_built snapshot).
 pod_combat_build_turn_order_list_effect = {
 	# The outer has_variable gate keeps this build-safe: during a duel option's
 	# confirm-tooltip preview the fight story has not been created (tooltip-build
@@ -2273,42 +2324,64 @@ pod_combat_build_turn_order_list_effect = {
 	if = {
 		limit = { has_variable = pod_combat_session }
 		var:pod_combat_session = { save_temporary_scope_as = pod_fight }
-		scope:pod_fight = {
-			clear_variable_list = pod_combat_turn_order_list
-			set_variable = { name = pod_combat_rank_cursor value = 1 }
-		}
-		while = {
-			limit = {
-				scope:pod_fight = {
-					any_in_list = {
-						variable = pod_combat_active_slots
-						pod_combat_slot_is_alive_trigger = yes
-						has_variable = slot_turn_order
-						var:slot_turn_order >= scope:pod_fight.var:pod_combat_rank_cursor
+		if = {
+			limit = { scope:pod_fight = { pod_combat_turn_order_list_stale_trigger = yes } }
+			scope:pod_fight = {
+				clear_variable_list = pod_combat_turn_order_list
+				set_variable = { name = pod_combat_rank_cursor value = 1 }
+			}
+			while = {
+				limit = {
+					scope:pod_fight = {
+						any_in_list = {
+							variable = pod_combat_active_slots
+							pod_combat_slot_is_alive_trigger = yes
+							has_variable = slot_turn_order
+							var:slot_turn_order >= scope:pod_fight.var:pod_combat_rank_cursor
+						}
 					}
 				}
+				scope:pod_fight = {
+					every_in_list = {
+						variable = pod_combat_active_slots
+						limit = {
+							pod_combat_slot_is_alive_trigger = yes
+							has_variable = slot_turn_order
+							var:slot_turn_order = scope:pod_fight.var:pod_combat_rank_cursor
+						}
+						# Append to the track. The inline scope switch is the body's LAST
+						# statement (iteration-scope rule) - and it is still needed even
+						# though the loop already runs in the fight, because the body's
+						# own scope is the slot story being ranked.
+						save_scope_as = ranked_slot
+						scope:pod_fight = {
+							add_to_variable_list = { name = pod_combat_turn_order_list target = scope:ranked_slot }
+						}
+					}
+				}
+				scope:pod_fight = { change_variable = { name = pod_combat_rank_cursor add = 1 } }
 			}
+			scope:pod_fight = { remove_variable = pod_combat_rank_cursor }
+			# Snapshot what was just built so the next stamp pass can tell whether
+			# anything moved: members keep the rank they were listed at, everyone
+			# else loses theirs, which is how a slot that died or lost its rank
+			# reads as a change.
 			scope:pod_fight = {
 				every_in_list = {
 					variable = pod_combat_active_slots
-					limit = {
-						pod_combat_slot_is_alive_trigger = yes
-						has_variable = slot_turn_order
-						var:slot_turn_order = scope:pod_fight.var:pod_combat_rank_cursor
+					if = {
+						limit = {
+							pod_combat_slot_is_alive_trigger = yes
+							has_variable = slot_turn_order
+						}
+						set_variable = { name = slot_turn_order_built value = var:slot_turn_order }
 					}
-					# Append to the track. The inline scope switch is the body's LAST
-					# statement (iteration-scope rule) - and it is still needed even
-					# though the loop already runs in the fight, because the body's
-					# own scope is the slot story being ranked.
-					save_scope_as = ranked_slot
-					scope:pod_fight = {
-						add_to_variable_list = { name = pod_combat_turn_order_list target = scope:ranked_slot }
+					else = {
+						remove_variable = slot_turn_order_built
 					}
 				}
 			}
-			scope:pod_fight = { change_variable = { name = pod_combat_rank_cursor add = 1 } }
 		}
-		scope:pod_fight = { remove_variable = pod_combat_rank_cursor }
 	}
 }
 

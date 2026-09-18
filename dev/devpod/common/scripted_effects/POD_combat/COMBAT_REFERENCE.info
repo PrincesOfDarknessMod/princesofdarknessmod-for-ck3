@@ -421,7 +421,7 @@ latch a stale bonus onto the next action.
 | `pod_combat_bonus_morale_damage` | magnitude | §7, folded into the base deal call |
 | `pod_combat_bonus_self_heal` / `_heal_target` | magnitude | §9b |
 | `pod_combat_bonus_self_morale_heal` | magnitude | §9b |
-| `pod_combat_bonus_energy_gain` / `_energy_drain` | magnitude | §9b |
+| `pod_combat_bonus_energy_gain` / `_energy_drain` | magnitude | §9b; the unconditional `energy_gain` column folds into the gain transient there, so one pool write carries column and clauses alike |
 | `pod_combat_bonus_dot` / `_morale_dot` | magnitude | §13b-bonus / §13b-bonus-morale |
 | `pod_combat_bonus_ap_refund` / `_ap_drain` | magnitude | §14 |
 | `pod_combat_bonus_retaliate_boost` | magnitude | §13 arming |
@@ -479,7 +479,7 @@ var, so the log dispatcher's flag compares keep matching.
 | `pod_combat_last_heal_amount` | last HP heal applied |
 | `pod_combat_last_morale_damage_amount` / `_last_morale_heal_amount` | last morale damage / heal |
 | `pod_combat_last_self_damage` | post-soak recoil damage applied to the actor |
-| `pod_combat_last_energy_gain` / `_last_energy_drain` | requested conditional energy bonus amount when that bonus fired; the splat helpers do not export the pool-capped applied delta |
+| `pod_combat_last_energy_gain` / `_last_energy_drain` | requested energy amount when a restore or drain fired - the gain is the `energy_gain` column plus any met clause (a feeding weapon adds its share at §9c); the splat helpers do not export the pool-capped applied delta |
 | `pod_combat_last_ap_refund` | AP given back by a fired `ap_refund` bonus (§14). Exists so the log can render the refund only when the condition actually held, rather than off the move's declared `bonus_effect` |
 | `pod_combat_last_ap_drain` | effective AP drain applied to the target mirror at §14: the base `ap_drain` plus a fired `ap_drain` bonus. The log reads this rather than the move's base var, so a bonus-only drain renders at all and a base+bonus stack can read as a full stun. Only written when the total is above 0, and only inside §14's control-failure guard |
 | `pod_combat_last_retal_damage` | last retaliation damage |
@@ -570,7 +570,7 @@ ordering rules** below before moving anything.
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
 | §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, so a heal is never legal on `team_all`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. The rider reads the AGGREGATE result, which covers every packet: a typed rider that lands while the move's own packet was fully soaked, or even while the victim was immune to the move's class, still satisfies `on_hp_damage`. The same is true of the §9c weapon riders, the AoE `pod_combat_aoe_any_hp_damage` latch and §15's contact partition. |
-| §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
+| §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool - the unconditional `energy_gain` column folds into the same single write here, actor-only whatever the move targets - and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
 | §12b | `team_ally` only: broadcast the move-declared §5c/§12 tiers and stance flags, plus the soak bridge var, to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). A condition-granted `stance_*` bonus is actor-only and is not part of this broadcast. |
@@ -608,7 +608,7 @@ these hold:
 - `pod_combat_last_self_damage` is set (recoil is applied once to the
   actor, not per AoE target, so the per-target rows never carry it), or
 - `pod_combat_last_energy_gain` / `pod_combat_last_energy_drain` is set
-  (energy bonuses apply once at §9b, after the per-target loop), or
+  (energy restores and drains apply once at §9b, after the per-target loop), or
 - `pod_combat_last_ap_refund` is set (the refund is credited once at
   §14, after the per-target pushes, so without this arm an AoE move's
   refund would never get a row), or
@@ -852,7 +852,7 @@ resource of the character it actually happens to, via PoD's shipped
 
 | Surface | Whose resource | How the number is right |
 |---|---|---|
-| Move card, `energy_gain` bonus and the weapon override line | the reader (`GetPlayer`) | multiplied by `splat_energy_multiplier` in loc, like the shipped cost line |
+| Move card and loadout sheet: the `energy_gain` column, the `energy_gain` bonus and the weapon override line | the reader (`GetPlayer`) | multiplied by `splat_energy_multiplier` in loc, like the shipped cost line |
 | Combat log, gain row | the entry's **actor** - an AI's gnosis must not read as the player's blood | `pod_combat_scale_energy_to_splat_effect` converts it at the lift, so the row prints real points |
 | Combat log, drain row | the entry's **target** - it is their pool that shrinks | same, scaled to the target |
 | Move card, `energy_drain` bonus | nobody - stays generic | the card is drawn before a target exists, so any resource word would be a guess |
@@ -1528,7 +1528,10 @@ through `pod_combat_initiative_modifier_value`.
 effect also clears `slot_has_acted` and the round-duration once-per list
 `slot_moves_used_round` on every alive slot, then stamps each slot's
 display rank (`slot_turn_order`, rank 1 = highest) and rebuilds the GUI
-initiative track list `pod_combat_turn_order_list`.
+initiative track list `pod_combat_turn_order_list` - but only when the
+membership or order moved. Each listed slot keeps the rank it was built at
+in `slot_turn_order_built`, and `pod_combat_turn_order_list_stale_trigger`
+compares that snapshot against the fresh ranks.
 
 When the debug override `global_var:pod_combat_tune_init_reroll` is set,
 `slot_initiative_base` is re-rolled at every round start instead of
@@ -1938,7 +1941,7 @@ segments**, each separated by a ` · ` divider:
 | `PODCombatLogSegApGain` | `ap_gain` |
 | `PODCombatLogSegApDrain` | a drain that applied (`ap_drain` > 0 on the entry — the base plus a fired `ap_drain` bonus; a drain reaching `pod_combat_base_ap` renders as 0 AP next turn) |
 | `PODCombatLogSegInitDebuff` | `initiative_debuff` |
-| `PODCombatLogSegEnergyGain` | a fired `energy_gain` bonus (`energy_gain` > 0 on the entry) |
+| `PODCombatLogSegEnergyGain` | an energy restore that applied: the `energy_gain` column and/or a fired bonus (`energy_gain` > 0 on the entry) |
 | `PODCombatLogSegEnergyDrain` | a fired `energy_drain` bonus (`energy_drain` > 0 on the entry) |
 | `PODCombatLogSegApRefund` | a fired `ap_refund` bonus (`ap_refund` > 0 on the entry) |
 | `PODCombatLogSegMarker` | `marker_modifier` (the marker this move applied to its user) |
@@ -1992,7 +1995,7 @@ The bake conditions:
   only appear on a single-target row or the AoE wrap-up row. The
   energy bonus, AP-refund and AP-drain segments follow recoil's shape:
   entry-captured (`energy_gain` / `energy_drain`, lifted at §9b only
-  when the bonus actually applied — the drain lift sits inside the
+  when a restore or drain actually applied — the drain lift sits inside the
   practice gate; `ap_refund` and `ap_drain`, lifted at §14), not
   burst-gated, and cleared per push so at most one row per move carries
   them. `ap_drain` is outcome-style even though most drains are declared
@@ -2057,7 +2060,7 @@ state fired that the per-target rows missed — a self-heal
 (`pod_combat_last_heal_amount`), self-morale-heal
 (`pod_combat_last_morale_heal_amount`), a retal overlay
 (`pod_combat_last_retal_fired`), recoil self-damage
-(`pod_combat_last_self_damage`), a fired energy bonus
+(`pod_combat_last_self_damage`), an energy restore or drain
 (`pod_combat_last_energy_gain` / `_drain`), or an AP refund or drain
 (`pod_combat_last_ap_refund` / `_last_ap_drain`). In that case the wrap-up row is pushed
 carrying just those riders. Non-AoE moves never set the tripwire, so
@@ -2681,6 +2684,16 @@ tails, plus per-slot seeding at init) before the GUI next renders, so
 they cannot go stale. Game logic and the AI never read the mirror. Do
 not point the GUI back at the live SVs — that reintroduces the per-frame
 fanout this mirror exists to remove.
+
+The **portrait form cache** is the same shape one level down. While a
+character is seated, `pod_combat_write_char_form_cache_effect` stamps the
+answers of PoD's two umbrella form tests
+(`POD_portrait_no_human_body_trigger` / `POD_portrait_no_clothing_form_trigger`)
+on the character as `pod_combat_form_*` flags, and the triggers themselves
+take a two-flag branch while `pod_combat_form_cache_valid` is set (the
+uncached bodies live on as `*_live_trigger`). Written beside the HP mirror
+at every chokepoint plus the shapeshift hook, cleared by both teardown
+loops, self-expiring as the leak guard.
 
 ### DoT ticks at round end and must respect the slot-loop rules
 
