@@ -264,6 +264,9 @@ writeback (see **Combat end** and **Deferred death resolution**).
 | `team_position` | int 0+: position within the team (0 = leader), baked at creation |
 | `slot_char` | character ref occupying the slot |
 | `slot_alive` | 1 while in play, 0 when KO'd |
+| `slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp` | Wound-bar display only: filled boxes, aggravated boxes and capacity |
+| `slot_mirror_raw_sup` / `slot_mirror_raw_agg` | Raw character wound counters at the last mirror write; absent counters sampled as zero, without rounding or clamping |
+| `slot_mirror_alive` | Character liveness at the last mirror write (1 living, 0 dead/missing); independent of morale KO and `slot_alive` |
 | `slot_morale` | current Morale |
 | `slot_hit_chance` | live hit chance (20–95) |
 | `slot_base_hit_chance` | hit chance before any tier effects |
@@ -1606,11 +1609,22 @@ mind-controlled (stolen) turn, run the per-AI personality precompute
 once, select a target (controlled-aware), load the workspace, record the
 focus-fire mark, set AP, then run the moves via
 `pod_combat_ai_take_turn_effect`. Round buffs clear before workspace
-load. Each action attempt saves immediately after execution, after an
-unrestricted fallback, and after an alternate-target retry, so KO and
-victory state is committed before another action can begin. The final
-save is followed by round-debuff expiry, leftover-AP storage,
-single-turn control consumption, the acted marker, and a victory check.
+load. Each selection ends at `pod_combat_ai_save_workspace_if_needed_effect`:
+executed moves and uncertain paths receive full actor/target writeback,
+including KO handling. An empty restricted selection may omit writeback
+only when the existing retry preflight proves every mirrored field unchanged
+and neither slot has a pending KO. Victory and changed-HP maintenance run
+at every boundary, including turn end.
+
+The saved numeric scope value `pod_ai_workspace_synced` licenses omission
+of the repeated turn-end writeback. It resets at AI-turn entry, full and
+prepared selector entry, and workspace loads; a completed save or the
+inert-writeback proof sets it. It resets again before round-debuff expiry.
+It is local to the synchronous AI turn, not persistent fight state. New
+mutations between a save and the turn-end boundary must invalidate it.
+The maintenance helper explicitly binds `scope:host` for the following
+acted-slot matcher. Debuff expiry, the acted marker, leftover-AP storage,
+single-turn control consumption, and final victory check retain their order.
 
 The target roll (`pod_combat_ai_select_target_core_effect`) weights base
 1, +50, a **x3 kill priority**, +40 cross-turn focus-fire and the
@@ -1620,9 +1634,7 @@ kind of damage (`pod_combat_ai_can_dmg_hp` / `_mor`) - never two stacking
 factors, which would reward a state rather than an opportunity. Its
 admission set lives in `pod_combat_ai_target_candidate_trigger`, shared by
 the roll and by the trace's candidate count so the two cannot drift.
-Budget: worst non-kill 116 against 153 for a kill, a 37-point margin. After the moves it saves the
-workspace, marks the slot acted (consuming any one-shot control marker),
-and runs the victory check.
+Budget: worst non-kill 116 against 153 for a kill, a 37-point margin.
 
 Each action attempt begins with two target checks, then resolves the move
 in three steps - ADMIT, SCORE, ROLL.
@@ -1634,20 +1646,46 @@ in three steps - ADMIT, SCORE, ROLL.
    snap recomputes the finishable summary at its own site (the previous
    action's copy is stale, and on a turn's first attempt belongs to the
    previous ACTOR), restricts the selector's pool to finishable slots for
-   exactly one call. `pod_combat_ai_snap_blocked` does not generally
+   exactly one call. If the target and loadout stay unchanged, the following
+   action summary consumes that fresh scan once instead of scanning again.
+   The saved numeric `pod_ai_finishable_ready` marker resets at attempt
+   entry/exit and snap entry, after consumption, on any workspace load, and
+   before backstop loadout seeding. A successful snap reloads the workspace
+   and therefore retains a fresh scan for the new target. Blocked snaps,
+   full-preparation retries, and alternate-target retries also scan afresh.
+   `pod_combat_ai_snap_blocked` does not generally
    limit snapping to once per turn; it prevents the pathological
    snap/retry oscillation after an alternate-target retry. Both run
    BEFORE the intent chooser, so the whole move pipeline sees the final
    target.
 
-Before intent selection, every selector entry snapshots actor HP, maximum HP
-and superficial-healing ceiling into the fight's `pod_combat_ai_actor_hp`,
-`_actor_max_hp` and `_actor_sup_ceiling`; target scoring reads `pod_combat_ai_tgt_hp`.
-These are decision-local samples, not authoritative health storage. The tier/counter
+Full selection runs `pod_combat_ai_prepare_selection_effect` before choosing a
+move. Preparation snapshots actor HP, maximum HP and superficial-healing ceiling
+into `pod_combat_ai_actor_hp`, `_actor_max_hp` and `_actor_sup_ceiling`; target
+scoring reads `pod_combat_ai_tgt_hp`. It also computes recipient urgency, healing
+weights, bonus-clause results, usable tiers and intent counts. The tier/counter
 walk clears `pod_combat_ai_usable_now` on every loadout move before its AP filter,
-then marks moves that pass the full dynamic usability gate. Admission reuses that
-mark; the final execution gate still checks live usability. Both retries rebuild
-these caches. No gameplay state may change between preparation and admission.
+then marks moves that pass the full dynamic usability gate. These are decision
+scratch values; authoritative health and final live validation remain unchanged.
+
+Only an empty restricted pool can reuse that preparation for the immediate
+same-target unrestricted retry. Before the intervening workspace save, preflight
+proves both matching slots refer to the loaded characters, every mirrored field
+has the same value/presence, and neither slot needs KO marking. After saving,
+reuse also requires the same fight, actor, target and AP, no pick/execution,
+a standing actor and no ended/fizzled turn. Any failed proof uses full preparation.
+The save is never skipped or moved. The temporary readiness value is reset at
+attempt entry and consumed before retry selection, so old saved scopes alone
+cannot authorize reuse. New fields in workspace writeback must be added to both
+actor and target proof triggers; numeric/flag values compare directly, while
+presence-only fields compare presence. This is deliberately conservative when
+an absent source would merely preserve an existing destination value.
+
+Both routes run `pod_combat_ai_select_prepared_move_effect`: rebind host/actor
+scopes, clear picked proof, choose intent, rebuild admission/scores/band, roll,
+and perform final live validation before execution. A rejected pick, alternate
+target, new action or new actor gets full preparation. No gameplay mutation may
+intervene between the reusable preparation and the new selection.
 
 1. **Intent.** `pod_combat_ai_choose_intent_effect` picks one tactical
    intent (pressure / break / setup / stabilize), `steal` for a
@@ -2683,26 +2721,43 @@ modifier mid-fight must therefore call `force_character_skill_recalculation`
 on that character itself, or no `prowess` read - the stash, the hit
 formula, initiative, auto-resolve, the slot card - will ever see it.
 
-The one sanctioned exception is the **wound-bar display mirror**
-(`slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp`): the
-combat window's wound pips read these plain slot vars for perf instead
-of re-deriving the SV chain ~80x per slot card per frame. They are
-display-only and rewritten at every HP-change chokepoint (the
-`pod_combat_save_workspace_effect` and `pod_combat_tick_dots_effect`
-tails, plus per-slot seeding at init) before the GUI next renders, so
-they cannot go stale. Game logic and the AI never read the mirror. Do
-not point the GUI back at the live SVs — that reintroduces the per-frame
-fanout this mirror exists to remove.
+The **wound-bar display mirror** (`slot_mirror_total` / `slot_mirror_agg` /
+`slot_mirror_maxhp`) lets the combat window read plain slot variables rather
+than evaluate the nested wound formulas for every pip. Game logic and AI
+continue reading authoritative character health.
 
-The **portrait form cache** is the same shape one level down. While a
-character is seated, `pod_combat_write_char_form_cache_effect` stamps the
-answers of PoD's two umbrella form tests
-(`POD_portrait_no_human_body_trigger` / `POD_portrait_no_clothing_form_trigger`)
-on the character as `pod_combat_form_*` flags, and the triggers themselves
-take a two-flag branch while `pod_combat_form_cache_valid` is set (the
-uncached bodies live on as `*_live_trigger`). Written beside the HP mirror
-at every chokepoint plus the shapeshift hook, cleared by both teardown
-loops, self-expiring as the leak guard.
+At workspace save, `pod_combat_refresh_changed_hp_mirrors_effect` samples each
+slot's current maximum HP, raw superficial/aggravated counters (absent = zero),
+and character liveness. It rebuilds the mirror only when these inputs differ
+from its saved `slot_mirror_raw_sup`, `slot_mirror_raw_agg`, `slot_mirror_alive`
+and `slot_mirror_maxhp`, or any mirror/snapshot variable is missing. This catches
+external healing, aggravated-to-superficial conversion, death and maximum-HP
+changes at the same post-action boundary without adding mutation hooks.
+
+Maximum HP is still evaluated once per slot: perks, splat changes and modifiers
+can change it independently of wound operations. Unchanged living slots avoid
+four further track-length evaluations and the mirror writes. Changed slots
+use the original total/aggravated script values, retaining their clamps,
+floors and dead-character full bars, and reuse the sampled maximum. Raw input
+snapshots must not be rounded or clamped. If the canonical wound formulas gain
+other inputs, extend this cache's comparison contract too.
+
+Slot initialization (including summons), round-end DoT and auto-resolve retain
+full mirror refreshes, which also seed the comparison snapshots. Missing
+snapshots on an existing slot force a refresh automatically. Freshness remains
+boundary-based; this does not add an immediate GUI update after an external
+interaction. Do not point wound pips back at the live script values.
+
+The **portrait form cache** stores the answers of PoD's two umbrella form
+checks as `pod_combat_form_*` character flags. Slot initialization seeds it,
+and completed shapeshift interactions refresh the affected seated character.
+Shared form removers/applications and Golconda transitions invalidate it before
+changing inputs, so the portrait wrappers use their live predicates until a
+final refresh. Player/AI turn setup rewrites only invalid caches. Ordinary HP
+refreshes do not evaluate portrait forms. Both teardown paths clear the flags;
+the three-day expiry remains a leak guard. New effects that change portrait
+form inputs while combat is paused must invalidate before mutation and may
+refresh the final state with `pod_combat_refresh_char_form_cache_effect`.
 
 ### DoT ticks at round end and must respect the slot-loop rules
 

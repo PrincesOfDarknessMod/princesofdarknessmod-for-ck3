@@ -244,6 +244,8 @@ pod_combat_stash_side_live_stats_effect = {
 # Thin wrapper - loads actor workspace from current slot story.
 # Caller scope = slot story; scope:host must be saved before delegating.
 pod_combat_load_actor_from_story_effect = {
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 	pod_combat_load_side_from_story_helper = { SIDE = actor }
 }
 
@@ -258,6 +260,8 @@ pod_combat_load_actor_from_story_effect = {
 # preceding actor load) and pod_combat_target_prowess, then layers active hit
 # tiers - so a combatant worn down by wounds loses accuracy as the fight runs.
 pod_combat_load_target_from_story_effect = {
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 	pod_combat_load_side_from_story_helper = { SIDE = target }
 	if = {
 		limit = { has_variable = slot_char }
@@ -562,6 +566,8 @@ pod_combat_save_target_to_story_effect = {
 ##############################################################################################
 
 pod_combat_load_workspace_effect = {
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 	# Load current actor -> actor workspace, then selected target ->
 	# target workspace, by iterating pod_combat_active_slots and
 	# matching each slot's (combat_team, team_position) against the
@@ -776,21 +782,83 @@ pod_combat_refresh_loadout_counts_effect = {
 # Mirrors the three wound-bar SV inputs onto plain slot-story vars so the
 # combat window reads cheap var lookups instead of re-deriving the nested
 # slot_*_sv chain ~80x per slot card per frame. Display-only (wound system
-# stays authoritative); refreshed at every HP-change chokepoint (save_workspace
-# + tick_dots tails, slot init) so it cannot go stale. See COMBAT_REFERENCE §7.
+# stays authoritative). Checked at workspace save; seeded at init and fully
+# refreshed after round-end DoT and auto-resolve. See COMBAT_REFERENCE §7.
 # Do NOT revert the GUI to the live SVs.
-pod_combat_write_slot_hp_mirror_effect = {
-	# Runs in a slot-story scope. Reuses the SVs so the dead-char full-bar
-	# branch is preserved and the bar renders identically.
-	set_variable = { name = slot_mirror_total value = pod_combat_slot_total_damage_sv }
-	set_variable = { name = slot_mirror_agg   value = pod_combat_slot_agg_damage_sv }
-	set_variable = { name = slot_mirror_maxhp value = pod_combat_slot_max_hp_value }
+# Slot scope. Cheap raw-input sampling detects external heals, wound-composition
+# changes and death without requiring every health mutation to mark a dirty flag.
+# Max HP stays live: its dependencies have no shared invalidation hook, so do not
+# maintain a parallel dependency signature here.
+pod_combat_sample_slot_hp_mirror_effect = {
+	save_scope_value_as = { name = pod_combat_hp_mirror_maxhp value = pod_combat_slot_max_hp_value }
+	save_scope_value_as = { name = pod_combat_hp_mirror_raw_sup value = 0 }
+	save_scope_value_as = { name = pod_combat_hp_mirror_raw_agg value = 0 }
+	save_scope_value_as = { name = pod_combat_hp_mirror_alive value = 0 }
+	var:slot_char ?= {
+		if = {
+			limit = { is_alive = yes }
+			save_scope_value_as = { name = pod_combat_hp_mirror_alive value = 1 }
+			if = {
+				limit = { has_variable = POD_health_damage_num }
+				save_scope_value_as = { name = pod_combat_hp_mirror_raw_sup value = var:POD_health_damage_num }
+			}
+			if = {
+				limit = { has_variable = POD_health_aggravated_damage_num }
+				save_scope_value_as = { name = pod_combat_hp_mirror_raw_agg value = var:POD_health_aggravated_damage_num }
+			}
+		}
+	}
 }
 
-# Portrait form cache
-# Stamps the answers of PoD's two form tests
+# Slot scope, immediately after sampling. Keep the canonical wound calculations,
+# including their dead-character full-bar behavior; those read-only SVs leave the
+# sampled scope values intact.
+pod_combat_write_prepared_slot_hp_mirror_effect = {
+	set_variable = { name = slot_mirror_total value = pod_combat_slot_total_damage_sv }
+	set_variable = { name = slot_mirror_agg   value = pod_combat_slot_agg_damage_sv }
+	set_variable = { name = slot_mirror_maxhp value = scope:pod_combat_hp_mirror_maxhp }
+	set_variable = { name = slot_mirror_raw_sup value = scope:pod_combat_hp_mirror_raw_sup }
+	set_variable = { name = slot_mirror_raw_agg value = scope:pod_combat_hp_mirror_raw_agg }
+	set_variable = { name = slot_mirror_alive value = scope:pod_combat_hp_mirror_alive }
+}
+
+pod_combat_write_slot_hp_mirror_effect = {
+	pod_combat_sample_slot_hp_mirror_effect = yes
+	pod_combat_write_prepared_slot_hp_mirror_effect = yes
+}
+
+# Slot scope. Recompute expensive wound values only when their inputs differ.
+# Missing mirror/snapshot fields also rebuild, including fights from older saves.
+pod_combat_refresh_changed_slot_hp_mirror_effect = {
+	pod_combat_sample_slot_hp_mirror_effect = yes
+	if = {
+		limit = {
+			trigger_if = {
+				limit = {
+					has_variable = slot_mirror_total
+					has_variable = slot_mirror_agg
+					has_variable = slot_mirror_maxhp
+					has_variable = slot_mirror_raw_sup
+					has_variable = slot_mirror_raw_agg
+					has_variable = slot_mirror_alive
+				}
+				OR = {
+					NOT = { var:slot_mirror_maxhp = scope:pod_combat_hp_mirror_maxhp }
+					NOT = { var:slot_mirror_raw_sup = scope:pod_combat_hp_mirror_raw_sup }
+					NOT = { var:slot_mirror_raw_agg = scope:pod_combat_hp_mirror_raw_agg }
+					NOT = { var:slot_mirror_alive = scope:pod_combat_hp_mirror_alive }
+				}
+			}
+			trigger_else = { always = yes }
+		}
+		pod_combat_write_prepared_slot_hp_mirror_effect = yes
+	}
+}
+
+# Portrait form cache write PoD's two form tests
 # (POD_portrait_no_human_body_trigger / POD_portrait_no_clothing_form_trigger) on
-# the combatant as flags.
+# the combatant as flags. Seeded on seating, invalidated before shape mutations,
+# refreshed after final interaction changes, and repaired if invalid at turn entry.
 pod_combat_write_slot_form_cache_effect = {
 	# Runs in a slot-story scope. Flag mutation errors on a dead reference, and a
 	# launcher can seat a character who is already dead (see slot init).
@@ -821,7 +889,7 @@ pod_combat_write_char_form_cache_effect = {
 }
 
 pod_combat_clear_char_form_cache_effect = {
-	# Runs in a CHARACTER scope from the per-combatant teardown loops. A dead
+	# Character scope, before shape mutations and during teardown. A dead
 	# combatant's flags are inert and flag mutation errors on a dead reference.
 	if = {
 		limit = { is_alive = yes }
@@ -831,7 +899,44 @@ pod_combat_clear_char_form_cache_effect = {
 	}
 }
 
-# Host scope. Refresh every active slot's HP mirror and portrait form cache.
+# Character scope. Finished forms can still be visible after combat is over.
+pod_combat_refresh_char_form_cache_effect = {
+	hidden_effect = {
+		if = {
+			limit = {
+				is_alive = yes
+				pod_combat_is_seated_trigger = yes
+			}
+			pod_combat_write_char_form_cache_effect = yes
+		}
+	}
+}
+
+# Slot scope. Live portrait tests remain the fallback until this repair runs.
+pod_combat_refresh_invalid_slot_form_cache_effect = {
+	var:slot_char ?= {
+		if = {
+			limit = {
+				is_alive = yes
+				NOT = { has_character_flag = pod_combat_form_cache_valid }
+			}
+			pod_combat_write_char_form_cache_effect = yes
+		}
+	}
+}
+
+# Host scope, once at turn entry. Keep the character switch inside a helper call
+# so it cannot corrupt subsequent reads in the active-slot iteration.
+pod_combat_refresh_invalid_form_caches_effect = {
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			pod_combat_refresh_invalid_slot_form_cache_effect = yes
+		}
+	}
+}
+
+# Host scope. Refresh every active slot's HP mirror.
 # O(active_slots) once per call. The loop
 # body is a scripted-effect CALL with no inline scope switch, so it is clear of
 # the every_in_list iteration-scope trap (the call runs in the iterated slot
@@ -841,7 +946,16 @@ pod_combat_refresh_hp_mirror_effect = {
 		every_in_list = {
 			variable = pod_combat_active_slots
 			pod_combat_write_slot_hp_mirror_effect = yes
-			pod_combat_write_slot_form_cache_effect = yes
+		}
+	}
+}
+
+# Host scope. Sampling and writes stay inside calls to preserve slot iteration scope.
+pod_combat_refresh_changed_hp_mirrors_effect = {
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			pod_combat_refresh_changed_slot_hp_mirror_effect = yes
 		}
 	}
 }
@@ -872,17 +986,21 @@ pod_combat_save_workspace_effect = {
 	}
 
 	# Both side-save helpers already perform their slot's KO check.
+	pod_combat_finish_workspace_save_effect = yes
+}
 
+# Host scope. AI may omit unchanged side writeback, but always runs maintenance.
+# Bind host even on that path: turn-end acted/AP bookkeeping relies on it.
+pod_combat_finish_workspace_save_effect = {
+	save_scope_as = host
 	# Victory check at the post-flush boundary (slot vars are fresh). Victory
 	# is only ever checked at action/round boundaries, never per-damage: an AoE
 	# wipe would emit one cleanup per kill; boundary checks keep cleanup atomic.
 	pod_combat_check_group_victory_effect = yes
 
-	# HP display mirror. Per-action chokepoint -
-	# POD_execute_combat_move is always bookended by this save, so refreshing
-	# ALL slots here covers every move / AoE multi-slot / heal / self-damage /
-	# retaliation-wounds-actor in one pass.
-	pod_combat_refresh_hp_mirror_effect = yes
+	# Compare every slot's live inputs so AoE, heals, self-damage, retaliation and
+	# max-HP changes are covered; unchanged slots keep their existing display mirrors.
+	pod_combat_refresh_changed_hp_mirrors_effect = yes
 }
 
 ##############################################################################################
@@ -2595,8 +2713,8 @@ pod_combat_ai_fold_finishable_slot_effect = {
 	}
 }
 
-# Per-ACTION precompute (called from pod_combat_ai_precompute_action_summary_effect,
-# so its affordability reads see live AP). THE definition of "finishable" for the
+# Per-action scan, called from the snap check or action summary with live AP.
+# The definition of "finishable" for the
 # whole AI: an attackable slot at or under the HP or morale finish threshold
 # (pod_combat_ai_hp_finish_threshold / pod_combat_ai_morale_finish_threshold) while
 # the actor owns an AP-affordable move of that kind. That is a priority heuristic,
@@ -3256,6 +3374,7 @@ pod_combat_setup_pc_turn_effect = {
 	# Mid-fight form changes: re-derive the Delirium before the workspace load below,
 	# so the stash and the hit recalc that follow read the corrected prowess on the
 	# first frame of this turn rather than one turn late.
+	pod_combat_refresh_invalid_form_caches_effect = yes
 	pod_combat_refresh_delirium_effect = yes
 	pod_combat_load_workspace_effect = yes
 	pod_combat_recalc_pc_hit_chance_effect = yes
@@ -3588,6 +3707,7 @@ pod_combat_after_pre_pc_step_settle_effect = {
 }
 
 pod_combat_execute_ai_turn_effect = {
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
 
 	save_scope_as = combat_host
 
@@ -3599,6 +3719,7 @@ pod_combat_execute_ai_turn_effect = {
 	# STEP mode lets the player shapeshift between two Advance clicks, so re-derive
 	# before target selection and the workspace load: the AI threat weighting and the
 	# pair hit chance both read live prowess.
+	pod_combat_refresh_invalid_form_caches_effect = yes
 	pod_combat_refresh_delirium_effect = yes
 
 	# Mind control: detect a stolen turn before target selection. The resolve
@@ -3713,14 +3834,15 @@ pod_combat_execute_ai_turn_effect = {
 		pod_combat_ai_take_turn_effect = yes
 	}
 
-	pod_combat_save_workspace_effect = yes
+	pod_combat_ai_save_workspace_if_needed_effect = yes
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
 
 	# Round-duration debuffs expire at the END of the holder's turn (they afflicted
 	# this whole turn). pod_combat_tier_effects.txt.
 	pod_combat_clear_actor_round_debuffs_effect = yes
 
 	# Mark the actor acted (slot_has_acted = 1 on the matching slot). scope:host
-	# persists from the save_workspace above; the limit matches at most one slot.
+	# is bound by save maintenance above; the limit matches at most one slot.
 	if = {
 		limit = { var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team } }
 		var:pod_combat_session ?= {
