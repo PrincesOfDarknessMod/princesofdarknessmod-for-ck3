@@ -1001,6 +1001,17 @@ pod_combat_ai_precompute_bonus_met_effect = {
 pod_combat_ai_precompute_action_summary_effect = {
 	save_scope_as = host
 
+	# Sample host-scoped accessors before switching to the fight story. Every
+	# selector entry, including retries, refreshes these decision-only snapshots.
+	save_scope_value_as = { name = ai_actor_hp value = pod_combat_actor_hp_value }
+	save_scope_value_as = { name = ai_actor_max_hp value = pod_combat_actor_max_hp_value }
+	save_scope_value_as = { name = ai_actor_sup_ceiling value = pod_combat_actor_sup_ceiling_value }
+	scope:combat_host.var:pod_combat_session ?= {
+		set_variable = { name = pod_combat_ai_actor_hp value = scope:ai_actor_hp }
+		set_variable = { name = pod_combat_ai_actor_max_hp value = scope:ai_actor_max_hp }
+		set_variable = { name = pod_combat_ai_actor_sup_ceiling value = scope:ai_actor_sup_ceiling }
+	}
+
 	# Stun threshold: the victim's projected next-turn AP budget (the effective
 	# cap; the escalating-cap / regen knobs are a documented approximation).
 	# Snapshot here, where the SV's host-var reads resolve.
@@ -1244,6 +1255,8 @@ pod_combat_ai_fold_usable_move_effect = {
 			}
 		}
 
+		set_variable = pod_combat_ai_usable_now
+
 		# --- cheapest usable cost -> AP strand floor ---
 		# ZERO-COST MOVES ARE EXCLUDED, and that is load-bearing. Folding one drives
 		# the minimum to 0, which makes the strand floor equal current AP and turns
@@ -1409,10 +1422,11 @@ pod_combat_ai_fold_usable_move_effect = {
 # is the ACTOR's list. Seeds are written through scope:combat_host explicitly because
 # `this` here is the acting character.
 #
-# Equivalence rests on the inputs being stable between this walk and the roll. Several
-# effects DO run in between (the intent chooser, the scoring walk, the trace count) -
-# none of them mutates AP, energy, once_per marks or any move's tier vars, which is what
-# the cached answer depends on. Add anything that does, and this stops being exact.
+# Every selector entry, including retries, clears and rebuilds basic usability for
+# the WHOLE loadout: these move stories are shared across actors and fights.
+# No gameplay state changes between preparation, admission and the roll. The intent
+# chooser, scoring and trace only write decision scratch; a new gameplay mutation
+# here would invalidate both the usability and tier caches.
 pod_combat_ai_precompute_max_tiers_effect = {
 	# Seed 0 = 'no USABLE tier of this stat'. Safe because a tier is always 1-3
 	# BY CONSTRUCTION: the generator parses tiers from `<stat>_<dir>_<size>_<dur>`
@@ -1445,17 +1459,19 @@ pod_combat_ai_precompute_max_tiers_effect = {
 	}
 	every_in_list = {
 		variable = pod_combat_loadout
-		# A move with no ap_cost is free, so the skipped trigger_if reads true and it
-		# counts as affordable.
-		limit = {
-			trigger_if = {
-				limit = { has_variable = ap_cost }
-				scope:combat_host.var:pod_combat_session.var:pod_combat_current_ap >= var:ap_cost
+		# Clear even unaffordable entries, which may carry another actor's mark.
+		remove_variable = pod_combat_ai_usable_now
+		if = {
+			# A move with no ap_cost is free, so the skipped trigger_if reads true.
+			limit = {
+				trigger_if = {
+					limit = { has_variable = ap_cost }
+					scope:combat_host.var:pod_combat_session.var:pod_combat_current_ap >= var:ap_cost
+				}
 			}
+			# The tier, min-cost and intent-counter folds share one usable-now gate.
+			pod_combat_ai_fold_usable_move_effect = { HOST = scope:combat_host }
 		}
-		# One call: the tier folds ride inside it, behind the same usable-now gate as
-		# the min-cost and intent-counter folds.
-		pod_combat_ai_fold_usable_move_effect = { HOST = scope:combat_host }
 	}
 	# Strand floor = current AP minus the cheapest USABLE move (the fold applies the
 	# same gate the roll does, so this is exact rather than a lower bound). Precomputing the
@@ -1518,7 +1534,7 @@ pod_combat_ai_choose_intent_effect = {
 	else_if = {
 		limit = {
 			scope:combat_host = {
-				pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+				scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp <= @ai_thresh_heal_critical }
 				NOT = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable = 1 } }
 				scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_usable_stabilize_n > 0 }
 			}
@@ -1875,7 +1891,7 @@ pod_combat_ai_score_candidate_effect = {
 				# recipients are scored below from the recipient's own need.
 				NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally }
 				scope:combat_host = {
-					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp < var:pod_combat_ai_actor_sup_ceiling }
 				}
 			}
 			change_variable = { name = pod_combat_ai_score  add = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_heal_weight_superficial }
@@ -1907,7 +1923,7 @@ pod_combat_ai_score_candidate_effect = {
 				# someone else.
 				NOT = { var:targeting = flag:single_ally }
 				scope:combat_host = {
-					pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp <= @ai_thresh_heal_critical }
 					NOT = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable = 1 } }
 				}
 			}
@@ -2392,7 +2408,7 @@ pod_combat_ai_score_candidate_effect = {
 
 		# HP-finish tier 1: target at or under @ai_thresh_hp_finish_1 empty boxes,
 		# any damage kind (a priority bias - see the @ai_hp_finish_* defines).
-		# Reads the wound track directly (no target_hp_value SV).
+		# Reads the selected target's snapshot from this decision pass.
 		if = {
 			limit = {
 				has_variable = hp_damage
@@ -2400,7 +2416,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2417,7 +2433,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_2
 					}
 					trigger_else = { always = no }
 				}
@@ -2484,7 +2500,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp > @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2498,7 +2514,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp > @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2568,7 +2584,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes >= @ai_thresh_dot_healthy
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp >= @ai_thresh_dot_healthy
 					}
 					trigger_else = { always = no }
 				}
@@ -2584,7 +2600,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_2
 					}
 					trigger_else = { always = no }
 				}
@@ -2765,7 +2781,7 @@ pod_combat_ai_score_candidate_effect = {
 
 		# Arming a retaliation while exposed: a counter pays off only if the actor
 		# can still be struck. Reuse the exact @ai_defense_when_hurt
-		# actor-HP-below-max idiom (host-scoped SV compare).
+		# actor-HP-below-max idiom (decision snapshot compare).
 		if = {
 			limit = {
 				OR = {
@@ -2951,7 +2967,7 @@ pod_combat_ai_score_candidate_effect = {
 				OR = { has_variable = mind_control  has_variable = ap_drain }
 				var:targeting = flag:single_enemy
 				scope:combat_host = {
-					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp < var:pod_combat_ai_actor_max_hp }
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_hit_chance } }
 						var:pod_combat_session ?= { var:pod_combat_target_hit_chance >= @ai_thresh_hit_buff_band }
@@ -3183,20 +3199,16 @@ pod_combat_ai_select_and_execute_move_effect = {
 		# heal urgency. Always-written host vars for the weight block.
 		pod_combat_ai_precompute_action_summary_effect = yes
 
-		# Deficit-scaled heal weights, precomputed in host scope (where the actor HP
-		# script_values resolve). A weight `add` script_value evaluates in the
-		# CANDIDATE (move story) scope, where these host-side SVs don't resolve -
-		# so the curve is computed here and the heal modifiers read it via
-		# add = scope:combat_host.var:X.
+		# Deficit-scaled heal weights reuse this pass's actor-health snapshots.
 		# Recomputed each AI action; curve = base + (damaged fraction of the track) * span.
 		if = {
-			limit = { pod_combat_actor_sup_ceiling_value > 0 }
+			limit = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_sup_ceiling > 0 } }
 			save_scope_value_as = {
 				name = ai_hw_superficial
 				value = {
-					value = pod_combat_actor_sup_ceiling_value
-					subtract = pod_combat_actor_hp_value
-					divide = pod_combat_actor_sup_ceiling_value
+					value = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_sup_ceiling
+					subtract = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_hp
+					divide = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_sup_ceiling
 					multiply = pod_combat_ai_heal_span_value
 					add = pod_combat_ai_heal_base_value
 				}
@@ -3205,13 +3217,13 @@ pod_combat_ai_select_and_execute_move_effect = {
 		}
 		else = { scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_superficial  value = pod_combat_ai_heal_base_value } } }
 		if = {
-			limit = { pod_combat_actor_max_hp_value > 0 }
+			limit = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_max_hp > 0 } }
 			save_scope_value_as = {
 				name = ai_hw_aggravated
 				value = {
-					value = pod_combat_actor_max_hp_value
-					subtract = pod_combat_actor_hp_value
-					divide = pod_combat_actor_max_hp_value
+					value = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_max_hp
+					subtract = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_hp
+					divide = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_max_hp
 					multiply = pod_combat_ai_heal_span_value
 					add = pod_combat_ai_heal_base_value
 				}
