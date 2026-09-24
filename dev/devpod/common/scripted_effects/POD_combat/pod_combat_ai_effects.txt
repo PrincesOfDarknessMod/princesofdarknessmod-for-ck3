@@ -648,7 +648,74 @@ pod_combat_ai_take_turn_effect = {
 	pod_combat_ai_trace_turn_effect = yes
 }
 
+# Host scope. Synced means a complete save ran, or the empty-pool preflight proved
+# both side writebacks inert. Selectors and all workspace loads invalidate it.
+# Victory and HP maintenance still run at every original save boundary.
+pod_combat_ai_save_workspace_if_needed_effect = {
+	if = {
+		limit = { pod_combat_ai_workspace_is_synced_trigger = yes }
+		pod_combat_finish_workspace_save_effect = yes
+	}
+	else = {
+		pod_combat_save_workspace_effect = yes
+	}
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 1 }
+}
+
+# Host scope, immediately before the first post-selection save. Prove that neither
+# side can change gameplay during writeback before reusing deterministic preparation.
+pod_combat_ai_preflight_same_target_retry_effect = {
+	save_scope_value_as = { name = pod_ai_retry_ready value = 0 }
+	save_scope_value_as = { name = pod_ai_retry_actor_ok value = 0 }
+	save_scope_value_as = { name = pod_ai_retry_target_ok value = 0 }
+	save_scope_as = host
+	if = {
+		limit = { pod_combat_ai_retry_context_valid_trigger = yes }
+		var:pod_combat_session ?= {
+			save_scope_as = pod_ai_retry_fight
+			var:pod_combat_actor_char ?= { save_scope_as = pod_ai_retry_actor }
+			var:pod_combat_target_char ?= { save_scope_as = pod_ai_retry_target }
+			save_scope_value_as = { name = pod_ai_retry_ap value = var:pod_combat_current_ap }
+			every_in_list = {
+				variable = pod_combat_active_slots
+				pod_combat_ai_check_retry_actor_slot_effect = yes
+				pod_combat_ai_check_retry_target_slot_effect = yes
+			}
+		}
+		if = {
+			limit = { scope:pod_ai_retry_actor_ok = 1  scope:pod_ai_retry_target_ok = 1 }
+			save_scope_value_as = { name = pod_ai_retry_ready value = 1 }
+			save_scope_value_as = { name = pod_ai_workspace_synced value = 1 }
+		}
+	}
+}
+
+# Slot scope; keep matching/proof inside calls so iteration scope is preserved.
+pod_combat_ai_check_retry_actor_slot_effect = {
+	if = {
+		limit = { pod_combat_slot_is_current_actor_trigger = yes }
+		if = {
+			limit = { pod_combat_ai_retry_actor_slot_matches_trigger = yes }
+			save_scope_value_as = { name = pod_ai_retry_actor_ok value = 1 }
+		}
+	}
+}
+
+# Slot scope; keep matching/proof inside calls so iteration scope is preserved.
+pod_combat_ai_check_retry_target_slot_effect = {
+	if = {
+		limit = { pod_combat_slot_is_selected_target_trigger = yes }
+		if = {
+			limit = { pod_combat_ai_retry_target_slot_matches_trigger = yes }
+			save_scope_value_as = { name = pod_ai_retry_target_ok value = 1 }
+		}
+	}
+}
+
 pod_combat_ai_try_action_effect = {
+	# Saved scope values survive the event chain; readiness belongs to one attempt.
+	save_scope_value_as = { name = pod_ai_retry_ready value = 0 }
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 	if = {
 		limit = {
 			NOT = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_ai_turn_stalled } }
@@ -686,12 +753,13 @@ pod_combat_ai_try_action_effect = {
 		if = {
 			limit = { NOT = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_turn_control_fizzled } } }
 			pod_combat_ai_select_and_execute_move_effect = yes
+			pod_combat_ai_preflight_same_target_retry_effect = yes
 
 			# Save per-action (not once post-loop): flips slot _alive flags so
 			# the next try sees a KO'd target as dead, and runs the victory
 			# check at its tail so a fight-ending hit trips the remaining
 			# tries' is_over gate.
-			pod_combat_save_workspace_effect = yes
+			pod_combat_ai_save_workspace_if_needed_effect = yes
 
 			# The restricted roll came up empty. The intent promised a pool the roll's
 			# AI-only gates then emptied - the per-intent counters are an UPPER BOUND
@@ -720,8 +788,18 @@ pod_combat_ai_try_action_effect = {
 					trigger_else = { always = no }
 				}
 				scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_intent_lock value = 1 } }
-				pod_combat_ai_select_and_execute_move_effect = yes
-				pod_combat_save_workspace_effect = yes
+				# Only an empty restricted pool with an inert save can reuse preparation.
+				# Admission, scoring, tracing and the roll still rerun without intent.
+				if = {
+					limit = { pod_combat_ai_can_reuse_preparation_trigger = yes }
+					save_scope_value_as = { name = pod_ai_retry_ready value = 0 }
+					pod_combat_ai_select_prepared_move_effect = yes
+				}
+				else = {
+					save_scope_value_as = { name = pod_ai_retry_ready value = 0 }
+					pod_combat_ai_select_and_execute_move_effect = yes
+				}
+				pod_combat_ai_save_workspace_if_needed_effect = yes
 			}
 
 			# Still no pick: try ONE alternate target (excluding the exhausted
@@ -740,6 +818,8 @@ pod_combat_ai_try_action_effect = {
 			}
 		}
 	}
+	save_scope_value_as = { name = pod_ai_retry_ready value = 0 }
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 }
 
 # One bounded mid-turn re-target: when a finishable enemy is on the field and this
@@ -754,14 +834,13 @@ pod_combat_ai_try_action_effect = {
 # marked, and the break branch's shaken nudge then reads the snapped target's morale,
 # which is the answer it should have had all along.
 #
-# The finishable summary is RECOMPUTED here rather than reused. The copy the previous
-# action left is one action stale, and on a turn's FIRST attempt it belongs to the
-# previous ACTOR - possibly the opposing side, possibly inverted by a controlled turn.
-# By this point the workspace is loaded and AP is seeded, so the recompute sees this
-# actor's real state. It is idempotent; the per-action precompute runs it again.
+# Recompute for this attempt's actor, target and live AP. The following action
+# summary may consume this fresh result once; a target reload or loadout rebuild
+# invalidates it and forces that summary to scan again.
 #
 # Host scope, matching try_action.
 pod_combat_ai_snap_to_finishable_target_effect = {
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 	if = {
 		limit = {
 			NOT = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_turn_control_fizzled } }
@@ -777,6 +856,7 @@ pod_combat_ai_snap_to_finishable_target_effect = {
 			var:pod_combat_session ?= { has_variable = pod_combat_selected_target_team }
 		}
 		pod_combat_ai_flag_finishable_enemy_effect = yes
+		save_scope_value_as = { name = pod_ai_finishable_ready value = 1 }
 		if = {
 			limit = {
 				scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable = 1 }
@@ -887,7 +967,7 @@ pod_combat_ai_retry_alternate_target_effect = {
 			trigger_else = { always = no }
 		}
 		pod_combat_ai_select_and_execute_move_effect = yes
-		pod_combat_save_workspace_effect = yes
+		pod_combat_ai_save_workspace_if_needed_effect = yes
 	}
 	scope:combat_host.var:pod_combat_session ?= { remove_variable = pod_combat_ai_excluded_target_team }
 	scope:combat_host.var:pod_combat_session ?= { remove_variable = pod_combat_ai_excluded_target_position }
@@ -1001,6 +1081,17 @@ pod_combat_ai_precompute_bonus_met_effect = {
 pod_combat_ai_precompute_action_summary_effect = {
 	save_scope_as = host
 
+	# Sample host-scoped accessors before switching to the fight story. Full
+	# preparation refreshes these snapshots; a proven inert same-target retry reuses them.
+	save_scope_value_as = { name = ai_actor_hp value = pod_combat_actor_hp_value }
+	save_scope_value_as = { name = ai_actor_max_hp value = pod_combat_actor_max_hp_value }
+	save_scope_value_as = { name = ai_actor_sup_ceiling value = pod_combat_actor_sup_ceiling_value }
+	scope:combat_host.var:pod_combat_session ?= {
+		set_variable = { name = pod_combat_ai_actor_hp value = scope:ai_actor_hp }
+		set_variable = { name = pod_combat_ai_actor_max_hp value = scope:ai_actor_max_hp }
+		set_variable = { name = pod_combat_ai_actor_sup_ceiling value = scope:ai_actor_sup_ceiling }
+	}
+
 	# Stun threshold: the victim's projected next-turn AP budget (the effective
 	# cap; the escalating-cap / regen knobs are a documented approximation).
 	# Snapshot here, where the SV's host-var reads resolve.
@@ -1044,12 +1135,13 @@ pod_combat_ai_precompute_action_summary_effect = {
 		}
 	}
 
-	# Finishable-enemy opportunity, per action so its affordability check sees
-	# live AP: sets pod_combat_ai_enemy_finishable, read by the critical-heal
-	# modifier, by the intent chooser's emergency gate, and by the finishable /
-	# finish-focus adds on all four lottery branches. Its own save_scope_as = host
-	# re-saves this same host - safe.
-	pod_combat_ai_flag_finishable_enemy_effect = yes
+	# Consume the immediately preceding snap scan only while its inputs are intact.
+	# Other entries and target/loadout changes need a fresh finishable-enemy summary.
+	if = {
+		limit = { NOT = { pod_combat_ai_finishable_summary_is_ready_trigger = yes } }
+		pod_combat_ai_flag_finishable_enemy_effect = yes
+	}
+	save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 
 	# Recipient urgency: fold the MAX heal/morale urgency over same-team slots
 	# (team = all incl self; ally = non-self) so an ally-targeted heal is scored
@@ -1125,6 +1217,16 @@ pod_combat_ai_mirror_target_pending_effect = {
 pod_combat_ai_fold_recipient_urgency_effect = {
 	save_scope_value_as = { name = u_hp value = pod_combat_slot_hp_urgency_value }
 	save_scope_value_as = { name = u_mor value = pod_combat_slot_morale_urgency_value }
+	# Count before the PC bonus: that bonus must not turn a fully restored track
+	# into a heal beneficiary. The raw urgency snapshots already encode its deficit.
+	if = {
+		limit = { scope:u_hp > pod_combat_ai_heal_base_value }
+		$HOST$.var:pod_combat_session ?= { change_variable = { name = pod_combat_ai_team_ben_hp add = 1 } }
+	}
+	if = {
+		limit = { scope:u_mor > pod_combat_ai_heal_base_value }
+		$HOST$.var:pod_combat_session ?= { change_variable = { name = pod_combat_ai_team_ben_mor add = 1 } }
+	}
 	if = {
 		limit = {
 			var:combat_team = flag:player
@@ -1136,16 +1238,6 @@ pod_combat_ai_fold_recipient_urgency_effect = {
 		}
 		save_scope_value_as = { name = u_hp value = { value = scope:u_hp  add = @ai_pc_stabilize } }
 		save_scope_value_as = { name = u_mor value = { value = scope:u_mor  add = @ai_pc_stabilize } }
-	}
-	# Count this slot as a beneficiary if it has any deficit the heal could address
-	# (urgency above the flat base). Uses the raw SV, not the PC-bumped scope value.
-	if = {
-		limit = { pod_combat_slot_hp_urgency_value > pod_combat_ai_heal_base_value }
-		$HOST$.var:pod_combat_session ?= { change_variable = { name = pod_combat_ai_team_ben_hp add = 1 } }
-	}
-	if = {
-		limit = { pod_combat_slot_morale_urgency_value > pod_combat_ai_heal_base_value }
-		$HOST$.var:pod_combat_session ?= { change_variable = { name = pod_combat_ai_team_ben_mor add = 1 } }
 	}
 	$HOST$.var:pod_combat_session ?= {
 		if = { limit = { var:pod_combat_ai_team_heal_w < scope:u_hp } set_variable = { name = pod_combat_ai_team_heal_w value = scope:u_hp } }
@@ -1243,6 +1335,8 @@ pod_combat_ai_fold_usable_move_effect = {
 				}
 			}
 		}
+
+		set_variable = pod_combat_ai_usable_now
 
 		# --- cheapest usable cost -> AP strand floor ---
 		# ZERO-COST MOVES ARE EXCLUDED, and that is load-bearing. Folding one drives
@@ -1409,10 +1503,10 @@ pod_combat_ai_fold_usable_move_effect = {
 # is the ACTOR's list. Seeds are written through scope:combat_host explicitly because
 # `this` here is the acting character.
 #
-# Equivalence rests on the inputs being stable between this walk and the roll. Several
-# effects DO run in between (the intent chooser, the scoring walk, the trace count) -
-# none of them mutates AP, energy, once_per marks or any move's tier vars, which is what
-# the cached answer depends on. Add anything that does, and this stops being exact.
+# Full preparation clears and rebuilds usability for the WHOLE loadout: these
+# move stories are shared across actors and fights. Only the same-target empty-pool
+# retry may reuse it, after proving the intervening save cannot change gameplay.
+# No other gameplay mutation may intervene before admission and the roll.
 pod_combat_ai_precompute_max_tiers_effect = {
 	# Seed 0 = 'no USABLE tier of this stat'. Safe because a tier is always 1-3
 	# BY CONSTRUCTION: the generator parses tiers from `<stat>_<dir>_<size>_<dur>`
@@ -1445,17 +1539,19 @@ pod_combat_ai_precompute_max_tiers_effect = {
 	}
 	every_in_list = {
 		variable = pod_combat_loadout
-		# A move with no ap_cost is free, so the skipped trigger_if reads true and it
-		# counts as affordable.
-		limit = {
-			trigger_if = {
-				limit = { has_variable = ap_cost }
-				scope:combat_host.var:pod_combat_session.var:pod_combat_current_ap >= var:ap_cost
+		# Clear even unaffordable entries, which may carry another actor's mark.
+		remove_variable = pod_combat_ai_usable_now
+		if = {
+			# A move with no ap_cost is free, so the skipped trigger_if reads true.
+			limit = {
+				trigger_if = {
+					limit = { has_variable = ap_cost }
+					scope:combat_host.var:pod_combat_session.var:pod_combat_current_ap >= var:ap_cost
+				}
 			}
+			# The tier, min-cost and intent-counter folds share one usable-now gate.
+			pod_combat_ai_fold_usable_move_effect = { HOST = scope:combat_host }
 		}
-		# One call: the tier folds ride inside it, behind the same usable-now gate as
-		# the min-cost and intent-counter folds.
-		pod_combat_ai_fold_usable_move_effect = { HOST = scope:combat_host }
 	}
 	# Strand floor = current AP minus the cheapest USABLE move (the fold applies the
 	# same gate the roll does, so this is exact rather than a lower bound). Precomputing the
@@ -1518,7 +1614,7 @@ pod_combat_ai_choose_intent_effect = {
 	else_if = {
 		limit = {
 			scope:combat_host = {
-				pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+				scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp <= @ai_thresh_heal_critical }
 				NOT = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable = 1 } }
 				scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_usable_stabilize_n > 0 }
 			}
@@ -1875,7 +1971,7 @@ pod_combat_ai_score_candidate_effect = {
 				# recipients are scored below from the recipient's own need.
 				NOR = { var:targeting = flag:single_ally  var:targeting = flag:team_ally }
 				scope:combat_host = {
-					pod_combat_actor_hp_value < pod_combat_actor_sup_ceiling_value
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp < var:pod_combat_ai_actor_sup_ceiling }
 				}
 			}
 			change_variable = { name = pod_combat_ai_score  add = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_heal_weight_superficial }
@@ -1907,7 +2003,7 @@ pod_combat_ai_score_candidate_effect = {
 				# someone else.
 				NOT = { var:targeting = flag:single_ally }
 				scope:combat_host = {
-					pod_combat_actor_hp_value <= @ai_thresh_heal_critical
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp <= @ai_thresh_heal_critical }
 					NOT = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_enemy_finishable = 1 } }
 				}
 			}
@@ -2392,7 +2488,7 @@ pod_combat_ai_score_candidate_effect = {
 
 		# HP-finish tier 1: target at or under @ai_thresh_hp_finish_1 empty boxes,
 		# any damage kind (a priority bias - see the @ai_hp_finish_* defines).
-		# Reads the wound track directly (no target_hp_value SV).
+		# Reads the selected target's snapshot from this decision pass.
 		if = {
 			limit = {
 				has_variable = hp_damage
@@ -2400,7 +2496,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2417,7 +2513,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_2
 					}
 					trigger_else = { always = no }
 				}
@@ -2484,7 +2580,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp > @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2498,7 +2594,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes > @ai_thresh_hp_finish_1
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp > @ai_thresh_hp_finish_1
 					}
 					trigger_else = { always = no }
 				}
@@ -2568,7 +2664,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes >= @ai_thresh_dot_healthy
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp >= @ai_thresh_dot_healthy
 					}
 					trigger_else = { always = no }
 				}
@@ -2584,7 +2680,7 @@ pod_combat_ai_score_candidate_effect = {
 				scope:combat_host = {
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
-						var:pod_combat_session.var:pod_combat_target_char.POD_empty_damage_boxes <= @ai_thresh_hp_finish_2
+						var:pod_combat_session.var:pod_combat_ai_tgt_hp <= @ai_thresh_hp_finish_2
 					}
 					trigger_else = { always = no }
 				}
@@ -2765,7 +2861,7 @@ pod_combat_ai_score_candidate_effect = {
 
 		# Arming a retaliation while exposed: a counter pays off only if the actor
 		# can still be struck. Reuse the exact @ai_defense_when_hurt
-		# actor-HP-below-max idiom (host-scoped SV compare).
+		# actor-HP-below-max idiom (decision snapshot compare).
 		if = {
 			limit = {
 				OR = {
@@ -2951,7 +3047,7 @@ pod_combat_ai_score_candidate_effect = {
 				OR = { has_variable = mind_control  has_variable = ap_drain }
 				var:targeting = flag:single_enemy
 				scope:combat_host = {
-					pod_combat_actor_hp_value < pod_combat_actor_max_hp_value
+					scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_hp < var:pod_combat_ai_actor_max_hp }
 					trigger_if = {
 						limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_hit_chance } }
 						var:pod_combat_session ?= { var:pod_combat_target_hit_chance >= @ai_thresh_hit_buff_band }
@@ -3105,10 +3201,9 @@ pod_combat_ai_score_candidate_effect = {
 # the same reason the tier fold and the trace counter do. Writing an aggregate to the
 # actor instead of the host creates it on the wrong scope and reads back as 0.
 #
-# MUST NOT BE HOISTED out of pod_combat_ai_select_and_execute_move_effect. Atomicity
-# is the entire staleness defence: the lock fallback and the alternate-target retry
-# both re-enter that effect wholesale, so each re-entry re-walks with the new intent
-# or the new target, and no roll ever sees marks staged for a different action.
+# Run inside pod_combat_ai_select_prepared_move_effect for EVERY pick, including
+# guarded retries. Admission and scores depend on intent; only preparation may be
+# reused. Nothing executes between this walk and its roll.
 #
 # Ordering is fixed and the two walks cannot merge: the tier/counter fold runs BEFORE
 # the chooser because the chooser reads its counters, and this walk runs AFTER the
@@ -3149,250 +3244,246 @@ pod_combat_ai_score_loadout_effect = {
 }
 
 pod_combat_ai_select_and_execute_move_effect = {
-	# Weighted random_in_list over the loadout, then swap / execute /
-	# restore. pod_combat_actor_char (the acting combatant) is written by
-	# pod_combat_group_effects.txt before this fires.
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
 	pod_combat_ai_ensure_loadout_effect = yes
-
 	if = {
-		# The session check gates the whole selection, scoring walk and roll. Those
-		# read the fight's precomputed weights through chained derefs that cannot
-		# guard themselves - they sit in weight-block comparisons, and a sibling
-		# trigger would not stop them evaluating. An if-body does: nothing below
-		# runs without a fight, which is what makes tooltip-build safe here.
+		# Gate both helpers before any chained fight reads in scoring or weights.
 		limit = {
 			var:pod_combat_session ?= { has_variable = pod_combat_actor_char }
 			has_variable = pod_combat_session
 		}
+		pod_combat_ai_prepare_selection_effect = yes
+		pod_combat_ai_select_prepared_move_effect = yes
+	}
+}
 
-		# Two scopes used below:
-		#   scope:combat_host - PC holding the workspace mirror vars; needed
-		#                       for POD_execute_combat_move + affordability.
-		#   scope:ai_actor - acting AI; holds the loadout list and the
-		#                       anti-repetition history.
-		save_scope_as = combat_host
+# Host scope, guarded by the full selector. Only an empty same-target retry whose
+# intervening save was proven gameplay-inert may reuse these deterministic caches.
+pod_combat_ai_prepare_selection_effect = {
+	save_scope_as = combat_host
+	save_scope_as = host
+	# Per-action summary: pending target state, stun threshold, and recipient
+	# heal urgency. Always-written host vars for the weight block.
+	pod_combat_ai_precompute_action_summary_effect = yes
 
-		# Stale-pick guard: saved scopes persist across every AI turn of the
-		# round (one effect execution), so an empty selection would leave
-		# chosen_move pointing at a PREVIOUS action's (or actor's) move and
-		# `exists` alone would re-execute it. Cleared here, set only inside
-		# this pass's pick, proven at the execute gate.
-		scope:combat_host.var:pod_combat_session ?= { remove_variable = pod_combat_ai_picked }
-
-		# Per-action summary: pending target state, stun threshold, and recipient
-		# heal urgency. Always-written host vars for the weight block.
-		pod_combat_ai_precompute_action_summary_effect = yes
-
-		# Deficit-scaled heal weights, precomputed in host scope (where the actor HP
-		# script_values resolve). A weight `add` script_value evaluates in the
-		# CANDIDATE (move story) scope, where these host-side SVs don't resolve -
-		# so the curve is computed here and the heal modifiers read it via
-		# add = scope:combat_host.var:X.
-		# Recomputed each AI action; curve = base + (damaged fraction of the track) * span.
-		if = {
-			limit = { pod_combat_actor_sup_ceiling_value > 0 }
-			save_scope_value_as = {
-				name = ai_hw_superficial
-				value = {
-					value = pod_combat_actor_sup_ceiling_value
-					subtract = pod_combat_actor_hp_value
-					divide = pod_combat_actor_sup_ceiling_value
-					multiply = pod_combat_ai_heal_span_value
-					add = pod_combat_ai_heal_base_value
-				}
+	# Deficit-scaled heal weights reuse this pass's actor-health snapshots.
+	# Recomputed each AI action; curve = base + (damaged fraction of the track) * span.
+	if = {
+		limit = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_sup_ceiling > 0 } }
+		save_scope_value_as = {
+			name = ai_hw_superficial
+			value = {
+				value = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_sup_ceiling
+				subtract = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_hp
+				divide = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_sup_ceiling
+				multiply = pod_combat_ai_heal_span_value
+				add = pod_combat_ai_heal_base_value
 			}
-			scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_superficial value = scope:ai_hw_superficial } }
 		}
-		else = { scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_superficial  value = pod_combat_ai_heal_base_value } } }
-		if = {
-			limit = { pod_combat_actor_max_hp_value > 0 }
-			save_scope_value_as = {
-				name = ai_hw_aggravated
-				value = {
-					value = pod_combat_actor_max_hp_value
-					subtract = pod_combat_actor_hp_value
-					divide = pod_combat_actor_max_hp_value
-					multiply = pod_combat_ai_heal_span_value
-					add = pod_combat_ai_heal_base_value
-				}
+		scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_superficial value = scope:ai_hw_superficial } }
+	}
+	else = { scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_superficial  value = pod_combat_ai_heal_base_value } } }
+	if = {
+		limit = { scope:combat_host.var:pod_combat_session ?= { var:pod_combat_ai_actor_max_hp > 0 } }
+		save_scope_value_as = {
+			name = ai_hw_aggravated
+			value = {
+				value = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_max_hp
+				subtract = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_hp
+				divide = scope:combat_host.var:pod_combat_session.var:pod_combat_ai_actor_max_hp
+				multiply = pod_combat_ai_heal_span_value
+				add = pod_combat_ai_heal_base_value
 			}
-			scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_aggravated value = scope:ai_hw_aggravated } }
 		}
-		else = { scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_aggravated  value = pod_combat_ai_heal_base_value } } }
+		scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_aggravated value = scope:ai_hw_aggravated } }
+	}
+	else = { scope:combat_host.var:pod_combat_session ?= { set_variable = { name = pod_combat_ai_heal_weight_aggravated  value = pod_combat_ai_heal_base_value } } }
 
-		var:pod_combat_session.var:pod_combat_actor_char ?= {
-			save_scope_as = ai_actor
+	var:pod_combat_session.var:pod_combat_actor_char ?= {
+		save_scope_as = ai_actor
 
-			# Personality profile precompute (fallback). The PRIMARY site is the
-			# hoist in pod_combat_execute_ai_turn_effect, which runs this BEFORE the
-			# first target selection; this guarded copy is a no-op whenever the hoist
-			# ran, and computes only if it somehow did not. Runs once per combat (guard
-			# var on the AI char, cleared at the slot-init / group-teardown AI cleanup)
-			# so the intent chooser and the target-preference derivation only ever READ
-			# the bias vars. The per-candidate scoring walk does not read them at all.
-			scope:ai_actor = {
-				if = {
-					limit = { NOT = { has_variable = pod_combat_pers_profile_done } }
-					pod_combat_apply_personality_profile_effect = yes
-					set_variable = pod_combat_pers_profile_done
-				}
-			}
-
-			# Bonus-condition met-status precompute (before the random_in_list) -
-			# rationale on pod_combat_ai_precompute_bonus_met_effect. (Same shape
-			# as the heal-weight precompute.)
-			# Filtered on the clause list, not cond_mode: a GATE row may carry bonus
-			# clauses too, and the clause list is the only bonus channel now.
-			every_in_list = {
-				variable = pod_combat_loadout
-				limit = { has_variable_list = bonus_clauses }
-				pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
-			}
-
-			# One loadout walk that retires the per-candidate tier rescan, and folds
-			# the per-intent usable counts the chooser below reads.
-			pod_combat_ai_precompute_max_tiers_effect = yes
-
-			# Tactical intent for this action. AFTER the walk (it reads the per-intent
-			# counters that walk folds) and BEFORE the roll, whose dispatch arm reads
-			# the intent it writes.
-			pod_combat_ai_choose_intent_effect = yes
-
-			# Per-action move scoring. AFTER the chooser (admission reads the intent)
-			# and before the roll, so nothing executes between scoring and selection -
-			# the same equivalence the tier cache relies on.
-			pod_combat_ai_score_loadout_effect = yes
-
-			# Debug trace only, and it must follow the walk: it copies the walk's
-			# admitted count rather than deriving its own. `eligible=` is therefore the
-			# POST-intent pool the roll actually draws from and agrees with the roll on
-			# every action, so anything sizing the band off these numbers is reading the
-			# real pool.
-			pod_combat_ai_trace_count_eligible_effect = yes
-
-			random_in_list = {
-				variable = pod_combat_loadout
-				limit = {
-					# The gate set already ran, once per candidate, in the scoring walk above
-					# (pod_combat_ai_score_candidate_effect calls the same
-					# pod_combat_ai_move_admissible_trigger and stamps this flag). Re-running
-					# it here would evaluate the whole gate set a second time for the
-					# identical answer, since nothing executes between the walk and this roll.
-					#
-					# NOTE this read FAILS OPEN, and the marks live on SHARED catalogue move
-					# stories that outlive the fight. If the walk were ever skipped for one
-					# action this would not stall - it would quietly draw a pool marked by a
-					# previous actor, target or fight and weight it with scores computed
-					# against different state. The walk being unconditional, limit-free and
-					# set-or-clear is the whole defence; see its header.
-					has_variable = pod_combat_ai_admitted
-
-					# TOP BAND: only candidates within pod_combat_ai_band_width_value of the
-					# best admitted score. Inside the band the roll is unchanged - still
-					# proportional on score - so this sharpens WHICH moves compete without
-					# collapsing to an argmax.
-					#
-					# It can never empty a non-empty pool: the top scorer satisfies
-					# score >= score_max - width for any width >= 0 (the SV clamps at 0),
-					# and the floor keeps its weight at 1 or more. So no new stall path,
-					# and the lock-fallback / retry ladder is untouched.
-					#
-					# The trigger_if is NOT decoration. Trigger blocks do not short-circuit,
-					# so without it the score read would evaluate on every non-admitted
-					# candidate - whose score var the walk just removed - and spam the error
-					# log once per candidate per action.
-					trigger_if = {
-						limit = { has_variable = pod_combat_ai_admitted }
-						OR = {
-							# Zero-AP accelerators bypass the band, matching the intent
-							# ladder's always-admitted rule: a free action costs the turn
-							# nothing, so banding one out can only ever waste it.
-							var:ap_cost = 0
-							var:pod_combat_ai_score >= scope:combat_host.var:pod_combat_session.var:pod_combat_ai_band_floor
-						}
-					}
-				}
-
-				weight = {
-					base = 0
-
-					# The entire weight block - base, every modifier arm and the floor -
-					# is precomputed per candidate by pod_combat_ai_score_candidate_effect
-					# and read here as one number. Identical arithmetic over an identical
-					# candidate set: the walk runs immediately before this roll with nothing
-					# in between, so every input it read is the input the roll would have read.
-					#
-					# Scoring OUTSIDE the roll is what makes the top-band restriction possible
-					# at all - a weight cannot be compared against the best weight in the pool
-					# while it is being computed.
-					modifier = {
-						add = var:pod_combat_ai_score
-					}
-
-					# A strict no-op while the walk floors the score at @ai_weight_floor,
-					# kept because random_in_list DROPS a <= 0 weight silently: the cost of
-					# keeping it is nothing and the cost of being wrong is an unpickable
-					# move. Do not mistake it for a safety net on the walk's clamp - it
-					# would MASK a broken clamp (the roll keeps drawing at 1) rather than
-					# surface it, and the recorded scores would drift out of range unseen.
-					min = @ai_weight_floor
-				}
-
-				save_scope_as = chosen_move
-				scope:combat_host.var:pod_combat_session ?= { set_variable = pod_combat_ai_picked }
+		# Personality profile precompute (fallback). The PRIMARY site is the
+		# hoist in pod_combat_execute_ai_turn_effect, which runs this BEFORE the
+		# first target selection; this guarded copy is a no-op whenever the hoist
+		# ran, and computes only if it somehow did not. Runs once per combat (guard
+		# var on the AI char, cleared at the slot-init / group-teardown AI cleanup)
+		# so the intent chooser and the target-preference derivation only ever READ
+		# the bias vars. The per-candidate scoring walk does not read them at all.
+		scope:ai_actor = {
+			if = {
+				limit = { NOT = { has_variable = pod_combat_pers_profile_done } }
+				pod_combat_apply_personality_profile_effect = yes
+				set_variable = pod_combat_pers_profile_done
 			}
 		}
 
-		# Execute on combat_host - that's where the workspace lives. Inside
-		# var:pod_combat_actor_char the AI would "act" with no effect.
-		if = {
+		# Bonus-condition met-status precompute (before the random_in_list) -
+		# rationale on pod_combat_ai_precompute_bonus_met_effect. (Same shape
+		# as the heal-weight precompute.)
+		# Filtered on the clause list, not cond_mode: a GATE row may carry bonus
+		# clauses too, and the clause list is the only bonus channel now.
+		every_in_list = {
+			variable = pod_combat_loadout
+			limit = { has_variable_list = bonus_clauses }
+			pod_combat_ai_precompute_bonus_met_effect = { HOST = scope:combat_host  ACTOR = scope:ai_actor }
+		}
+
+		# One loadout walk that retires the per-candidate tier rescan, and folds
+		# the per-intent usable counts the chooser below reads.
+		pod_combat_ai_precompute_max_tiers_effect = yes
+
+	}
+}
+
+# Host scope. Call after fresh preparation or the guarded same-target retry proof.
+# Rebind scopes because the intervening save/victory helpers may replace them.
+pod_combat_ai_select_prepared_move_effect = {
+	save_scope_value_as = { name = pod_ai_workspace_synced value = 0 }
+	save_scope_as = combat_host
+	save_scope_as = host
+	# Saved chosen_move outlives an attempt; only this pass's picked mark licenses it.
+	var:pod_combat_session ?= { remove_variable = pod_combat_ai_picked }
+	var:pod_combat_session.var:pod_combat_actor_char ?= {
+		save_scope_as = ai_actor
+		# Tactical intent for this action. AFTER the walk (it reads the per-intent
+		# counters that walk folds) and BEFORE the roll, whose dispatch arm reads
+		# the intent it writes.
+		pod_combat_ai_choose_intent_effect = yes
+
+		# Per-action move scoring. AFTER the chooser (admission reads the intent)
+		# and before the roll, so nothing executes between scoring and selection -
+		# the same equivalence the tier cache relies on.
+		pod_combat_ai_score_loadout_effect = yes
+
+		# Debug trace only, and it must follow the walk: it copies the walk's
+		# admitted count rather than deriving its own. `eligible=` is therefore the
+		# POST-intent pool the roll actually draws from and agrees with the roll on
+		# every action, so anything sizing the band off these numbers is reading the
+		# real pool.
+		pod_combat_ai_trace_count_eligible_effect = yes
+
+		random_in_list = {
+			variable = pod_combat_loadout
 			limit = {
-				exists = scope:chosen_move
-				# Picked-this-pass proof (see the guard clear above).
-				scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_ai_picked }
-				scope:combat_host = {
-					# Dynamic-only recheck: same unlock proof as the selector limit.
-					pod_combat_move_is_usable_now_trigger = {
-						STORY = scope:chosen_move
-						ACTOR = scope:ai_actor
+				# The gate set already ran, once per candidate, in the scoring walk above
+				# (pod_combat_ai_score_candidate_effect calls the same
+				# pod_combat_ai_move_admissible_trigger and stamps this flag). Re-running
+				# it here would evaluate the whole gate set a second time for the
+				# identical answer, since nothing executes between the walk and this roll.
+				#
+				# NOTE this read FAILS OPEN, and the marks live on SHARED catalogue move
+				# stories that outlive the fight. If the walk were ever skipped for one
+				# action this would not stall - it would quietly draw a pool marked by a
+				# previous actor, target or fight and weight it with scores computed
+				# against different state. The walk being unconditional, limit-free and
+				# set-or-clear is the whole defence; see its header.
+				has_variable = pod_combat_ai_admitted
+
+				# TOP BAND: only candidates within pod_combat_ai_band_width_value of the
+				# best admitted score. Inside the band the roll is unchanged - still
+				# proportional on score - so this sharpens WHICH moves compete without
+				# collapsing to an argmax.
+				#
+				# It can never empty a non-empty pool: the top scorer satisfies
+				# score >= score_max - width for any width >= 0 (the SV clamps at 0),
+				# and the floor keeps its weight at 1 or more. So no new stall path,
+				# and the lock-fallback / retry ladder is untouched.
+				#
+				# The trigger_if is NOT decoration. Trigger blocks do not short-circuit,
+				# so without it the score read would evaluate on every non-admitted
+				# candidate - whose score var the walk just removed - and spam the error
+				# log once per candidate per action.
+				trigger_if = {
+					limit = { has_variable = pod_combat_ai_admitted }
+					OR = {
+						# Zero-AP accelerators bypass the band, matching the intent
+						# ladder's always-admitted rule: a free action costs the turn
+						# nothing, so banding one out can only ever waste it.
+						var:ap_cost = 0
+						var:pod_combat_ai_score >= scope:combat_host.var:pod_combat_session.var:pod_combat_ai_band_floor
 					}
 				}
 			}
-			# Trace BEFORE the swap: the weights scored against the pre-swap workspace
-			# target, so that is the state the record should describe. Emitting after
-			# the restore would log the restored enemy instead (and, for an AoE,
-			# whichever slot the sweep loaded last). Inside the gate, so a pick logged
-			# here always goes on to execute.
-			scope:combat_host = { pod_combat_ai_trace_pick_effect = yes }
-			pod_combat_ai_swap_for_story_effect     = { STORY = scope:chosen_move }
-			POD_execute_combat_move           = { STORY = scope:chosen_move }
-			pod_combat_ai_restore_after_move_effect = { STORY = scope:chosen_move }
-			# Progress proof for the turn loop: a move actually executed this pass.
-			scope:combat_host.var:pod_combat_session ?= { set_variable = pod_combat_ai_action_executed }
 
-			# Record anti-repetition only after the move actually executed
-			# (inside the same gate), else a stale chosen_move would pollute
-			# history. Shift the 3-deep ring reading each older slot before
-			# overwriting it.
-			scope:ai_actor = {
-				if = {
-					limit = { has_variable = pod_combat_ai_prev_move }
-					set_variable = {
-						name  = pod_combat_ai_prev2_move
-						value = var:pod_combat_ai_prev_move
-					}
+			weight = {
+				base = 0
+
+				# The entire weight block - base, every modifier arm and the floor -
+				# is precomputed per candidate by pod_combat_ai_score_candidate_effect
+				# and read here as one number. Identical arithmetic over an identical
+				# candidate set: the walk runs immediately before this roll with nothing
+				# in between, so every input it read is the input the roll would have read.
+				#
+				# Scoring OUTSIDE the roll is what makes the top-band restriction possible
+				# at all - a weight cannot be compared against the best weight in the pool
+				# while it is being computed.
+				modifier = {
+					add = var:pod_combat_ai_score
 				}
-				if = {
-					limit = { has_variable = pod_combat_ai_last_move }
-					set_variable = {
-						name  = pod_combat_ai_prev_move
-						value = var:pod_combat_ai_last_move
-					}
+
+				# A strict no-op while the walk floors the score at @ai_weight_floor,
+				# kept because random_in_list DROPS a <= 0 weight silently: the cost of
+				# keeping it is nothing and the cost of being wrong is an unpickable
+				# move. Do not mistake it for a safety net on the walk's clamp - it
+				# would MASK a broken clamp (the roll keeps drawing at 1) rather than
+				# surface it, and the recorded scores would drift out of range unseen.
+				min = @ai_weight_floor
+			}
+
+			save_scope_as = chosen_move
+			scope:combat_host.var:pod_combat_session ?= { set_variable = pod_combat_ai_picked }
+		}
+	}
+
+	# Execute on combat_host - that's where the workspace lives. Inside
+	# var:pod_combat_actor_char the AI would "act" with no effect.
+	if = {
+		limit = {
+			exists = scope:chosen_move
+			# Picked-this-pass proof (see the guard clear above).
+			scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_ai_picked }
+			scope:combat_host = {
+				# Dynamic-only recheck: same unlock proof as the selector limit.
+				pod_combat_move_is_usable_now_trigger = {
+					STORY = scope:chosen_move
+					ACTOR = scope:ai_actor
 				}
+			}
+		}
+		# Trace BEFORE the swap: the weights scored against the pre-swap workspace
+		# target, so that is the state the record should describe. Emitting after
+		# the restore would log the restored enemy instead (and, for an AoE,
+		# whichever slot the sweep loaded last). Inside the gate, so a pick logged
+		# here always goes on to execute.
+		scope:combat_host = { pod_combat_ai_trace_pick_effect = yes }
+		pod_combat_ai_swap_for_story_effect     = { STORY = scope:chosen_move }
+		POD_execute_combat_move           = { STORY = scope:chosen_move }
+		pod_combat_ai_restore_after_move_effect = { STORY = scope:chosen_move }
+		# Progress proof for the turn loop: a move actually executed this pass.
+		scope:combat_host.var:pod_combat_session ?= { set_variable = pod_combat_ai_action_executed }
+
+		# Record anti-repetition only after the move actually executed
+		# (inside the same gate), else a stale chosen_move would pollute
+		# history. Shift the 3-deep ring reading each older slot before
+		# overwriting it.
+		scope:ai_actor = {
+			if = {
+				limit = { has_variable = pod_combat_ai_prev_move }
 				set_variable = {
-					name  = pod_combat_ai_last_move
-					value = scope:chosen_move
+					name  = pod_combat_ai_prev2_move
+					value = var:pod_combat_ai_prev_move
 				}
+			}
+			if = {
+				limit = { has_variable = pod_combat_ai_last_move }
+				set_variable = {
+					name  = pod_combat_ai_prev_move
+					value = var:pod_combat_ai_last_move
+				}
+			}
+			set_variable = {
+				name  = pod_combat_ai_last_move
+				value = scope:chosen_move
 			}
 		}
 	}
@@ -3417,6 +3508,7 @@ pod_combat_ai_ensure_loadout_effect = {
 		var:pod_combat_session.var:pod_combat_actor_char ?= {
 			if = {
 				limit = { pod_combat_equipped_count = 0 }
+				save_scope_value_as = { name = pod_ai_finishable_ready value = 0 }
 				POD_apply_ai_full_loadout = yes
 			}
 		}
