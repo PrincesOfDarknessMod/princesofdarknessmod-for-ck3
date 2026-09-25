@@ -1,24 +1,14 @@
 ﻿######################################
 ######   POD COMBAT VALUES   ######
 ######################################
-# Static constants and script values for the combat minigame.
-# Naming: bare names = tuning constants; *_value = general script values;
-# accepted legacy suffixes kept to avoid GUI-binding churn: *_mag_sv /
-# *_total_damage_sv (log segment reads), *_pct (bar fills), *_count / *_raw
-# (loadout counts; _raw = live compute, plain = editor-open cache).
-# For the variable namespace, slot-story field catalogue,
-# workspace pattern, hit-chance formula, and result-code map, see
-# COMBAT_REFERENCE.info §1 (Variable namespace) and §4 (Result codes).
+# State model: COMBAT_REFERENCE.info sections 1 and 4.
 
 # Increment by one when changing moves
-POD_current_combat_version = 4
+POD_current_combat_version = 6
 
 ###### TUNING CONSTANTS ######
-# Many constants below carry a global-var override branch: the debug tuning
-# window (pod_combat_tuning_window, opened via the debug interaction) sets
-# global_var:pod_combat_tune_* at runtime for balancing. Unset global =
-# the default value = shipped behavior. Settle on numbers in play, then
-# promote them into the defaults here and clear the globals (Reset All).
+# Debug globals pod_combat_tune_* override shipped defaults.
+# Promote settled values here and use Reset All to clear saved overrides.
 
 # Tier magnitudes - small/medium/large = +/-10/20/30, applied by the
 # 8 tier-mag SVs (soak/hit x buff/debuff x round/combat) per slot.
@@ -35,42 +25,33 @@ pod_combat_tier_large_mag = {
 	if = { limit = { exists = global_var:pod_combat_tune_tier_large } value = global_var:pod_combat_tune_tier_large }
 }
 
-# Per-turn AP budget cap (the "full bar").
+pod_combat_base_ap_base = 6
 pod_combat_base_ap = {
-	value = 6
+	value = pod_combat_base_ap_base
 	if = { limit = { exists = global_var:pod_combat_tune_base_ap } value = global_var:pod_combat_tune_base_ap }
 }
 
+pod_combat_hit_chance_base_base = 60
 pod_combat_hit_chance_base = {
-	value = 60
+	value = pod_combat_hit_chance_base_base
 	if = { limit = { exists = global_var:pod_combat_tune_hit_base } value = global_var:pod_combat_tune_hit_base }
 }
 
-# Live hit-chance clamp window, shared by the recalc core (pod_combat_tier_effects)
-# and the §5d bonus-hit re-cap so the ceiling cannot silently drift between them.
+# Shared hit clamp for tier recalc and the execution section 5d bonus.
+pod_combat_hit_chance_min_base = 20
 pod_combat_hit_chance_min = {
-	value = 20
+	value = pod_combat_hit_chance_min_base
 	if = { limit = { exists = global_var:pod_combat_tune_hit_min } value = global_var:pod_combat_tune_hit_min }
 }
+pod_combat_hit_chance_max_base = 95
 pod_combat_hit_chance_max = {
-	value = 95
+	value = pod_combat_hit_chance_max_base
 	if = { limit = { exists = global_var:pod_combat_tune_hit_max } value = global_var:pod_combat_tune_hit_max }
 }
 
-# AI target-selection thresholds, read by the finishable flag and by the shared
-# target-selector core's kill-priority factor (both in pod_combat_group_effects.txt).
-# Script values, not @-defines: @-defines are file-local and these are tuned here but
-# read there.
-#
-# Two tracks, two thresholds each. FINISH = the low-track threshold that raises the
-# finishable flag the intent lottery reads. That flag is a priority heuristic - the
-# threshold plus ownership of an AP-affordable move of that kind - and proves nothing
-# about energy, once-per availability, damage magnitude, soak, immunity or the hit
-# roll; pod_combat_ai_flag_finishable_enemy_effect is the definition.
-# KILL-PRIORITY = close enough to be worth converging on, and gates the selector's x3.
-# Priority sits one step above finish on both tracks so the AI starts massing a hit
-# before a target reaches the finish band. Keep priority >= finish: inverted, the
-# selector would weight enemies further from a kill above the ones nearer it.
+# Finish thresholds require both a AP-affordable move as well the damage threshold.
+# See pod_combat_ai_flag_finishable_enemy_effect for the full breakdown.
+# Keep kill-priority thresholds >= finish thresholds so lower health targets retain priority.
 pod_combat_ai_hp_finish_threshold = {
 	value = 1
 	if = { limit = { exists = global_var:pod_combat_tune_ai_hp_finish } value = global_var:pod_combat_tune_ai_hp_finish }
@@ -88,47 +69,23 @@ pod_combat_ai_morale_kill_priority = {
 	if = { limit = { exists = global_var:pod_combat_tune_ai_mor_kill } value = global_var:pod_combat_tune_ai_mor_kill }
 }
 
-# AI soak-buff cap threshold (percent). At-or-above this workspace soak, a
-# pure soak buff scores as waste (@ai_soak_buff_capped in
-# pod_combat_ai_effects.txt): the recalc clamps soak at 100, so buffing past
-# the cap does nothing. Script value, not an @-define: tuned here, read in the
-# AI weight block.
-# Since soak buffs went multiplicative they can only approach 100, never reach
-# it, so at the default this fires just for characters already pinned at 100 by
-# a flat source (Fae deja vu). A buff is never fully wasted below that, but it
-# does shrink in absolute percentage points as soak climbs - lower the
-# threshold if the AI should stop stacking soak on an already-tanky actor.
+# Soak percentage at which @ai_soak_buff_capped penalizes a pure buff.
+# With multiplicative buffs we can not longer reach 100%.
+# Lower this to penalize diminishing returns.
 pod_combat_ai_soak_buff_cap_threshold = 100
 
-# ── MORALE CAP ────────────────────────────────────────────────────
-# The cap is per-character: it scales off the same PoD wound track that
-# supplies max HP, so a sturdier creature carries a deeper morale pool. That
-# makes it scope-dependent, which is why there is no single "the cap" value.
-# Read the wrapper that matches the scope you are in:
-#
-#   character scope  -> pod_combat_char_max_morale_value
-#   slot-story scope -> pod_combat_slot_max_morale_value
-#   combat-host scope-> pod_combat_actor_max_morale_value
-#                       pod_combat_target_max_morale_value
-#
-# pod_combat_max_morale_base is the BASELINE only (what a 6-box combatant
-# gets). Comparing a combatant's morale against it directly is a bug.
+###### MORALE CAP ######
+# Use the scope-appropriate cap, not pod_combat_max_morale_base:
+# character: pod_combat_char_max_morale_value; slot: pod_combat_slot_max_morale_value;
+# host: pod_combat_actor_max_morale_value / pod_combat_target_max_morale_value.
 
 pod_combat_max_morale_base = {
 	value = 20
 	if = { limit = { exists = global_var:pod_combat_tune_max_morale } value = global_var:pod_combat_tune_max_morale }
 }
 
-# CHARACTER scope. Exists so the slot- and host-scope wrappers can chain it off
-# a character pointer, the same reason pod_combat_char_prowess_value does.
-# POD_health_track_length is trait-derived and survives death, so no is_alive
-# gate (matching pod_combat_slot_max_hp_value).
-#
-# 6 boxes = the baseline, and each box either side is worth 5 morale. PoD's
-# ladder (POD_health_track_base_length) puts that at mortal 4 = -10 /
-# ghoul, mummy, wraith 5 = -5 / vampire, kuei-jin, risen 6 = +-0 /
-# fera, demon, fae 7 = +5 / werewolf 8 = +10, and the per-character track
-# perks (Shintai of Bone, Age of Kings, ...) ride along for free.
+# Character scope. Wound-track length is trait-derived and survives death.
+# Six boxes gives baseline morale; each extra/missing box changes it by five.
 pod_combat_char_max_morale_value = {
 	value = pod_combat_max_morale_base
 	add = {
@@ -139,10 +96,7 @@ pod_combat_char_max_morale_value = {
 	min = 1
 }
 
-# Scope wrappers. Each falls back to the bare baseline when its character
-# pointer is absent, which is the tooltip-build case (slot stories do not exist
-# during a tooltip walk, and the host workspace mirror is unset before the
-# first load_workspace of a fight).
+# Missing character scope return baseline, including before the first workspace load.
 pod_combat_slot_max_morale_value = {
 	value = pod_combat_max_morale_base
 	if = {
@@ -152,7 +106,7 @@ pod_combat_slot_max_morale_value = {
 }
 pod_combat_actor_max_morale_value = {
 	# Host-anchored: the GUI calls this as GetPlayer.MakeScope.ScriptValue, so the
-	# SV stays on the character and reaches the workspace through the pointer.
+	# SV stays on the character and reaches the workspace through that path.
 	value = pod_combat_max_morale_base
 	if = {
 		limit = { var:pod_combat_session ?= { has_variable = pod_combat_actor_char } }
@@ -161,7 +115,7 @@ pod_combat_actor_max_morale_value = {
 }
 pod_combat_target_max_morale_value = {
 	# Host-anchored: the GUI calls this as GetPlayer.MakeScope.ScriptValue, so the
-	# SV stays on the character and reaches the workspace through the pointer.
+	# SV stays on the character and reaches the workspace through that path.
 	value = pod_combat_max_morale_base
 	if = {
 		limit = { var:pod_combat_session ?= { has_variable = pod_combat_target_char } }
@@ -169,29 +123,18 @@ pod_combat_target_max_morale_value = {
 	}
 }
 
-# Effective starting morale for a freshly-seated combatant: the combatant's own
-# cap plus the per-character designer hook, floored at 1 (a slot must read alive
-# before real init - the init-time KO check treats slot_morale <= 0 as KO'd).
-# Slot-story scope (both the cap wrapper and the hook read var:slot_char).
-# Single source for BOTH seed sites: the slot constructor and the per-slot
-# init in pod_combat_group_effects.txt. A site that seeds the flat cap
-# directly instead would silently discard the hook.
+# Slot scope. Shared inititlization includes the per-character hook.
+# Floor at 1 so pre-init checks do not KO the slot.
 pod_combat_starting_morale_value = {
 	value = pod_combat_slot_max_morale_value
-	# Debug knob: an absolute seat-everyone-here number, deliberately NOT
-	# wound-track scaled. The cap knob is the one that moves the whole ladder;
-	# this one exists to pin every combatant to a known value for a test.
+	# Absolute debug starting morale, independent of wound-track scaling.
 	if = { limit = { exists = global_var:pod_combat_tune_starting_morale } value = global_var:pod_combat_tune_starting_morale }
 	add = pod_combat_starting_morale_modifier_value
 	min = 1
 }
 
 pod_combat_starting_morale_modifier_value = {
-	# Summed into the morale this combatant begins the fight with (starting
-	# morale = pod_combat_slot_max_morale_value + this, floored at 1). Positive =
-	# enters steadier, negative = enters shaken. Evaluated once, at slot creation.
-	# Morale is tracked per-combatant (each fighter KOs at its own slot_morale <= 0),
-	# so this applies to every fighter independently, not just leaders.
+	# Slot-scoped starting-morale adjustment, applied per combatant at initialization.
 	value = 0
 	# Personality traits.
 	#if = {
@@ -220,36 +163,20 @@ pod_combat_starting_morale_modifier_value = {
 	#}
 }
 
-# Soft per-team roster cap. Teams are otherwise unbounded - the duel
-# builder appends combatants by team_position with no structural limit.
-# This is a runaway guardrail (a buggy caller that loops add_ally/add_enemy
-# forever would otherwise create unbounded slot stories and, via the O(N^2)
-# turn-order pass, hang the game). Raise it freely; it is not a real design
-# limit. The GUI panels scroll past it without issue.
+# Runaway roster limit; team identity and GUI scrolling support larger teams.
 pod_combat_max_team_size = 50
 
-# Maximum equipped moves per combat_category (ATK/DEF/CTL/PWR). The
-# loadout-editor pip strips bake 4 pips per category, so a raised cap
-# works but shows more equipped moves than pips (debug-acceptable);
-# the combat window auto-widens to fit rows of 5+ moves.
+# Per-category cap. Update the loadout-editor's fixed pip count when retuning;
+# combat move rows auto-widen.
+pod_combat_max_per_category_base = 4
 pod_combat_max_per_category = {
-	value = 4
+	value = pod_combat_max_per_category_base
 	if = { limit = { exists = global_var:pod_combat_tune_max_per_category } value = global_var:pod_combat_tune_max_per_category }
 }
 
-# TOP-BAND WIDTH. The AI move roll admits only candidates scoring within this much of
-# the best-scoring admitted move, then weights them by score as before. 0 = argmax
-# only (plus ties); a value above the widest score spread is a no-op, which in practice
-# is anything past ~100.
-#
-# 10 is measured, not chosen: across two shadow fights it redirects ~18-24% of picks -
-# the ones where the AI took a move ten or more points below its own best. Re-measure
-# with the band-width sweep in parse_ai_trace.py before changing it.
-#
-# min = 0 is load-bearing. The tune-override pattern below reads the global RAW, and a
-# negative width would put the floor ABOVE the top score, emptying the band on every
-# action and stalling every AI turn silently. The never-empties-the-pool guarantee
-# holds only for width >= 0.
+# Scores distance from the best admitted move; 0 admits only tied best scores.
+# A negative width would put the floor above the best score,
+# emptying the candidate pool and stalling the AI.
 pod_combat_ai_band_width_value = {
 	value = 10
 	if = { limit = { exists = global_var:pod_combat_tune_ai_band_width } value = global_var:pod_combat_tune_ai_band_width }
@@ -257,32 +184,21 @@ pod_combat_ai_band_width_value = {
 }
 
 # Hard cap on total equipped moves across all categories.
+pod_combat_max_equipped_base = 16
 pod_combat_max_equipped = {
-	value = 16
+	value = pod_combat_max_equipped_base
 	if = { limit = { exists = global_var:pod_combat_tune_max_equipped } value = global_var:pod_combat_tune_max_equipped }
 }
 
-# Initiative roll upper bound. Every combatant's slot_initiative_base =
-# prowess + (random integer in [1, this value]), rolled once when it enters
-# the fight (every round when the reroll knob is on). See
-# pod_combat_calculate_initiative_effect in pod_combat_group_effects.txt for
-# the consuming integer_range call.
-#
-# Tuning:
-#   higher -> more chaos in turn order (prowess matters less)
-#   lower  -> more prowess-deterministic (small or no upsets)
-#   == 1   -> pure prowess ordering (near-deterministic)
+# Initiative random roll: [1, this value]. Higher values reduce prowess's influence;
+# Random Initiative roll not currently used.
 pod_combat_initiative_roll_max = {
 	value = 30
 	if = { limit = { exists = global_var:pod_combat_tune_init_roll_max } value = global_var:pod_combat_tune_init_roll_max }
 }
 
-# Effective per-turn AP cap. Equals the (overridable) base cap unless the
-# escalating-cap knob is tuned: then min(base cap, start + (round-1) *
-# increment) - e.g. start 1 / increment 1 = 1 AP in round 1, 2 in round 2...
-# HOST-scope only: it reaches the round through the host's session pointer,
-# so evaluating it from inside a fight-scope block yields the base cap instead.
-# Guarded so the GUI can evaluate it outside combat (falls back to base cap).
+# Host scope. Escalating AP reads the round through pod_combat_session;
+# fight-scope evaluation incorrectly returns the base cap. No fight = base cap.
 pod_combat_effective_ap_cap_value = {
 	value = pod_combat_base_ap
 	if = {
@@ -306,50 +222,34 @@ pod_combat_effective_ap_cap_value = {
 	}
 }
 
-# AI per-turn action ceiling (the while-count in pod_combat_ai_take_turn_effect).
-# Tracks the effective cap so a raised AP cap doesn't silently throttle the AI
-# to the base AP budget; floored at 1 so the loop always admits an action attempt.
+# AI action ceiling follows the effective AP cap; floor at 1 permits an attempt.
 pod_combat_ai_turn_action_cap_value = {
 	value = pod_combat_effective_ap_cap_value
-	# Headroom above the AP cap so net-positive accelerators (ap_gain > ap_cost)
-	# can spend the AP they refund. The turn-stalled flag (set after a no-pick pass
-	# + one alternate-target retry) stops the loop early when nothing is left to do,
-	# so this never burns idle rescans.
+	# Allow AP-gain moves to fund extra actions; the stalled flag stops exhausted retries.
 	add = 2
 	min = 1
 }
 
-# Hang-safe ceiling for the outer AI-turn drain loops (pre-PC / post-PC). Each
-# advance marks one slot acted, so real termination is <= combatant count; this
-# only trips on a future malformed no-progress state. 200 = 2x the 50-per-team
-# soft cap across both sides.
+# Outer AI-loop failsafe; normal progress ends within the combatant count.
 pod_combat_ai_outer_turn_cap_value = {
 	value = 200
 }
 
-# "Late in the turn" AP threshold for the AI's round-buff/cheap-finish nudges:
-# one below the effective cap. A script value rather than an @-define, because
-# an @-define cannot track a tunable cap. Fires at-or-below.
+# Late-turn scoring threshold follows the tunable AP cap.
 pod_combat_ai_late_ap_threshold_value = {
 	value = pod_combat_effective_ap_cap_value
 	subtract = 1
 	min = 0
 }
 
-# Auto-resolve scramble wounds. Ending a fight with the button is not free:
-# every combatant still standing takes margin-banded superficial wounds
-# through the full PoD wound pipeline, so a walkover costs the winner a
-# little and the loser a lot. Base is per SIDE; each combatant then rolls
-# jitter around it (pod_combat_auto_resolve_effect).
+# Auto-resolve wound base is per side; each standing combatant rolls jitter
+# through the PoD wound pipeline.
 pod_combat_auto_resolve_wound_base = 2
 pod_combat_auto_resolve_wound_max = 4
 pod_combat_auto_resolve_jitter_min = -1
 pod_combat_auto_resolve_jitter_max = 1
 
-# Band thresholds, expressed as multiples of the LOSING score. A side's
-# auto-resolve score spans [prowess_sum, 2 * prowess_sum], so two evenly
-# matched teams can reach the wide band but never the blowout band - the
-# top band means a genuinely outmatched loser, not a lucky roll.
+# Multiples of losing score. Equal-prowess teams cannot roll into the highest band.
 pod_combat_auto_resolve_margin_wide_value = {
 	value = scope:ar_lose_score
 	multiply = 1.5
@@ -359,11 +259,8 @@ pod_combat_auto_resolve_margin_blowout_value = {
 	multiply = 2.5
 }
 
-# Loser's side base, 2 / 3 / 4 by band. Requires scope:ar_win_score and
-# scope:ar_lose_score (saved by the roll branch; the spirit-gate verdicts
-# skip these and use wound_max directly). Banded rather than divided: both
-# scores are legitimately 0 when a side has no live prowess, and the > 0
-# guard keeps that coin flip reading as a close fight rather than a blowout.
+# Requires scope:ar_win_score and scope:ar_lose_score. Spirit use wound_max if there isn't a way to deal damage.
+# Zero-vs-zero counts as close, avoiding division and an incorrect highest band.
 pod_combat_auto_resolve_loser_wounds_value = {
 	value = pod_combat_auto_resolve_wound_base
 	if = {
@@ -383,8 +280,8 @@ pod_combat_auto_resolve_loser_wounds_value = {
 	max = pod_combat_auto_resolve_wound_max
 }
 
-# The winner's base is the loser's complement, so the pair always sums to
-# wound_max: the more decisive the win, the cleaner the winner walks away.
+# the winner/loser pair always sums to wound_max: 
+# the more decisive the win, the cleaner the winner walks away.
 pod_combat_auto_resolve_winner_wounds_value = {
 	value = pod_combat_auto_resolve_wound_max
 	subtract = pod_combat_auto_resolve_loser_wounds_value
@@ -392,30 +289,13 @@ pod_combat_auto_resolve_winner_wounds_value = {
 }
 
 ###### DESIGNER EXTENSION HOOKS ######
-# Three drop-in tuning knobs for handing a single character a flat bonus (or
-# penalty) to combat INITIATIVE, to the morale they START a fight with, or to the
-# action points (AP) they get each turn. All return 0, so out of the box they change
-# nothing - a future developer fills in a body and it flows through the minigame
-# automatically. Each is already summed into the one value that matters (the per-round
-# initiative roll; the starting slot_morale; the per-turn AP budget), so there is
-# nothing else to wire up.
-#
-# Keep each body a pure read (conditions + add / subtract, no effects). The SCOPE
-# differs by hook - see each one's comment. The two slot-scoped hooks reach the
-# character via var:slot_char; the AP hook is evaluated on the acting character
-# directly (`this` is the character). Both var:slot_char and var:pod_combat_actor_char
-# scope-switches are valid inside a script_value (engine precedent:
-# 04_ep2_accolade_values.txt).
+# Pure-read adjustments for initiative, starting morale and per-turn AP.
+# Initiative/morale hooks use slot scope (var:slot_char); AP uses acting-character scope.
 
 pod_combat_initiative_modifier_value = {
-	# Summed into this combatant's initiative each round, alongside prowess, the
-	# d[1..pod_combat_initiative_roll_max] roll, and any carried slot_init_bonus.
-	# Positive = acts sooner. Re-evaluated every round, so it may read live state.
+	# Slot scope; recalculated each round, so live character state is valid.
 	value = 0
-	# Tunable Celerity / Black Wind bonus (debug window): +N initiative per perk
-	# owned in the celerity (Vampire) or black_wind (Kuei-jin) speed tree, under one
-	# shared knob. Off (0 contribution) while the global is unset. Celerity's level-7+
-	# perks are is_ai = no, so AI combatants count at most 9 of that tree's 15.
+	# Debug bonus per Celerity/Black Wind perk; unset contributes zero.
 	if = {
 		limit = { exists = global_var:pod_combat_tune_init_celerity_bonus }
 		var:slot_char = {
@@ -443,20 +323,13 @@ pod_combat_initiative_modifier_value = {
 	# var:slot_char = { add = { value = martial  divide = 4 } }
 }
 
-# The initiative "starting line" before the roll + modifiers. Default = the
-# combatant's live prowess, so turn order rewards skill. The decouple-prowess
-# toggle (debug window) swaps it for a flat, tunable baseline
-# (pod_combat_tune_init_base, default 20) so prowess stops driving turn order.
-# Slot scope. Read only when the base is rolled - once per combatant by
-# default - so wound-track prowess penalties do not erode turn order as a
-# fight wears on unless the reroll knob is on.
+# Slot scope. Prowess or a debug baseline, sampled when initiative is rolled.
+# Later wound penalties affect it only with reroll enabled.
 pod_combat_initiative_base_value = {
 	if = {
 		limit = { has_variable = slot_char exists = var:slot_char }
 		value = var:slot_char.pod_combat_char_prowess_value
 	}
-	# Stacked wound-track penalties can drive prowess below zero; a negative
-	# starting line would invert turn order against the roll.
 	min = 0
 	if = {
 		limit = { exists = global_var:pod_combat_tune_init_decouple_prowess }
@@ -466,11 +339,8 @@ pod_combat_initiative_base_value = {
 }
 
 pod_combat_ap_modifier_value = {
-	# Summed into this combatant's AP budget at the start of EACH of its turns
-	# (budget = pod_combat_base_ap + this, floored at 0, before any ap_drain is taken
-	# off). Positive = more actions per turn. Evaluated on the ACTING character, so
-	# `this` IS the character - branch on it directly (no var:slot_char here). Read by
-	# both the PC and AI turn-setup paths; re-evaluated each turn, so it may read live state.
+	# Acting-character scope, reevaluated each turn before ap_drain.
+	# Both human and AI setup paths apply this adjustment.
 	value = 0
 	# A peerless martial talent gets an extra action:
 	# if = {
@@ -484,74 +354,44 @@ pod_combat_ap_modifier_value = {
 	# }
 }
 
-# Morale damage = HP damage * this ratio (pod_combat_route_to_pod_damage_effect spillover,
-# pod_combat_effects.txt). Script value not @-constant: @ refs inside a $PARAM$-using
-# effect don't resolve and crash (same footgun as base_hit's @ bounds in
-# pod_combat_group_effects.txt). SV-eval cost is one int read.
+# HP-to-morale damage ratio. Keep as a script value: @ references inside
+# parameterized effects can fail to resolve and crash.
+pod_combat_morale_from_hp_base_ratio = 2
 pod_combat_morale_from_hp_ratio = {
-	value = 2
+	value = pod_combat_morale_from_hp_base_ratio
 }
 
-# Mental-strain scaling for morale damage in the combat minigame.
-# Combat morale is 0-20; each point of the FINAL morale deficit (max
-# minus end-of-combat morale) translates to 5 stress applied as Mental
-# Strain (static stress: unaffected by stress-gain modifiers), inflicted
-# once at combat end via pod_combat_apply_morale_strain_effect. A fully
-# morale-broken character (deficit 20) takes 100 stress. Adjust this
-# knob to rebalance stress attrition.
+# Mental Strain per point of final morale deficit, applied once at combat end.
+# Static stress ignores stress-gain modifiers.
+pod_combat_morale_base_stress_multiplier = 3
 pod_combat_morale_stress_multiplier = {
-	value = 3
+	value = pod_combat_morale_base_stress_multiplier
 	if = { limit = { exists = global_var:pod_combat_tune_morale_stress_mult } value = global_var:pod_combat_tune_morale_stress_mult }
 }
 
-# Ally-down morale shock: morale every still-living teammate loses when a
-# combatant on their team is knocked out (pod_combat_mark_slot_ko_effect in
-# pod_combat_group_effects.txt). Designer-tunable. The loss floors at 1
-# morale - an ally falling demoralizes but never morale-breaks anyone.
-# Keep in sync with the plain-text amount in the
-# pod_combat_log_system_ally_down_shock loc row (POD_combat_static_l_english.yml).
+# Ally-KO shock floors survivors at 1 morale.
 pod_combat_ally_down_morale_penalty = 2
 
-# Stealth's hit-chance bonus while *_is_stealthed is set. Consumed by the
-# recalc-core STEALTH_BONUS param and the slot-scope recalc mirror in
-# pod_combat_tier_effects.txt. Designer-tunable. Keep in sync with the
-# hardcoded "+30" texts in POD_combat_static_l_english.yml:
-# pod_combat_status_stealth_tt, pod_combat_desc_stealth,
-# game_concept_pod_combat_stealth_desc, and the Stealth bullet in
-# pod_combat.0102.desc (help topic event). Tuning the override desyncs
-# those texts until promoted (debug-acceptable).
+# Shared stealth hit bonus.
+pod_combat_stealth_hit_base_bonus = 30
 pod_combat_stealth_hit_bonus = {
-	value = 30
+	value = pod_combat_stealth_hit_base_bonus
 	if = { limit = { exists = global_var:pod_combat_tune_stealth_bonus } value = global_var:pod_combat_tune_stealth_bonus }
 }
 
-# AI target-preference weight adds, applied in the shared selector core
-# (pod_combat_ai_select_target_core_effect in pod_combat_group_effects.txt) when the
-# acting AI's precomputed pod_combat_ai_target_pref flag matches the candidate. Both
-# stay below the kill gap the factor-3 arm opens, so kill priority always outranks
-# target preference - see the weight budget written out at that factor. Shared as
-# script_values (not @-defines) because the selector and the AI precompute live in
-# different files and @-defines are file-scoped.
+# Target-preference weights must stay below the kill-priority;
+# see pod_combat_ai_select_target_core_effect's weight budget.
 pod_combat_ai_target_pref_wounded_weight = 20
 pod_combat_ai_target_pref_threat_weight  = 25
-# Candidate thresholds the same selectors gate the adds on: a target counts as
-# "wounded" at <= this many empty damage boxes (one past the <=2 kill trigger),
-# and a "threat" at >= this much live prowess (so a target that gets badly
-# wounded stops reading as a threat).
+# Wounded threshold uses empty damage boxes; threat threshold uses live prowess.
 pod_combat_ai_target_pref_wounded_threshold = 3
 pod_combat_ai_target_pref_threat_threshold  = 12
 
-# Cap on pod_combat_log entries. The list is append-only (the GUI reverses it
-# with bottomtotop), so each push is O(1) and this cap is a memory/readability
-# bound, not a perf floor - it can be raised cheaply. Dropped entries are
-# end_story'd so the POD_combat_log_entry story doesn't leak on Charon.
+# Capped log storage; discarded entry stories must be ended.
 pod_combat_log_max_entries = 30
 
 ###### TUNING WINDOW DISPLAY ######
-# Readouts for knobs whose UNSET state is a mode, not a number (the window
-# must never call GetGlobalVariable(...).GetValue on an unset global - that
-# logs errors every frame). Each shows the tuned value or the effective
-# default the mode implies.
+# Guard unset globals before GUI reads; absence selects the default mode.
 pod_combat_tune_ap_regen_display_value = {
 	value = pod_combat_base_ap	# unset = full-bar refill, i.e. cap per turn
 	if = { limit = { exists = global_var:pod_combat_tune_ap_regen } value = global_var:pod_combat_tune_ap_regen }
@@ -588,12 +428,18 @@ pod_combat_sheet_sort_key_value = {
 		limit = { pod_combat_sheet_sort_is_trigger = { KEY = ap } }
 		add = var:ap_cost
 	}
+	# Energy is signed like morale below: cost sorts positive, restore
+	# negative, summed so a move carrying both ranks on its net.
 	else_if = {
-		limit = {
-			pod_combat_sheet_sort_is_trigger = { KEY = energy }
-			has_variable = energy_cost
+		limit = { pod_combat_sheet_sort_is_trigger = { KEY = energy } }
+		if = {
+			limit = { has_variable = energy_cost }
+			add = var:energy_cost
 		}
-		add = var:energy_cost
+		if = {
+			limit = { has_variable = energy_gain }
+			subtract = var:energy_gain
+		}
 	}
 	else_if = {
 		limit = {
@@ -609,13 +455,8 @@ pod_combat_sheet_sort_key_value = {
 		}
 		add = var:hp_heal
 	}
-	# Morale and AP swing are signed: the column shows both polarities in
-	# one cell, so the sort has to rank both. Offense sorts positive
-	# (damage dealt, AP gained), support negative (morale restored, AP
-	# taken off the target), which puts each polarity at its own end
-	# instead of stranding half the column on the absent-stat sentinel.
-	# Components are summed rather than chained, so a move carrying both
-	# (cursed_eucharist deals AND restores morale) ranks on its net.
+	# Signed net values: damage/AP gain positive, healing/AP drain negative.
+	# Sum both components for hybrid moves.
 	else_if = {
 		limit = { pod_combat_sheet_sort_is_trigger = { KEY = morale } }
 		if = {
@@ -655,20 +496,15 @@ pod_combat_sheet_sort_value = {
 		}
 		multiply = -1
 	}
-	# Post-negation override: moves lacking the sorted stat sink to the
-	# bottom in BOTH directions (negating a sentinel would float it to
-	# the top in ascending order instead). Magnitude leaves headroom over
-	# any negated real stat.
+	# Apply the missing-stat catch after negation so it sorts last in either direction.
 	if = {
 		limit = { pod_combat_sheet_sorted_stat_absent_trigger = yes }
 		value = -100000
 	}
 }
 
-# Guarded cell readouts for the sheet's optional-stat columns. The GUI must
-# never bind Var('X').GetValue on a possibly-absent story var (the per-frame
-# error.log class); cells bind these 0-defaulting SVs and gate DISPLAY with
-# a separate Var('X').IsSet visible (IsSet on unset is safe).
+# Optional-stat cells read zero-defaulting SVs; GUI visibility separately tests IsSet.
+# Binding GetValue directly on an absent varible logs per-frame errors.
 pod_combat_sheet_energy_cell_value = {
 	value = 0
 	if = { limit = { has_variable = energy_cost } value = var:energy_cost }
@@ -694,10 +530,8 @@ pod_combat_sheet_dot_rounds_cell_value = {
 	if = { limit = { has_variable = dot_rounds } value = var:dot_rounds }
 }
 
-###### CURRENT VALUE ACCESSORS ######
-# Used by GUI and triggers to read combat state.
-# Guarded with has_variable so CK3 doesn't log errors when the GUI
-# evaluates these script values outside an active combat.
+###### CURRENT VALUE ######
+# Can also run outside combat through the GUI.
 
 pod_combat_current_ap_value = {
 	if = {
@@ -708,11 +542,9 @@ pod_combat_current_ap_value = {
 	}
 }
 
-# Boundary pip index for the AP-pip strip (pod_combat_window.gui): pips N <= threshold
-# render filled, N > threshold supercharge (both gated N <= current_ap).
-# Default = the effective cap so no supercharge below it. On overcap it collapses to
-# max(0, 2*cap - current_ap), seating current_ap-cap pips at the row's right
-# edge; the min=0 clamp keeps it non-negative past 2*cap.
+# AP-pip boundary: filled through threshold, supercharged above it.
+# Overcap marks current_ap-cap rightmost pips.
+# Pips can not display values above twice the cap.
 pod_combat_pip_supercharge_threshold = {
 	value = pod_combat_effective_ap_cap_value
 	if = {
@@ -734,9 +566,6 @@ pod_combat_round_value = {
 }
 
 pod_combat_actor_hp_value = {
-	# Live-derived from the character's PoD wound track: HP = empty boxes.
-	# The has_variable + is_alive guards keep tooltip walks quiet when 
-	# no active combat / char is dead.
 	if = {
 		limit = {
 			var:pod_combat_session ?= { has_variable = pod_combat_actor_char }
@@ -760,13 +589,8 @@ pod_combat_actor_max_hp_value = {
 # Used by GUI to highlight the current actor and selected target
 
 pod_combat_current_actor_value = {
-	# A collision-free identity key for the acting slot: team_position * 2 +
-	# (enemy ? 1 : 0), derived from the two-field host pointer. The GUI
-	# compares it against each slot's pod_combat_slot_ordinal_value to
-	# highlight the actor. The interleaved formula (player/p = 2p, enemy/p =
-	# 2p+1) is a bijection for ANY team size.
-	# -1 when no actor is set so nothing highlights between turns.
-	# The -1 seed stays OUTSIDE the guard so a viewer with no fight still gets -1.
+	# Slot ordinal matches pod_combat_slot_ordinal_value for GUI comparison.
+	# The -1 outside the guard is so absent fights/actors highlight nothing.
 	value = -1
 	if = {
 		limit = { has_variable = pod_combat_session }
@@ -781,14 +605,7 @@ pod_combat_current_actor_value = {
 	}
 }
 
-# 1 while an AI actor is pending (an actor is set and no player hand-off is
-# live), else 0. This is the End Turn / Advance swap key in pod_combat_window.gui.
-#
-# Replaces the old "pod_combat_current_actor_value > 0" encoding, which spelled
-# the acting slot's ORDINAL and so hardcoded player/0 = ordinal 0 = "my turn".
-# Parity in all three states: latch up -> 0 -> End Turn (was ordinal 0); actor
-# pending with latch down -> 1 -> Advance (was ordinal > 0); no actor -> 0 ->
-# End Turn visible-but-disabled (was ordinal -1).
+# GUI End Turn/Advance selector; use control state, not the actor's board position.
 pod_combat_advance_pending_value = {
 	value = 0
 	if = {
@@ -804,16 +621,9 @@ pod_combat_advance_pending_value = {
 }
 
 pod_combat_pc_target_value = {
-	# Drives the TARGETED badge on combat cards. Reads the acting slot's
-	# persistent target choice (not the transient selected_target, which can be
-	# clobbered during AI turns) as the same collision-free identity key the actor
-	# uses (team_position * 2 + is_enemy), for comparison against each slot's
-	# pod_combat_slot_ordinal_value. Defaults to -1 when unset so nothing
-	# highlights before a target is chosen.
-	#
-	# Reached through pod_combat_my_control_slot, the VIEWER'S OWN pointer, which
-	# cleared between turns: the badge has to keep pointing at the player's choice
-	# all through the AI phase.
+	# Use the viewer's driven-slot target memory for TARGETED badges throughout
+	# AI turns; the fight's selected_target_* workspace changes during AI actions.
+	# Missing target = -1, matching no slot ordinal.
 	value = -1
 	if = {
 		limit = {
@@ -827,12 +637,7 @@ pod_combat_pc_target_value = {
 }
 
 pod_combat_actor_sup_ceiling_value = {
-	# The effective ceiling for SUPERFICIAL HP healing on the player:
-	#   max_hp - agg_damage  (i.e. track_length - aggravated_boxes)
-	# Aggravated damage blocks the top of the HP track, so only the space below
-	# this ceiling can be refilled by pod_combat_restore_hp_superficial_effect.
-	# The heal-availability trigger uses this to grey out superficial-heal buttons
-	# when the player has nothing left to heal.
+	# Used to track possible superficial wound healing.
 	if = {
 		limit = {
 			var:pod_combat_session ?= { has_variable = pod_combat_actor_char }
@@ -851,21 +656,8 @@ pod_combat_ai_heal_base_value = {
 pod_combat_ai_heal_span_value = {
 	value = 28  # incentive added at full deficit (tunable)
 }
-###### SLOT-STORY-SCOPED VALUE ACCESSORS ######
-# Caller scope = the slot story: the datamodel iteration over
-# pod_combat_active_slots (the iteration scope IS the iterated story).
-#
-# These read slot vars off the current scope (= slot story) directly
-# via var:slot_X. Used by the datamodel-driven pod_combat_datamodel_slot
-# widget for the GUI's slot card rendering, which iterates the host's
-# pod_combat_active_slots variable list and emits one card per filled
-# slot.
-#
-# All gates short-circuit on tooltip-build (where slot stories don't
-# exist - pod_combat_set_slot_char_effect's create-story block is
-# wrapped in hidden_effect_new_object, and pod_combat_active_slots
-# is populated inside the same wrap, so the list is empty during
-# tooltip preview and the datamodel iteration is a no-op).
+###### SLOT-STORY-SCOPED VALUE ######
+# Slot-story scope. Tooltip builds have no slot stories or roster entries.
 
 pod_combat_slot_max_hp_value = {
 	# Track length survives death (trait-based), so no is_alive gate.
@@ -875,23 +667,29 @@ pod_combat_slot_max_hp_value = {
 	}
 }
 
-# Per-slot heal/morale URGENCY, evaluated in a POD_combat_slot scope (this = the
-# recipient slot). base + damaged-fraction * span, mirroring the actor heal
-# curve, for pod_combat_ai_fold_recipient_urgency_effect's recipient scan and the
-# ally-swap weight. Falls back to the flat base for an unset/dead/typeless slot.
+# Recipient-slot scope. Shared urgency for AI recipient scans and ally swaps;
+# unset, dead or typeless slots return the base.
 pod_combat_slot_hp_urgency_value = {
 	value = pod_combat_ai_heal_base_value
 	if = {
-		limit = {
-			has_variable = slot_char
-			var:slot_char = { is_alive = yes }
-			var:slot_char = { POD_health_track_length > 0 }
-		}
-		add = {
-			value = var:slot_char.POD_health_track_length
-			subtract = var:slot_char.POD_empty_damage_boxes
-			divide = var:slot_char.POD_health_track_length
-			multiply = pod_combat_ai_heal_span_value
+		limit = { has_variable = slot_char }
+		if = {
+			limit = { exists = var:slot_char }
+			if = {
+				limit = { var:slot_char = { is_alive = yes } }
+				add = {
+					value = var:slot_char.POD_health_track_length
+					# Preserve PoD caps/floors through the canonical wound numerator.
+					save_temporary_value_as = pod_combat_urgency_max_hp
+					if = {
+						limit = { scope:pod_combat_urgency_max_hp > 0 }
+						value = var:slot_char.POD_total_damage_boxes
+						divide = scope:pod_combat_urgency_max_hp
+						multiply = pod_combat_ai_heal_span_value
+					}
+					else = { value = 0 }
+				}
+			}
 		}
 	}
 }
@@ -901,16 +699,15 @@ pod_combat_slot_morale_urgency_value = {
 		limit = { has_variable = slot_morale }
 		add = {
 			value = pod_combat_slot_max_morale_value
+			save_temporary_value_as = pod_combat_urgency_max_morale
 			subtract = var:slot_morale
-			divide = pod_combat_slot_max_morale_value
+			divide = scope:pod_combat_urgency_max_morale
 			multiply = pod_combat_ai_heal_span_value
 		}
 	}
 }
 pod_combat_slot_total_damage_sv = {
-	# Total wound boxes filled. Dead-char branch returns max_hp so the
-	# GUI shows a fully-filled bar instead of zero (PoD's wound SVs
-	# return 0 for dead chars via their own is_alive gate).
+	# PoD wound SVs return zero for dead characters; display a full bar instead.
 	if = {
 		limit = { has_variable = slot_char var:slot_char = { is_alive = yes } }
 		value = var:slot_char.POD_total_damage_boxes
@@ -922,7 +719,6 @@ pod_combat_slot_total_damage_sv = {
 	}
 }
 pod_combat_slot_agg_damage_sv = {
-	# Aggravated boxes. Same alive/dead branching as total_damage_sv.
 	if = {
 		limit = { has_variable = slot_char var:slot_char = { is_alive = yes } }
 		value = var:slot_char.POD_aggravated_damage_boxes
@@ -933,9 +729,6 @@ pod_combat_slot_agg_damage_sv = {
 	}
 }
 pod_combat_slot_morale_pct = {
-	# has_variable guard for consistency with the other slot SVs. Safe in
-	# practice (slot_morale is initialised at slot creation), but the guard
-	# avoids a warning if a future path queries an unfilled slot.
 	if = {
 		limit = { has_variable = slot_morale }
 		value = var:slot_morale
@@ -945,21 +738,12 @@ pod_combat_slot_morale_pct = {
 		max = 100
 	}
 }
-# Live prowess accessor, evaluated in a CHARACTER scope. Exists so slot-scope
-# and host-scope readers can chain it off a character pointer
-# (var:slot_char.pod_combat_char_prowess_value); the bare prowess promote is not
-# chainable that way. Every combat prowess read goes through here.
+# Character-scoped wrapper permits chained prowess reads through character scopes.
 pod_combat_char_prowess_value = {
 	value = prowess
 }
-# Soak and prowess are read LIVE off the combatant, never cached on the slot:
-# PoD's wound roll evaluates POD_soak_chance on the victim at damage time, and
-# the wound track's prowess penalties move mid-fight, so a snapshot would
-# disagree with the numbers the fight actually uses.
-#
-# is_alive gate: POD_soak_chance carries no gate of its own, and raw_text
-# evaluates even under the KO overlay's visible gate, so without it every card
-# would run the full soak walk on corpses.
+# Read prowess/soak live to match PoD wound calculations.
+# raw_text evaluates beneath hidden KO overlays; guards aginst dead characters before soak.
 pod_combat_slot_soak_value = {
 	if = {
 		limit = {
@@ -981,36 +765,23 @@ pod_combat_slot_prowess_value = {
 		}
 		value = var:slot_char.pod_combat_char_prowess_value
 	}
-	# Stacked wound-track penalties can drive prowess below zero.
 	min = 0
 }
 pod_combat_slot_alive_value = {
 	value = var:slot_alive
 }
-# Collision-free slot identity key: team_position * 2 + (enemy ? 1 : 0).
-# A bijection from (combat_team, team_position) to a single int for ANY
-# team size (player/p = 2p, enemy/p = 2p+1). The GUI compares this against
-# pod_combat_current_actor_value / pod_combat_pc_target_value to highlight
-# the acting slot and the PC's target. (The initiative tiebreak uses a
-# direct two-field is_enemy / team_position compare, not this ordinal, so
-# player-before-enemy ordering survives unbounded teams.)
+# GUI identity key: player/p = 2p, enemy/p = 2p+1. Initiative tie-breaking
+# compares team/position separately to retain player-before-enemy ordering.
 pod_combat_slot_ordinal_value = {
 	value = var:team_position
 	multiply = 2
 	if = { limit = { pod_combat_slot_is_enemy_trigger = yes } add = 1 }
 }
-# 1 if this slot is on the enemy team, else 0. Drives the GUI's ally /
-# enemy panel partition without a slot-index threshold.
 pod_combat_slot_is_enemy_value = {
 	if = { limit = { pod_combat_slot_is_enemy_trigger = yes } value = 1 }
 }
-# The ordinal of the slot the VIEWER is currently driving, or -1 when there is
-# none. Host-scoped (GetPlayer.MakeScope), compared against a card's own
-# pod_combat_slot_ordinal_value exactly as pod_combat_pc_target_value is.
-#
-# This is how a card answers "am I the one being driven" without asking a board
-# position. A slot-scoped SV cannot answer it - the viewer is not reachable from
-# slot scope - which is why the comparison happens GUI-side.
+# Viewer-character scope; driven-slot ordinal or -1.
+# Compare GUI-side because a slot-scoped SV cannot identify the viewer.
 pod_combat_control_slot_ordinal_value = {
 	value = -1
 	if = {
@@ -1035,11 +806,7 @@ pod_combat_slot_is_dodging_value = {
 pod_combat_slot_is_stealthed_value = {
 	if = { limit = { has_variable = slot_is_stealthed } value = 1 }
 }
-# Returns 1 when ANY retaliation charge (on-hit, on-miss, or on-any-attack) is
-# armed on the slot story. Used by the combat window's per-slot stance-icon
-# row so a single icon signals "this combatant has a retaliation
-# stance up" without distinguishing hit/miss/any/agg variants - those
-# nuances live in the icon's tooltip.
+# One icon covers all armed retaliation kinds; the tooltip distinguishes them.
 pod_combat_slot_has_retaliation_value = {
 	if = {
 		limit = {
@@ -1091,7 +858,7 @@ pod_combat_slot_is_dazed_value = {
 		value = 1
 	}
 }
-# Dominated status icon: 1 while a stolen turn is pending on the slot.
+# Dominated status icon: 1 while the stolen turn is pending on the slot.
 pod_combat_slot_is_controlled_value = {
 	if = {
 		limit = { has_variable = slot_controlled }
@@ -1101,12 +868,8 @@ pod_combat_slot_is_controlled_value = {
 pod_combat_slot_initiative_value = {
 	if = { limit = { has_variable = slot_initiative } value = var:slot_initiative }
 }
-# Tier magnitude SVs - return the tier's magnitude (small/medium/large)
-# when the corresponding tier var is set to 1/2/3, else 0. Eight variants,
-# one per (stat x direction x duration) tuple. The four HIT variants read the
-# slot story's slot_{stat}_{direction}_{duration}_tier family; the four SOAK
-# variants read the occupant's pod_combat_tier_soak_* bridge vars, which are
-# where soak tiers live (the same store POD_soak_chance rolls from).
+# Hit tiers read slot vars; soak tiers read the occupant's character bridge.
+# Both map tier 1/2/3 to the shared magnitudes; unset = 0.
 pod_combat_slot_soak_buff_round_mag_sv = {
 	if = { limit = { has_variable = slot_char exists = var:slot_char var:slot_char = { has_variable = pod_combat_tier_soak_buff_round var:pod_combat_tier_soak_buff_round = 1 } } value = pod_combat_tier_small_mag  }
 	if = { limit = { has_variable = slot_char exists = var:slot_char var:slot_char = { has_variable = pod_combat_tier_soak_buff_round var:pod_combat_tier_soak_buff_round = 2 } } value = pod_combat_tier_medium_mag }
@@ -1148,12 +911,8 @@ pod_combat_slot_hit_debuff_combat_mag_sv = {
 	if = { limit = { has_variable = slot_hit_debuff_combat_tier var:slot_hit_debuff_combat_tier = 3 } value = pod_combat_tier_large_mag  }
 }
 
-# Signed net hit-chance modifier (buffs - debuffs) over the four hit-tier mag SVs.
-# Every slot card and every slot tooltip renders this, PC and NPC alike, through
-# PODCombatSlotHitDisplay (POD_combat_log_custom_loc.txt): a card reports the
-# combatant's own buff/debuff state, not a hit chance against some particular
-# opponent. The one absolute percentage on screen is the combat window's top-row
-# PC-vs-selected-target readout, which reads the acting slot's slot_hit_chance.
+# Slot cards show net hit modifiers independent of target. The top-row readout
+# shows the absolute chance against the selected target.
 pod_combat_slot_hit_net_mod_value = {
 	value = 0
 	add      = pod_combat_slot_hit_buff_round_mag_sv
@@ -1163,10 +922,7 @@ pod_combat_slot_hit_net_mod_value = {
 }
 
 # ── PC hit-chance breakdown (top-bar tooltip) ─────────────────────────
-# Host-scoped: read on the viewer via GetPlayer.MakeScope.ScriptValue. Keyed on
-# pod_combat_my_control_slot (the slot this viewer drives) and guarded on it
-# existing, so the configure/preview passes (no slot stories) read 0 instead of
-# erroring on the chained slot-var derefs.
+# Viewer scope; guard pod_combat_my_control_slot for configure/preview evaluations.
 pod_combat_pc_stealth_bonus_value = {
 	# Stealth's +hit contribution: the bonus when that slot is stealthed, else 0.
 	if = {
@@ -1179,8 +935,7 @@ pod_combat_pc_stealth_bonus_value = {
 }
 
 pod_combat_pc_hit_net_mod_value = {
-	# Net buff/debuff contribution: final - prowess base - stealth. The remainder
-	# after the explicitly-shown terms, so the breakdown rows sum to the total.
+	# Subtract displayed terms from the total so the breakdown sums correctly.
 	if = {
 		limit = {
 			has_variable = pod_combat_my_control_slot
@@ -1193,10 +948,7 @@ pod_combat_pc_hit_net_mod_value = {
 }
 
 # ────────────────────────────────────────────────────────────────────
-# Move-story-scoped tier magnitudes for combat-log riders: collapse round-OR-combat
-# duration into one per-stat magnitude for the log's +X% Soak/Hit loc strings.
-# A move carries either the _round or the _combat tier var per stat, never both, so
-# the plain `if` chain (not else_if) over both duration vars is safe.
+# Move scope. Each stat has one duration only, so round/combat branches cannot both add.
 
 pod_combat_move_soak_buff_mag_value = {
 	if = { limit = { has_variable = soak_buff_round_tier  var:soak_buff_round_tier  = 1 } value = pod_combat_tier_small_mag  }
@@ -1235,12 +987,9 @@ pod_combat_move_hit_debuff_mag_value = {
 }
 
 
-# ─── Combat-log segment visibility probes (thin readers) ─────
-# Visibility and the preceding middot separator are baked once at push time in
-# pod_combat_push_log_effect (pod_combat_effects.txt): seg_<x>_on => segment renders,
-# seg_<x>_sep => a separator precedes it. Entry vars are immutable post-push, so each
-# SV below is one has_variable read. Rows that skip the bake carry no seg vars and read
-# 0. Condition mapping documented at the bake site.
+# ─── Combat-log segment visibility probes ─────
+# Entry-scope flags baked by pod_combat_push_log_effect: seg_<x>_on / seg_<x>_sep.
+# Entries are immutable after push.
 
 pod_combat_log_seg_typed_bonus_damage_1_visible_value = {
 	value = 0
@@ -1300,9 +1049,7 @@ pod_combat_log_retal_rider_visible_value = {
 
 
 # ─── Segment separator reads ───────────────────────────────────────
-# before_<x> returns the baked separator decision seg_<x>_sep (own
-# segment visible AND any earlier content). Its only consumer,
-# PODSegSepVisible, ANDs it with the segment's own visible SV.
+# PODSegSepVisible combines the baked separator flag with segment visibility.
 
 pod_combat_log_before_typed_bonus_damage_1_value = {
 	value = 0
@@ -1356,9 +1103,7 @@ pod_combat_log_before_retal_value = {
 		value = 1
 	}
 }
-# ─── Per-segment visibility (entry scope, thin reads) ──────────────
-# Recoil and the intent segments below: same thin-read shape as the
-# riders above.
+# ─── Per-segment visibility (entry scope) ──────────────
 pod_combat_log_seg_recoil_visible_value = {
 	value = 0
 	if = {
@@ -1472,8 +1217,6 @@ pod_combat_log_seg_marker_removed_visible_value = {
 	}
 }
 
-# Separator reads for recoil + the intent segments (same contract as
-# the rider before_* block above).
 pod_combat_log_before_recoil_value = {
 	value = 0
 	if = {
@@ -1586,21 +1329,10 @@ pod_combat_log_before_marker_removed_value = {
 		value = 1
 	}
 }
-# Loadout bookkeeping - counts the equipped moves per combat_category
-# and in total by iterating the character's pod_combat_loadout variable
-# list.
-#
-# Called on character scope. The GUI reads them via
-# GetPlayer.MakeScope.ScriptValue('...').
+# Character-scoped loadout counts.
 
-# Two layers:
-#   *_raw - live every_in_list compute, always correct; used by combat logic and loc.
-#   public - while the loadout editor is open (pod_combat_config_open) read the
-#            *_count_cache host var (refreshed on editor-open + every equip/unequip)
-#            so skills-window pip strips don't re-walk the loadout ~36x/frame;
-#            otherwise fall back to *_raw. config_open is never set mid-fight, so
-#            combat logic never reads the cache and a stale cache can't be observed.
-#            Display-mirror pattern (§7).
+# *_raw computes live; Use *_count_cache only while the editor is open
+# Refresh on open and every equip/unequip. Combat always reads live counts.
 
 pod_combat_atk_count_raw = {
 	every_in_list = {
@@ -1707,16 +1439,8 @@ pod_combat_saved_loadout_4_count = {
 ######################################################
 ######   CONDITION-SYSTEM TEAM COUNTS
 ######################################################
-# Alive combatant counts per team, read by the team-state move-condition
-# predicates - `outnumbered` and the alive_enemies_* / alive_allies_* four
-# (host scope, where pod_combat_active_slots lives). KO'd slots linger
-# in the list, hence the explicit alive filter. These are whole-side counts:
-# the ally predicates exclude the acting character by shifting their compare,
-# since a script value cannot take the actor as a parameter.
+# Host scope.
 pod_combat_alive_player_count_value = {
-	# The roster is the fight's. A script value has no ?=, so the deref is
-	# nested inside a limit-gated if - which is also what keeps this safe when
-	# it is evaluated with no fight running (the count is then 0).
 	value = 0
 	if = {
 		limit = { has_variable = pod_combat_session }
@@ -1730,9 +1454,6 @@ pod_combat_alive_player_count_value = {
 	}
 }
 pod_combat_alive_enemy_count_value = {
-	# The roster is the fight's. A script value has no ?=, so the deref is
-	# nested inside a limit-gated if - which is also what keeps this safe when
-	# it is evaluated with no fight running (the count is then 0).
 	value = 0
 	if = {
 		limit = { has_variable = pod_combat_session }

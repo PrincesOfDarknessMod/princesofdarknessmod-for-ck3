@@ -167,8 +167,8 @@ requires it:
 `pod_combat_session` is a character var too, but it is the pointer, not
 the state. `ctx_host` names the character a fight addresses its events to,
 which is a different question from where the fight's state lives. The move
-story keeps four of its own that never moved: `pod_combat_ai_score`,
-`pod_combat_ai_admitted`, `pod_combat_ai_bonus_met` and
+story keeps its own decision marks: `pod_combat_ai_score`,
+`pod_combat_ai_admitted`, `pod_combat_ai_usable_now`, `pod_combat_ai_bonus_met` and
 `pod_combat_ai_eff_ap_drain`.
 
 ```
@@ -264,6 +264,9 @@ writeback (see **Combat end** and **Deferred death resolution**).
 | `team_position` | int 0+: position within the team (0 = leader), baked at creation |
 | `slot_char` | character ref occupying the slot |
 | `slot_alive` | 1 while in play, 0 when KO'd |
+| `slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp` | Wound-bar display only: filled boxes, aggravated boxes and capacity |
+| `slot_mirror_raw_sup` / `slot_mirror_raw_agg` | Raw character wound counters at the last mirror write; absent counters sampled as zero, without rounding or clamping |
+| `slot_mirror_alive` | Character liveness at the last mirror write (1 living, 0 dead/missing); independent of morale KO and `slot_alive` |
 | `slot_morale` | current Morale |
 | `slot_hit_chance` | live hit chance (20–95) |
 | `slot_base_hit_chance` | hit chance before any tier effects |
@@ -421,7 +424,7 @@ latch a stale bonus onto the next action.
 | `pod_combat_bonus_morale_damage` | magnitude | §7, folded into the base deal call |
 | `pod_combat_bonus_self_heal` / `_heal_target` | magnitude | §9b |
 | `pod_combat_bonus_self_morale_heal` | magnitude | §9b |
-| `pod_combat_bonus_energy_gain` / `_energy_drain` | magnitude | §9b |
+| `pod_combat_bonus_energy_gain` / `_energy_drain` | magnitude | §9b; the unconditional `energy_gain` column folds into the gain transient there, so one pool write carries column and clauses alike |
 | `pod_combat_bonus_dot` / `_morale_dot` | magnitude | §13b-bonus / §13b-bonus-morale |
 | `pod_combat_bonus_ap_refund` / `_ap_drain` | magnitude | §14 |
 | `pod_combat_bonus_retaliate_boost` | magnitude | §13 arming |
@@ -479,7 +482,7 @@ var, so the log dispatcher's flag compares keep matching.
 | `pod_combat_last_heal_amount` | last HP heal applied |
 | `pod_combat_last_morale_damage_amount` / `_last_morale_heal_amount` | last morale damage / heal |
 | `pod_combat_last_self_damage` | post-soak recoil damage applied to the actor |
-| `pod_combat_last_energy_gain` / `_last_energy_drain` | requested conditional energy bonus amount when that bonus fired; the splat helpers do not export the pool-capped applied delta |
+| `pod_combat_last_energy_gain` / `_last_energy_drain` | requested energy amount when a restore or drain fired - the gain is the `energy_gain` column plus any met clause (a feeding weapon adds its share at §9c); the splat helpers do not export the pool-capped applied delta |
 | `pod_combat_last_ap_refund` | AP given back by a fired `ap_refund` bonus (§14). Exists so the log can render the refund only when the condition actually held, rather than off the move's declared `bonus_effect` |
 | `pod_combat_last_ap_drain` | effective AP drain applied to the target mirror at §14: the base `ap_drain` plus a fired `ap_drain` bonus. The log reads this rather than the move's base var, so a bonus-only drain renders at all and a base+bonus stack can read as a full stun. Only written when the total is above 0, and only inside §14's control-failure guard |
 | `pod_combat_last_retal_damage` | last retaliation damage |
@@ -570,7 +573,7 @@ ordering rules** below before moving anything.
 | §7 | Morale damage (`pod_combat_deal_morale_damage_effect`, or a team variant). Own pipeline: auto-hit, no guard, no soak, but stealth/dodge still block. Rider-gated by `morale_damage_condition`. A held morale bonus folds into the same deal call as the base amount (one stance consumption, combined total logged), including the `team_enemy` / `team_all` broadcasts. |
 | §8 | Self-damage to the actor (`pod_combat_deal_hp_damage_bypass_guard_effect`, `REASON = duel`): generic duel-class wound damage, normally superficial and soakable, while PoD retains authority to promote/classify it and decide aggravated soakability. Rider-gated by `self_damage_condition`. Lifts the post-soak amount into `pod_combat_last_self_damage`; the attack's result axes are untouched (recoil never overwrites the main outcome). |
 | §9 | HP heal. `heal_type = aggravated` heals aggravated boxes too; else superficial (caps at `max_hp − agg_damage`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. There is deliberately no `team_all` arm (it would mend the enemies the same move just hit); such a move heals only its caster, so a heal is never legal on `team_all`. Rider-gated by `heal_condition`; a drain heal must explicitly set `heal_condition = on_hp_damage`, as the current drain moves do. Must run **after** §6 so the rider reads the right outcome. The rider reads the AGGREGATE result, which covers every packet: a typed rider that lands while the move's own packet was fully soaked, or even while the victim was immune to the move's class, still satisfies `on_hp_damage`. The same is true of the §9c weapon riders, the AoE `pod_combat_aoe_any_hp_damage` latch and §15's contact partition. |
-| §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool, and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
+| §9b | Conditional bonus delivery: `self_heal` restores superficial HP to the actor, `heal_target` to the target, `self_morale_heal` restores the actor's morale (actor only - the unconditional `morale_heal` column already covers allies), `energy_gain` restores the actor's splat pool - the unconditional `energy_gain` column folds into the same single write here, actor-only whatever the move targets - and `energy_drain` drains the target outside practice. These are independent of the base §9 heal and lift fired energy amounts for the log; the morale heal needs no log wiring of its own because the primitive already writes `pod_combat_last_morale_heal_amount`. |
 | §10 | Morale heal (`pod_combat_restore_morale_effect`). Routes to actor, `single_ally`, `single_pc`, or `team_ally`. No rider condition. |
 | §12 | Non-tier stance flags: `set_guard`, `dodge`, `stealth` (idempotent). They apply to the selected target for `single_ally`, otherwise to the actor. (`remove_guard` is a hostile target strip in §5/§5b2.) |
 | §12b | `team_ally` only: broadcast the move-declared §5c/§12 tiers and stance flags, plus the soak bridge var, to all ally slots (`pod_combat_apply_team_ally_buffs_effect`). A condition-granted `stance_*` bonus is actor-only and is not part of this broadcast. |
@@ -608,7 +611,7 @@ these hold:
 - `pod_combat_last_self_damage` is set (recoil is applied once to the
   actor, not per AoE target, so the per-target rows never carry it), or
 - `pod_combat_last_energy_gain` / `pod_combat_last_energy_drain` is set
-  (energy bonuses apply once at §9b, after the per-target loop), or
+  (energy restores and drains apply once at §9b, after the per-target loop), or
 - `pod_combat_last_ap_refund` is set (the refund is credited once at
   §14, after the per-target pushes, so without this arm an AoE move's
   refund would never get a row), or
@@ -852,7 +855,7 @@ resource of the character it actually happens to, via PoD's shipped
 
 | Surface | Whose resource | How the number is right |
 |---|---|---|
-| Move card, `energy_gain` bonus and the weapon override line | the reader (`GetPlayer`) | multiplied by `splat_energy_multiplier` in loc, like the shipped cost line |
+| Move card and loadout sheet: the `energy_gain` column, the `energy_gain` bonus and the weapon override line | the reader (`GetPlayer`) | multiplied by `splat_energy_multiplier` in loc, like the shipped cost line |
 | Combat log, gain row | the entry's **actor** - an AI's gnosis must not read as the player's blood | `pod_combat_scale_energy_to_splat_effect` converts it at the lift, so the row prints real points |
 | Combat log, drain row | the entry's **target** - it is their pool that shrinks | same, scaled to the target |
 | Move card, `energy_drain` bonus | nobody - stays generic | the card is drawn before a target exists, so any resource word would be a guess |
@@ -1528,7 +1531,10 @@ through `pod_combat_initiative_modifier_value`.
 effect also clears `slot_has_acted` and the round-duration once-per list
 `slot_moves_used_round` on every alive slot, then stamps each slot's
 display rank (`slot_turn_order`, rank 1 = highest) and rebuilds the GUI
-initiative track list `pod_combat_turn_order_list`.
+initiative track list `pod_combat_turn_order_list` - but only when the
+membership or order moved. Each listed slot keeps the rank it was built at
+in `slot_turn_order_built`, and `pod_combat_turn_order_list_stale_trigger`
+compares that snapshot against the fresh ranks.
 
 When the debug override `global_var:pod_combat_tune_init_reroll` is set,
 `slot_initiative_base` is re-rolled at every round start instead of
@@ -1603,11 +1609,22 @@ mind-controlled (stolen) turn, run the per-AI personality precompute
 once, select a target (controlled-aware), load the workspace, record the
 focus-fire mark, set AP, then run the moves via
 `pod_combat_ai_take_turn_effect`. Round buffs clear before workspace
-load. Each action attempt saves immediately after execution, after an
-unrestricted fallback, and after an alternate-target retry, so KO and
-victory state is committed before another action can begin. The final
-save is followed by round-debuff expiry, leftover-AP storage,
-single-turn control consumption, the acted marker, and a victory check.
+load. Each selection ends at `pod_combat_ai_save_workspace_if_needed_effect`:
+executed moves and uncertain paths receive full actor/target writeback,
+including KO handling. An empty restricted selection may omit writeback
+only when the existing retry preflight proves every mirrored field unchanged
+and neither slot has a pending KO. Victory and changed-HP maintenance run
+at every boundary, including turn end.
+
+The saved numeric scope value `pod_ai_workspace_synced` licenses omission
+of the repeated turn-end writeback. It resets at AI-turn entry, full and
+prepared selector entry, and workspace loads; a completed save or the
+inert-writeback proof sets it. It resets again before round-debuff expiry.
+It is local to the synchronous AI turn, not persistent fight state. New
+mutations between a save and the turn-end boundary must invalidate it.
+The maintenance helper explicitly binds `scope:host` for the following
+acted-slot matcher. Debuff expiry, the acted marker, leftover-AP storage,
+single-turn control consumption, and final victory check retain their order.
 
 The target roll (`pod_combat_ai_select_target_core_effect`) weights base
 1, +50, a **x3 kill priority**, +40 cross-turn focus-fire and the
@@ -1617,9 +1634,7 @@ kind of damage (`pod_combat_ai_can_dmg_hp` / `_mor`) - never two stacking
 factors, which would reward a state rather than an opportunity. Its
 admission set lives in `pod_combat_ai_target_candidate_trigger`, shared by
 the roll and by the trace's candidate count so the two cannot drift.
-Budget: worst non-kill 116 against 153 for a kill, a 37-point margin. After the moves it saves the
-workspace, marks the slot acted (consuming any one-shot control marker),
-and runs the victory check.
+Budget: worst non-kill 116 against 153 for a kill, a 37-point margin.
 
 Each action attempt begins with two target checks, then resolves the move
 in three steps - ADMIT, SCORE, ROLL.
@@ -1631,11 +1646,61 @@ in three steps - ADMIT, SCORE, ROLL.
    snap recomputes the finishable summary at its own site (the previous
    action's copy is stale, and on a turn's first attempt belongs to the
    previous ACTOR), restricts the selector's pool to finishable slots for
-   exactly one call. `pod_combat_ai_snap_blocked` does not generally
+   exactly one call. If the target and loadout stay unchanged, the following
+   action summary consumes that fresh scan once instead of scanning again.
+   The saved numeric `pod_ai_finishable_ready` marker resets at attempt
+   entry/exit and snap entry, after consumption, on any workspace load, and
+   before backstop loadout seeding. A successful snap reloads the workspace
+   and therefore retains a fresh scan for the new target. Blocked snaps,
+   full-preparation retries, and alternate-target retries also scan afresh.
+   `pod_combat_ai_snap_blocked` does not generally
    limit snapping to once per turn; it prevents the pathological
    snap/retry oscillation after an alternate-target retry. Both run
    BEFORE the intent chooser, so the whole move pipeline sees the final
    target.
+
+Full selection runs `pod_combat_ai_prepare_selection_effect` before choosing a
+move. Preparation snapshots actor HP, maximum HP and superficial-healing ceiling
+into `pod_combat_ai_actor_hp`, `_actor_max_hp` and `_actor_sup_ceiling`; target
+scoring reads `pod_combat_ai_tgt_hp`. It also computes recipient urgency, healing
+weights, bonus-clause results, usable tiers and intent counts. The tier/counter
+walk clears `pod_combat_ai_usable_now` on every loadout move before its AP filter,
+then marks moves that pass the full dynamic usability gate. These are decision
+scratch values; authoritative health and final live validation remain unchanged.
+
+Recipient HP and morale urgency are each evaluated once per living same-team
+slot in a preparation pass. The raw `u_hp` / `u_mor` values count beneficiaries
+before the critical player-character bonus is applied; otherwise a priority
+bonus could make a fully restored recipient count as benefiting from a heal.
+The adjusted values then feed the existing ally/team maxima. These snapshots
+are overwritten for each recipient and are not reused across actions.
+
+The shared urgency script values also serve ally-target selection. Each formula
+uses a temporary math value for its maximum, reused within that evaluation.
+HP urgency divides canonical `POD_total_damage_boxes` by the sampled maximum;
+this is equivalent to maximum minus remaining HP and retains PoD's wound-box
+clamps and floors. The canonical damage accessor still performs its own health
+track reads. Morale urgency reuses its maximum for subtraction and division.
+No maximum or urgency is stored on the slot or reused between evaluations.
+
+Only an empty restricted pool can reuse that preparation for the immediate
+same-target unrestricted retry. Before the intervening workspace save, preflight
+proves both matching slots refer to the loaded characters, every mirrored field
+has the same value/presence, and neither slot needs KO marking. After saving,
+reuse also requires the same fight, actor, target and AP, no pick/execution,
+a standing actor and no ended/fizzled turn. Any failed proof uses full preparation.
+The save boundary is never skipped or moved. The temporary readiness value is reset at
+attempt entry and consumed before retry selection, so old saved scopes alone
+cannot authorize reuse. New fields in workspace writeback must be added to both
+actor and target proof triggers; numeric/flag values compare directly, while
+presence-only fields compare presence. This is deliberately conservative when
+an absent source would merely preserve an existing destination value.
+
+Both routes run `pod_combat_ai_select_prepared_move_effect`: rebind host/actor
+scopes, clear picked proof, choose intent, rebuild admission/scores/band, roll,
+and perform final live validation before execution. A rejected pick, alternate
+target, new action or new actor gets full preparation. No gameplay mutation may
+intervene between the reusable preparation and the new selection.
 
 1. **Intent.** `pod_combat_ai_choose_intent_effect` picks one tactical
    intent (pressure / break / setup / stabilize), `steal` for a
@@ -1938,7 +2003,7 @@ segments**, each separated by a ` · ` divider:
 | `PODCombatLogSegApGain` | `ap_gain` |
 | `PODCombatLogSegApDrain` | a drain that applied (`ap_drain` > 0 on the entry — the base plus a fired `ap_drain` bonus; a drain reaching `pod_combat_base_ap` renders as 0 AP next turn) |
 | `PODCombatLogSegInitDebuff` | `initiative_debuff` |
-| `PODCombatLogSegEnergyGain` | a fired `energy_gain` bonus (`energy_gain` > 0 on the entry) |
+| `PODCombatLogSegEnergyGain` | an energy restore that applied: the `energy_gain` column and/or a fired bonus (`energy_gain` > 0 on the entry) |
 | `PODCombatLogSegEnergyDrain` | a fired `energy_drain` bonus (`energy_drain` > 0 on the entry) |
 | `PODCombatLogSegApRefund` | a fired `ap_refund` bonus (`ap_refund` > 0 on the entry) |
 | `PODCombatLogSegMarker` | `marker_modifier` (the marker this move applied to its user) |
@@ -1992,7 +2057,7 @@ The bake conditions:
   only appear on a single-target row or the AoE wrap-up row. The
   energy bonus, AP-refund and AP-drain segments follow recoil's shape:
   entry-captured (`energy_gain` / `energy_drain`, lifted at §9b only
-  when the bonus actually applied — the drain lift sits inside the
+  when a restore or drain actually applied — the drain lift sits inside the
   practice gate; `ap_refund` and `ap_drain`, lifted at §14), not
   burst-gated, and cleared per push so at most one row per move carries
   them. `ap_drain` is outcome-style even though most drains are declared
@@ -2057,7 +2122,7 @@ state fired that the per-target rows missed — a self-heal
 (`pod_combat_last_heal_amount`), self-morale-heal
 (`pod_combat_last_morale_heal_amount`), a retal overlay
 (`pod_combat_last_retal_fired`), recoil self-damage
-(`pod_combat_last_self_damage`), a fired energy bonus
+(`pod_combat_last_self_damage`), an energy restore or drain
 (`pod_combat_last_energy_gain` / `_drain`), or an AP refund or drain
 (`pod_combat_last_ap_refund` / `_last_ap_drain`). In that case the wrap-up row is pushed
 carrying just those riders. Non-AoE moves never set the tripwire, so
@@ -2671,16 +2736,43 @@ modifier mid-fight must therefore call `force_character_skill_recalculation`
 on that character itself, or no `prowess` read - the stash, the hit
 formula, initiative, auto-resolve, the slot card - will ever see it.
 
-The one sanctioned exception is the **wound-bar display mirror**
-(`slot_mirror_total` / `slot_mirror_agg` / `slot_mirror_maxhp`): the
-combat window's wound pips read these plain slot vars for perf instead
-of re-deriving the SV chain ~80x per slot card per frame. They are
-display-only and rewritten at every HP-change chokepoint (the
-`pod_combat_save_workspace_effect` and `pod_combat_tick_dots_effect`
-tails, plus per-slot seeding at init) before the GUI next renders, so
-they cannot go stale. Game logic and the AI never read the mirror. Do
-not point the GUI back at the live SVs — that reintroduces the per-frame
-fanout this mirror exists to remove.
+The **wound-bar display mirror** (`slot_mirror_total` / `slot_mirror_agg` /
+`slot_mirror_maxhp`) lets the combat window read plain slot variables rather
+than evaluate the nested wound formulas for every pip. Game logic and AI
+continue reading authoritative character health.
+
+At workspace save, `pod_combat_refresh_changed_hp_mirrors_effect` samples each
+slot's current maximum HP, raw superficial/aggravated counters (absent = zero),
+and character liveness. It rebuilds the mirror only when these inputs differ
+from its saved `slot_mirror_raw_sup`, `slot_mirror_raw_agg`, `slot_mirror_alive`
+and `slot_mirror_maxhp`, or any mirror/snapshot variable is missing. This catches
+external healing, aggravated-to-superficial conversion, death and maximum-HP
+changes at the same post-action boundary without adding mutation hooks.
+
+Maximum HP is still evaluated once per slot: perks, splat changes and modifiers
+can change it independently of wound operations. Unchanged living slots avoid
+four further track-length evaluations and the mirror writes. Changed slots
+use the original total/aggravated script values, retaining their clamps,
+floors and dead-character full bars, and reuse the sampled maximum. Raw input
+snapshots must not be rounded or clamped. If the canonical wound formulas gain
+other inputs, extend this cache's comparison contract too.
+
+Slot initialization (including summons), round-end DoT and auto-resolve retain
+full mirror refreshes, which also seed the comparison snapshots. Missing
+snapshots on an existing slot force a refresh automatically. Freshness remains
+boundary-based; this does not add an immediate GUI update after an external
+interaction. Do not point wound pips back at the live script values.
+
+The **portrait form cache** stores the answers of PoD's two umbrella form
+checks as `pod_combat_form_*` character flags. Slot initialization seeds it,
+and completed shapeshift interactions refresh the affected seated character.
+Shared form removers/applications and Golconda transitions invalidate it before
+changing inputs, so the portrait wrappers use their live predicates until a
+final refresh. Player/AI turn setup rewrites only invalid caches. Ordinary HP
+refreshes do not evaluate portrait forms. Both teardown paths clear the flags;
+the three-day expiry remains a leak guard. New effects that change portrait
+form inputs while combat is paused must invalidate before mutation and may
+refresh the final state with `pod_combat_refresh_char_form_cache_effect`.
 
 ### DoT ticks at round end and must respect the slot-loop rules
 
@@ -2743,6 +2835,29 @@ per-segment renderers (`PODCombatLogSeg<X>`) and the result-text
 dispatcher all carry this guard. When you add a
 renderer or a new branch, lead with the same guard.
 
+### Combat move-button validation
+
+`pod_combat_execute_move.is_valid` gates active combat before reading turn
+ownership, then gates an unfinished fight and the clicking client's turn,
+then the controlled body's KO status, then the move and actor scopes. Only
+that successful path enters `POD_can_execute_combat_move_trigger`. Each failed
+branch returns false explicitly; a skipped `trigger_if` alone would pass.
+The expensive move checks therefore do not run while the player cannot act.
+Root remains the clicking client and the actor remains the driven combatant.
+The KO gate applies only to move commands: End Turn must remain available.
+
+All four categories retain explicit validity bindings for enabled state,
+background grayscale, and the mutually exclusive gray/colored labels. The
+ATK native-disabled-rendering test left unusable buttons colored in-game;
+these custom visuals therefore require the explicit bindings. Removing them
+is not a valid optimization without a verified replacement for disabled
+appearance. No persistent validity state is stored on characters or moves.
+
+The prerequisite gate above remains active for every category. Compare
+fixed-duration profiler captures with the same loadout, separating hovered
+and unhovered runs; four bindings do not establish four independent engine
+evaluations.
+
 ### Move tooltip variants
 
 The move card (`pod_fancy_combat_move_tooltip`, declared in
@@ -2788,8 +2903,8 @@ blocking gate needs a predicate, a call from the gate, and a line in the
 matching `_tt` SGUI - otherwise the move greys out with no reason shown.
 
 Cost note: both SGUI calls sit inside a `tooltipwidget` subtree, which
-the engine builds only while the widget is hovered, so the documented
-four-`IsValid`-per-move-button-per-frame hotspot is unaffected. The
+the engine builds only while the widget is hovered. These calls are separate
+from the move-button validation bindings described above. The
 loadout editor's `enabled` bindings do add one per-row per-frame call
 (`pod_combat_loadout_room`) - cached count vars and list membership, 
 never the unlock dispatcher.
@@ -4026,11 +4141,7 @@ The append-only recipe:
    with the move story as its root, which is the standard engine idiom
    (vanilla uses it heavily, e.g. `[second.Custom('quirk_pos_noun')]`).
    So a shared dispatcher is fine as long as it reads its own root
-   rather than a saved scope. `pod_combat_log_seg_marker` is the worked
-   example: one key-agnostic line that re-roots
-   `PODCombatAppliedMarkerName` onto `move` for the marker's name.
-   To reuse a display name without any dispatcher, interpolate the
-   other key with `$other_loc_key$`.
+   rather than a saved scope.
 4. **Widget pair** in `pod_combat_window.gui` using
    `PODSegSepVisible` / `PODSegVisible` / `PODSegText`, mounted at the
    **same position the bake block occupies** — separators are decided
@@ -4142,13 +4253,7 @@ To add another marker key, in lockstep:
    must be character-identical: both switches compare a literal, so a
    mismatch stamps nothing and reads nothing, with no error either side.
    Treat the set of marker keys as one closed vocabulary.
-4. **Name dispatchers**: a case in `PODCombatCondMarkerName` (switches
-   on `cond_param`), in `PODCombatAppliedMarkerName` (switches on
-   `marker_modifier`) and in `PODCombatRemovedMarkerName` (switches on
-   `remove_marker`), all in `POD_combat_log_custom_loc.txt`. All
-   resolve to the modifier's own name key, so no marker's flavour gets
-   baked into a shared phrasing.
-4b. **The strip switch**: a case in `pod_combat_strip_marker_effect`
+4. **The strip switch**: a case in `pod_combat_strip_marker_effect`
    (`pod_combat_move_effects.txt`), which section 12b-marker calls. It has
    no fallback arm, so a key missing here strips nothing, silently.
 5. **Nothing in the combat log.** `pod_combat_log_seg_marker` and

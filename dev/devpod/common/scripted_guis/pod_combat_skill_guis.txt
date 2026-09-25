@@ -31,57 +31,36 @@ pod_combat_execute_move = {
 	}
 
 	is_valid = {
-		pod_combat_is_active_trigger = yes
-		# Authority, not mode: this is a command surface, so it must ask whether the
-		# live turn belongs to the CLICKING client. Identical answer today.
-		pod_combat_is_my_turn_trigger = yes
-		# ...and that the body being played is still standing. The AI path has had
-		# this since its own turns "kept spending a downed actor's remaining
-		# actions" (pod_combat_current_actor_is_down_trigger, gating
-		# pod_combat_ai_take_turn_effect and pod_combat_ai_try_action_effect); the
-		# human command surface never got the equivalent. Retaliation, recoil and a
-		# self-including AoE can all kill the actor mid-turn, and nothing between
-		# there and the commit drops the latch, so without this the bar stays lit on
-		# a slot with slot_alive = 0 and the leftover AP is spendable out of a
-		# corpse. In a FATAL duel the occupant can be genuinely dead, and the next
-		# click then errors on var mutation against a dead reference.
-		#
-		# Invisible with one marked slot, which is why it lasted: there its KO IS
-		# victory check 2, so is_over fires in the same effect and the bar dies on
-		# the same frame. With a second controlled body still alive, check 2 does
-		# not fire and the turn just sits there.
-		#
-		# End Turn deliberately does NOT get this guard - a downed body's turn must
-		# stay committable or the round cannot advance.
-		#
-		# On the COMMAND SURFACE ONLY. Do not auto-commit from the KO site
-		# instead: pod_combat_mark_slot_ko_effect runs inside an every_in_list over
-		# the roster mid-move-chain, and pod_combat_process_group_turns_effect saves
-		# the workspace BEFORE it drops the latch, so committing from there recurses
-		# into its own prologue.
-		NOT = { pod_combat_my_slot_is_ko_trigger = yes }
-		# The unlock proof inside this trigger fails CLOSED, so the actor must be a
-		# character whose pod_combat_unlocked_moves has been baked - see the bake
-		# loop in POD_combat_finalize_duel_effect, which now covers every marked
-		# slot for exactly this reason. A saved scope, not a var chain: the
-		# validator re-splices $ACTOR$ into a scope switch and again into
-		# pod_combat_move_dynamic_gates_trigger.
-		#
-		# trigger_if, not sibling exists checks: CK3 trigger siblings do not
-		# short-circuit, so a plain `exists` next to the call READS like a guard
-		# while gating nothing. Harmless from the four move-bar buttons (their
-		# datamodel is the same actor chain, so a broken link yields zero buttons
-		# rather than one with an unresolved scope) - but the first caller that is
-		# not a datamodel item would splice both scopes unresolved into ~40 derefs.
+		# Trigger siblings do not short-circuit: reject unavailable commands before
+		# evaluating the per-move validator against the current workspace.
 		trigger_if = {
-			limit = {
-				exists = scope:story
-				exists = scope:actor
+			limit = { pod_combat_is_active_trigger = yes }
+			trigger_if = {
+				limit = {
+					NOT = { pod_combat_is_over_trigger = yes }
+					pod_combat_is_my_turn_trigger = yes
+				}
+				trigger_if = {
+					# KO blocks move commands only. End Turn must remain usable;
+					# auto-committing from the KO site would recurse into workspace saving.
+					limit = { NOT = { pod_combat_my_slot_is_ko_trigger = yes } }
+					trigger_if = {
+						limit = {
+							exists = scope:story
+							exists = scope:actor
+						}
+						# The validator splices ACTOR into scope switches, so pass the saved
+						# combatant scope, while authority above stays on the clicking client.
+						POD_can_execute_combat_move_trigger = {
+							STORY = scope:story
+							ACTOR = scope:actor
+						}
+					}
+					trigger_else = { always = no }
+				}
+				trigger_else = { always = no }
 			}
-			POD_can_execute_combat_move_trigger = {
-				STORY = scope:story
-				ACTOR = scope:actor
-			}
+			trigger_else = { always = no }
 		}
 		trigger_else = { always = no }
 	}
@@ -1406,6 +1385,10 @@ pod_combat_move_desc = {
 			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_perk  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_perk_target }
 			else_if = { limit = { scope:story = { var:cond_predicate = flag:target_known_secret } } custom_tooltip = pod_combat_desc_cond_target_known_secret }
 			else_if = { limit = { scope:story = { var:cond_predicate = flag:fera_form } } custom_tooltip = pod_combat_desc_cond_fera_form }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:wyrm_servant var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_wyrm_servant_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:wyrm_servant var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_wyrm_servant_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:is_fera  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_is_fera_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:is_fera  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_is_fera_target }
 			
 		}
 
@@ -1551,6 +1534,13 @@ pod_combat_move_desc = {
 		if = {
 			limit = { scope:story = { has_variable = morale_heal } }
 			custom_tooltip = pod_combat_desc_morale_heal
+		}
+		# Unconditional energy restore, actor-only (its clause twin renders in
+		# the bonus ladder). Viewer-relative like the cost line: the loc scales
+		# the agnostic number to the reader's own resource.
+		if = {
+			limit = { scope:story = { has_variable = energy_gain } }
+			custom_tooltip = pod_combat_desc_energy_gain
 		}
 
 		# Capability callouts. Each fires when its flag is ABSENT - 
@@ -1887,13 +1877,6 @@ pod_combat_move_desc = {
 		# print clause 1 twice.
 		if = {
 			limit = { scope:story = { has_variable_list = bonus_clauses } }
-			# Cumulative framing, worth a line only once there is more than one
-			# clause to add up. No totals anywhere: a potential-max advertises the
-			# hidden clauses, and a met-sum changes between renders.
-			if = {
-				limit = { scope:story = { variable_list_size = { name = bonus_clauses  value >= 2 } } }
-				custom_tooltip = pod_combat_desc_clause_header_multi
-			}
 			# The walk has to run in story scope - this SGUI is scope = character, so
 			# a bare every_in_list iterates nothing - while each line has to be
 			# emitted back on the viewer, whose perks and weapon those lines read.
