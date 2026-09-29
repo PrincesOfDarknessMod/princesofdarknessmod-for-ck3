@@ -9,7 +9,7 @@ This mod is inspired by Vampire: the Requiem, Vampire: the Masquerade, Dark Ages
 
 More details on the Paradox Plaza Crusader Kings III User Mod Forum https://steamcommunity.com/sharedfiles/filedetails/?id=2216659254&searchtext=
 
-You can support us on Patreon(which includes access to our developer build of the mod) https://steamcommunity.com/sharedfiles/filedetails/?id=2216659254&searchtext=
+You can support us on Patreon. https://www.patreon.com/princesofdarkness
 
 You can join our Discord server. https://steamcommunity.com/sharedfiles/filedetails/?id=2216659254&searchtext=
 

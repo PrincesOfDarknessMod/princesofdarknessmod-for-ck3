@@ -1,87 +1,74 @@
-﻿# Per-slot story_cycle (POD_combat_slot) lifecycle + accessor helpers.
-# Caller scope is the combat host; stories live on Charon (POD_wraith_01).
-#
-# Slot identity = (combat_team flag:player/enemy, team_position int 0+,
-# 0 = leader). No flat slot_index. Addressing is by ITERATION over the
-# single host list pod_combat_active_slots - no per-position pointers and no
-# fixed positional cap; team size is guarded by pod_combat_max_team_size.
-# The only pointer vars are the two leaders
-# (pod_combat_pc_slot = player/0, pod_combat_enemy_leader_slot = enemy/0),
-# derived once at finalize for the many direct-leader call sites.
-#
-# Field catalogue / init defaults / absence-as-signal list: COMBAT_REFERENCE.info §3.
+﻿# Per-slot lifecycle and variable-setting effects. Host scope unless specified; stories live on Charon.
+# Slots are addressed by (combat_team, team_position), with position 0 as leader.
+# The fight owns the roster and leader pointers; its on_end cascade ends the slots.
+# Field defaults and absence-as-signal rules: COMBAT_REFERENCE.info section 3.
+
+
 
 
 ###################
-###### CLEANUP
+###### SLOT VARIABLE EFFECTS
 ###################
-
-# end_story frees the slot stories from Charon's owned-stories list (same
-# teardown as log entries / sc_context). The leader-pointer removes are
-# no-ops if a fight never set them. Caller must be in host scope.
-pod_combat_clear_slot_stories_effect = {
-	every_in_list = {
-		variable = pod_combat_active_slots
-		end_story = yes
-	}
-	clear_variable_list = pod_combat_active_slots
-	clear_variable_list = pod_combat_turn_order_list
-	remove_variable = pod_combat_pc_slot
-	remove_variable = pod_combat_enemy_leader_slot
-}
-
-
-###################
-###### ACCESSOR HELPERS
-###################
-# Write helpers operating on the CURRENT slot story. Callers are either
-# inside an `every_in_list = pod_combat_active_slots` loop, or have
-# scope-switched into a leader pointer via `var:pod_combat_pc_slot = { ... }`
-# - the `var:` prefix is mandatory; without it CK3 reads the pointer name as
-# an effect and silently drops the block.
+# Slot-story scope. Pointer dereferences require var: (for example,
+# var:pod_combat_session.var:pod_combat_pc_slot); bare names parse as effects.
 
 pod_combat_set_slot_alive_effect = {
 	# $VALUE$ = 0 or 1
 	set_variable = { name = slot_alive value = $VALUE$ }
 }
 
-# Universal slot-var setter: writes slot_$NAME$ on the current slot story.
-#   $NAME$  = stat short name (morale, hit_chance, energy_used, ...)
-#   $VALUE$ = literal, scope:, or var: reference.
-#
-# $VALUE$ is captured via save_scope_value_as FIRST so scope:/var: refs
-# resolve to the caller's value before the write flips into the slot story.
+# $NAME$ = stat suffix; $VALUE$ = numeric literal, scope: or var: reference.
+# Values pass through save_scope_value_as; do not use this setter for flag variables.
 pod_combat_set_slot_var_effect = {
 	save_scope_value_as = { name = pod_combat_slot_var_temp value = $VALUE$ }
 	set_variable = { name = slot_$NAME$ value = scope:pod_combat_slot_var_temp }
 }
 
-# Removes slot_$NAME$ from the current slot story. Used for
-# absence-as-signal fields whose presence carries meaning (stances,
-# retaliate vars, init_bonus, ap_drain).
-#   $NAME$ = field short name (is_guarding, retaliate_hit, init_bonus, ...)
+# $NAME$ = field suffix. Remove presence-as-signal fields to deactivate them.
 pod_combat_remove_slot_var_effect = {
 	remove_variable = slot_$NAME$
 }
 
-# Create a fresh slot story for one combatant and append it to the host's
-# pod_combat_active_slots. The duel builder only ever APPENDS a new (team,
-# position) from a runtime team-size value, so this ALWAYS creates - no
-# per-position pointer, no create-guard. Caller must be in host scope.
-#
-# hidden_effect_new_object wrap: CK3's tooltip builder walks effect chains
-# symbolically and skips state-mutating calls including create_story, so a
-# later scope:new_slot read errors "Undefined event target" during tooltip
-# preview. The wrap lets real execution run while preview skips the
-# new-object block. Same pattern as PoD's POD_heist_create_node.
+# Mark an existing seat. Caller: character holding pod_combat_session.
+# $TEAM$ = player|enemy literal; $POSITION$ = existing team_position;
+# $CONTROLLER$ = driving character, who need not occupy a slot but needs a session pointer.
+# Multiple controlled seats are supported.
+# Call before finalize so the occupant's unlocks are baked. Late marks must call
+# pod_combat_bake_pc_loadout_unlocks_effect on the occupant.
+# add_ally increments the team-size counter after seating; capture the position before adding.
+# To unmark, use pod_combat_remove_slot_var_effect = { NAME = human_controller }.
+pod_combat_mark_slot_controlled_effect = {
+	# Capture arguments before iteration changes scope.
+	save_scope_value_as = { name = pod_mark_slot_pos value = $POSITION$ }
+	$CONTROLLER$ = { save_scope_as = pod_mark_controller }
+	var:pod_combat_session ?= {
+		every_in_list = {
+			variable = pod_combat_active_slots
+			limit = {
+				var:combat_team = flag:$TEAM$
+				var:team_position = scope:pod_mark_slot_pos
+			}
+			set_variable = { name = slot_human_controller value = scope:pod_mark_controller }
+		}
+	}
+}
+
+# Host scope. Always creates a new slot; the caller supplies a fresh (team, position).
+# hidden_effect_new_object prevents tooltip preview from reading the uncreated slot.
 pod_combat_set_slot_char_effect = {
 	# $TEAM$      = player | enemy  (parse-time literal)
 	# $POSITION$  = team_position to assign (runtime value, 0 = leader)
 	# $CHARACTER$ = character scope to assign to the slot
 	#
-	# Capture $POSITION$ in host scope BEFORE the new-object block so it stays
-	# readable as a scope value after we flip into the new story.
+	# Capture the position before entering the new story.
 	save_scope_value_as = { name = pod_combat_slot_pos_temp value = $POSITION$ }
+
+	# Clear at every seating, including mid-fight arrivals, so teardown cannot
+	# remove a form inherited from an earlier fight.
+	if = {
+		limit = { $CHARACTER$ = { is_alive = yes } }
+		$CHARACTER$ = { remove_character_flag = pod_combat_fight_granted_warform }
+	}
 	hidden_effect_new_object = {
 		character:POD_wraith_01 = {
 			create_story = {
@@ -90,24 +77,14 @@ pod_combat_set_slot_char_effect = {
 			}
 		}
 		scope:new_slot = {
-			# Identity: combat_team is the source of truth, position 0 = leader.
 			set_variable = { name = combat_team   value = flag:$TEAM$ }
 			set_variable = { name = team_position value = scope:pod_combat_slot_pos_temp }
 			set_variable = { name = slot_alive    value = 1 }
-			# slot_char is set up front (before slot_morale) so the starting-morale
-			# designer hook can read var:slot_char.
+			# Set slot_char before morale so the starting-morale hook can read it.
 			set_variable = { name = slot_char        value = $CHARACTER$ }
-			# Pure-value stats zero-defaulted so SV gates need only a slot
-			# presence check, not per-field has_variable; gate-style fields
-			# (hit_chance, initiative, stances, tiers) stay
-			# absent-until-written. Soak and prowess are absent entirely - they
-			# are read live off slot_char, never stored on the slot.
-			#
-			# slot_morale defaults to pod_combat_starting_morale_value (cap or
-			# tuned override + the designer hook, floored at 1), not 0, so a
-			# freshly-created slot reads alive before real init: the init-time
-			# KO check treats var:slot_morale <= 0 as a KO predicate. Same SV
-			# as the per-slot init seed in pod_combat_group_effects.txt.
+			# Morale must start above zero to avoid the init-time KO check.
+			# Use the same value as slot init so designer adjustments survive initialization.
+			# Stances and tiers remain absent until applied; character stats stay on slot_char.
 			set_variable = {
 				name = slot_morale
 				value = pod_combat_starting_morale_value
@@ -116,12 +93,25 @@ pod_combat_set_slot_char_effect = {
 			set_variable = { name = slot_has_acted   value = 0 }
 		}
 
-		# Register on the host - scope inside the wrap is still the caller.
-		# Iterated by the GUI datamodel and every dispatch loop; cleared in
-		# pod_combat_clear_slot_stories_effect.
-		add_to_variable_list = {
-			name = pod_combat_active_slots
-			target = scope:new_slot
+		# Read the fight through the host: mid-fight arrivals lack builder scopes.
+		# Tooltip preview may have no session.
+		if = {
+			limit = { has_variable = pod_combat_session }
+			var:pod_combat_session = { save_temporary_scope_as = pod_fight }
+			scope:pod_fight = {
+				add_to_variable_list = {
+					name = pod_combat_active_slots
+					target = scope:new_slot
+				}
+			}
+			scope:new_slot = {
+				set_variable = { name = fight value = scope:pod_fight }
+			}
+			# Every participant needs the session for busy gates and its client's GUI.
+			# Both teardown paths clear it from living characters; dead characters cannot be mutated.
+			$CHARACTER$ = {
+				set_variable = { name = pod_combat_session value = scope:pod_fight }
+			}
 		}
 	}
 }
