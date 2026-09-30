@@ -181,17 +181,22 @@ PixelShader =
 		Output = "PDX_COLOR"
 		Code
 		[[
-			#define BLENDFACTOR 0.65
+			#define DEFAULT_BLENDFACTOR 0.65
 			
 			PDX_MAIN {
 				float4 color = SampleImageSprite(Texture,Input.UV0);
 				color *= Input.Color;
 				float3 blendcolor = SpriteModifyTexturesColors[1].rgb;
+				#ifdef CUSTOM_BLENDFACTOR
+					float blendfactor = SpriteModifyTexturesColors[1].a;
+				#else
+					float blendfactor = DEFAULT_BLENDFACTOR;
+				#endif
 				
 				float3 color_hsv = RGBtoHSV(color.rgb);
 				
 				float4 outcolor = float4(blendcolor, color.a*color_hsv.b);
-				outcolor.rgb = lerp(color.rgb, blendcolor.rgb, BLENDFACTOR);
+				outcolor.rgb = lerp(color.rgb, blendcolor.rgb, blendfactor);
 				
 				#ifdef DISABLED
 					outcolor.rgb = DisableColor( outcolor.rgb );
@@ -307,4 +312,19 @@ Effect PODValueToAlphaDisabled
 	PixelShader = "PS_PODIMG_VALUE_TO_ALPHA"
 	
 	Defines = { "DISABLED" }
+}
+
+Effect PODValueToAlphaCustomBlendfactor
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODIMG_VALUE_TO_ALPHA"
+	
+	Defines = { "CUSTOM_BLENDFACTOR" }
+}
+Effect PODValueToAlphaCustomBlendfactorDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODIMG_VALUE_TO_ALPHA"
+	
+	Defines = { "CUSTOM_BLENDFACTOR" "DISABLED" }
 }

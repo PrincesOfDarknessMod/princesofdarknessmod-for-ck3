@@ -1,94 +1,44 @@
-﻿# Per-slot story_cycle (POD_combat_slot) lifecycle + accessor helpers.
-# Caller scope is the combat host; stories live on Charon (POD_wraith_01).
-#
-# Slot identity = (combat_team flag:player/enemy, team_position int 0+,
-# 0 = leader). No flat slot_index. Addressing is by ITERATION over the
-# fight's pod_combat_active_slots - no per-position pointers and no fixed
-# positional cap; team size is guarded by pod_combat_max_team_size.
-# The only pointer vars are the two leaders, which live on the fight too
-# (pod_combat_pc_slot = player/0, pod_combat_enemy_leader_slot = enemy/0),
-# derived once at finalize for the many direct-leader call sites.
-#
-# No teardown effect lives here any more: the fight story's on_end cascade
-# ends every slot it holds, and the two pointers die with that story.
-#
-# Field catalogue / init defaults / absence-as-signal list: COMBAT_REFERENCE.info §3.
+﻿# Per-slot lifecycle and variable-setting effects. Host scope unless specified; stories live on Charon.
+# Slots are addressed by (combat_team, team_position), with position 0 as leader.
+# The fight owns the roster and leader pointers; its on_end cascade ends the slots.
+# Field defaults and absence-as-signal rules: COMBAT_REFERENCE.info section 3.
 
 
 
 
 ###################
-###### ACCESSOR HELPERS
+###### SLOT VARIABLE EFFECTS
 ###################
-# Write helpers operating on the CURRENT slot story. Callers are either
-# inside an `every_in_list = pod_combat_active_slots` loop, or have
-# scope-switched into a leader pointer via `var:pod_combat_session.var:pod_combat_pc_slot ?= { ... }`
-# - the `var:` prefix is mandatory; without it CK3 reads the pointer name as
-# an effect and silently drops the block.
+# Slot-story scope. Pointer dereferences require var: (for example,
+# var:pod_combat_session.var:pod_combat_pc_slot); bare names parse as effects.
 
 pod_combat_set_slot_alive_effect = {
 	# $VALUE$ = 0 or 1
 	set_variable = { name = slot_alive value = $VALUE$ }
 }
 
-# Universal slot-var setter: writes slot_$NAME$ on the current slot story.
-#   $NAME$  = stat short name (morale, hit_chance, energy_used, ...)
-#   $VALUE$ = literal, scope:, or var: reference.
-#
-# $VALUE$ is captured via save_scope_value_as FIRST so scope:/var: refs
-# resolve to the caller's value before the write flips into the slot story.
+# $NAME$ = stat suffix; $VALUE$ = numeric literal, scope: or var: reference.
+# Values pass through save_scope_value_as; do not use this setter for flag variables.
 pod_combat_set_slot_var_effect = {
 	save_scope_value_as = { name = pod_combat_slot_var_temp value = $VALUE$ }
 	set_variable = { name = slot_$NAME$ value = scope:pod_combat_slot_var_temp }
 }
 
-# Removes slot_$NAME$ from the current slot story. Used for
-# absence-as-signal fields whose presence carries meaning (stances,
-# retaliate vars, init_bonus, ap_drain).
-#   $NAME$ = field short name (is_guarding, retaliate_hit, init_bonus, ...)
+# $NAME$ = field suffix. Remove presence-as-signal fields to deactivate them.
 pod_combat_remove_slot_var_effect = {
 	remove_variable = slot_$NAME$
 }
 
-# Mark a seated slot as human-driven. Call it after the seat exists; the builder
-# decides which seats are played rather than the engine inferring it from a board
-# position, which is the whole point of the marker.
-#   $TEAM$       = player | enemy  (parse-time literal)
-#   $POSITION$   = team_position of the seat to mark
-#   $CONTROLLER$ = the character driving it
-#
-# $CONTROLLER$ NEED NOT BE SEATED IN THE FIGHT. That is deliberate: a proxy
-# launcher marks combatants it is not, and nothing here or downstream requires
-# the controller to hold a slot. (It does need pod_combat_session to reach the
-# fight from the GUI - a separate seat-versus-reach question, unsolved.)
-#
-# Marking more than one seat is supported by construction: the read side is a
-# roster quantifier, the drain stops at each marked slot in turn, and the round
-# router waits for all of them. Caller scope = a character holding the session
-# pointer (the host, during the build).
-#
-# CALL BEFORE POD_combat_finalize_duel_effect. The unlock bake there is one-shot
-# and walks marked slots, so a seat marked afterwards has no
-# pod_combat_unlocked_moves and renders a full move bar with every button dead
-# (the proof fails closed). A late mark must call
-# pod_combat_bake_pc_loadout_unlocks_effect on its occupant itself. The standing
-# target and the display pointer need nothing - the first hand-off supplies both.
-#
-# $POSITION$ IS THE POSITION THE SEAT ALREADY HOLDS. Do not copy the chained
-# read POD_combat_duel_add_ally_effect uses: that effect seats at the CURRENT
-# pod_combat_player_team_size and bumps it afterwards, so reading the counter
-# after the add is off by one, matches no slot, and marks nothing - silently,
-# with no error and no tooltip. With the host at player/0 the first ally is
-# player/1. Snapshot before the add if you need it computed, the way
-# pod_combat_add_ally_midfight_effect does.
-#
-# The inverse is pod_combat_remove_slot_var_effect = { NAME = human_controller }
-# (there is no literal `remove_variable = slot_human_controller` to grep for).
+# Mark an existing seat. Caller: character holding pod_combat_session.
+# $TEAM$ = player|enemy literal; $POSITION$ = existing team_position;
+# $CONTROLLER$ = driving character, who need not occupy a slot but needs a session pointer.
+# Multiple controlled seats are supported.
+# Call before finalize so the occupant's unlocks are baked. Late marks must call
+# pod_combat_bake_pc_loadout_unlocks_effect on the occupant.
+# add_ally increments the team-size counter after seating; capture the position before adding.
+# To unmark, use pod_combat_remove_slot_var_effect = { NAME = human_controller }.
 pod_combat_mark_slot_controlled_effect = {
-	# Both args captured in the caller's scope BEFORE the iteration flips into
-	# each slot story, for the reason pod_combat_set_slot_char_effect documents:
-	# a scope: or var: argument re-evaluated from slot scope resolves against the
-	# wrong object.
+	# Capture arguments before iteration changes scope.
 	save_scope_value_as = { name = pod_mark_slot_pos value = $POSITION$ }
 	$CONTROLLER$ = { save_scope_as = pod_mark_controller }
 	var:pod_combat_session ?= {
@@ -103,30 +53,18 @@ pod_combat_mark_slot_controlled_effect = {
 	}
 }
 
-# Create a fresh slot story for one combatant and append it to the host's
-# pod_combat_active_slots. The duel builder only ever APPENDS a new (team,
-# position) from a runtime team-size value, so this ALWAYS creates - no
-# per-position pointer, no create-guard. Caller must be in host scope.
-#
-# hidden_effect_new_object wrap: CK3's tooltip builder walks effect chains
-# symbolically and skips state-mutating calls including create_story, so a
-# later scope:new_slot read errors "Undefined event target" during tooltip
-# preview. The wrap lets real execution run while preview skips the
-# new-object block. Same pattern as PoD's POD_heist_create_node.
+# Host scope. Always creates a new slot; the caller supplies a fresh (team, position).
+# hidden_effect_new_object prevents tooltip preview from reading the uncreated slot.
 pod_combat_set_slot_char_effect = {
 	# $TEAM$      = player | enemy  (parse-time literal)
 	# $POSITION$  = team_position to assign (runtime value, 0 = leader)
 	# $CHARACTER$ = character scope to assign to the slot
 	#
-	# Capture $POSITION$ in host scope BEFORE the new-object block so it stays
-	# readable as a scope value after we flip into the new story.
+	# Capture the position before entering the new story.
 	save_scope_value_as = { name = pod_combat_slot_pos_temp value = $POSITION$ }
 
-	# Clear the fight-granted warform record on the way in. It lives here, at the
-	# universal seat point, rather than beside the finalize pre-pass that SETS it:
-	# a mid-fight seat (summon, reinforcement) never runs that pre-pass, so a flag
-	# stranded by an earlier fight would otherwise survive into this one and let
-	# teardown strip a form this fight never granted.
+	# Clear at every seating, including mid-fight arrivals, so teardown cannot
+	# remove a form inherited from an earlier fight.
 	if = {
 		limit = { $CHARACTER$ = { is_alive = yes } }
 		$CHARACTER$ = { remove_character_flag = pod_combat_fight_granted_warform }
@@ -139,24 +77,14 @@ pod_combat_set_slot_char_effect = {
 			}
 		}
 		scope:new_slot = {
-			# Identity: combat_team is the source of truth, position 0 = leader.
 			set_variable = { name = combat_team   value = flag:$TEAM$ }
 			set_variable = { name = team_position value = scope:pod_combat_slot_pos_temp }
 			set_variable = { name = slot_alive    value = 1 }
-			# slot_char is set up front (before slot_morale) so the starting-morale
-			# designer hook can read var:slot_char.
+			# Set slot_char before morale so the starting-morale hook can read it.
 			set_variable = { name = slot_char        value = $CHARACTER$ }
-			# Pure-value stats zero-defaulted so SV gates need only a slot
-			# presence check, not per-field has_variable; gate-style fields
-			# (hit_chance, initiative, stances, tiers) stay
-			# absent-until-written. Soak and prowess are absent entirely - they
-			# are read live off slot_char, never stored on the slot.
-			#
-			# slot_morale defaults to pod_combat_starting_morale_value (cap or
-			# tuned override + the designer hook, floored at 1), not 0, so a
-			# freshly-created slot reads alive before real init: the init-time
-			# KO check treats var:slot_morale <= 0 as a KO predicate. Same SV
-			# as the per-slot init seed in pod_combat_group_effects.txt.
+			# Morale must start above zero to avoid the init-time KO check.
+			# Use the same value as slot init so designer adjustments survive initialization.
+			# Stances and tiers remain absent until applied; character stats stay on slot_char.
 			set_variable = {
 				name = slot_morale
 				value = pod_combat_starting_morale_value
@@ -165,14 +93,8 @@ pod_combat_set_slot_char_effect = {
 			set_variable = { name = slot_has_acted   value = 0 }
 		}
 
-		# Register the slot on the FIGHT, and give the slot a back-pointer to it.
-		# Both need the fight in hand, so they share one guarded bind: the roster
-		# is iterated by every dispatch loop and by the GUI datamodel, and the
-		# back-pointer is how slot-scoped code reaches fight state without the
-		# caller having saved a host scope first. Read off the host rather than a
-		# builder scope name: mid-fight seats arrive from chains that never saw
-		# the builder. Gated because tooltip-build has no fight - and no slot
-		# stories either, so an empty roster there is correct.
+		# Read the fight through the host: mid-fight arrivals lack builder scopes.
+		# Tooltip preview may have no session.
 		if = {
 			limit = { has_variable = pod_combat_session }
 			var:pod_combat_session = { save_temporary_scope_as = pod_fight }
@@ -185,20 +107,8 @@ pod_combat_set_slot_char_effect = {
 			scope:new_slot = {
 				set_variable = { name = fight value = scope:pod_fight }
 			}
-			# Every participant points at the fight, not just the host. This makes
-			# "am I in a fight" a property of a CHARACTER rather than of the one
-			# seated human: the launcher busy-gate, the loadout decision and the
-			# debug courtier picks all ask pod_combat_is_active_trigger, so a
-			# combatant already fighting now correctly reads as busy. It is also the
-			# participant claim multiplayer needs, and the prerequisite for a seated
-			# non-host human's window binding at all - PODCombatFight resolves from
-			# the VIEWER's own pointer, so without this only the host has one.
-			#
-			# Re-seating a character who already holds it rewrites the same value.
-			# Released by the living-combatant loops in pod_combat_duel_end_effect
-			# and pod_combat_host_died_release_effect; a corpse keeps a pointer at
-			# an ended story, which is inert (?= reads false) and cannot be removed
-			# from a dead character anyway.
+			# Every participant needs the session for busy gates and its client's GUI.
+			# Both teardown paths clear it from living characters; dead characters cannot be mutated.
 			$CHARACTER$ = {
 				set_variable = { name = pod_combat_session value = scope:pod_fight }
 			}
