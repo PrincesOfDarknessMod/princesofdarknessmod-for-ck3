@@ -1,8 +1,5 @@
 ﻿namespace = faith_conversion
 
-
-
-
 # Fired when you convert to a new faith. Convert capital county.
 faith_conversion.0001 = {
 	hidden = yes
@@ -16,7 +13,74 @@ faith_conversion.0001 = {
 	}
 
 	immediate = {
-		capital_county = { set_county_faith = root.faith }
+		capital_county ?= {
+			save_scope_as = converted_ruler_capital
+		}
+
+		# set_county_rite also sets the parent faith, so a faith change would convert the capital for free
+		if = {
+			limit = { capital_county.faith = root.faith }
+
+			# if their capital and ours coincide region holder's rite wins - try to convert adjacent county root owns
+			if = {
+				limit = {
+					capital_county.clerical_region_title ?= {
+						holder ?= {
+							capital_county = scope:converted_ruler_capital
+							faith = root.faith
+							rite != root.rite
+							NOR = {
+								root.puppet:theological_agent_puppet ?= this
+								root.puppet:external_theological_agent_puppet ?= this
+							}
+						}
+					}
+				}
+
+				capital_county = {
+					random_neighboring_county = {
+						limit = {
+							holder = root
+							faith = root.faith
+							clerical_region_title ?= {
+								OR = {
+									not = { exists = holder }
+									holder.rite = root.rite
+									holder.capital_county != prev
+								}
+							}
+						}
+
+						set_county_rite = root.rite
+					}
+				}
+			}
+			else = {
+				capital_county = { set_county_rite = root.rite }
+			}
+		}
+
+		root.rite = {
+			force_refresh_head_of_rite = yes
+		}
+	}
+}
+
+# Fired when a new faith is founded. The capital joins it if it already followed the same religion.
+faith_conversion.0006 = {
+	hidden = yes
+
+	trigger = {
+		is_landed = yes
+		primary_title.tier > tier_barony
+		exists = capital_county
+		exists = scope:old_faith
+		capital_county.faith = scope:old_faith
+		capital_county.faith.religion = root.religion
+	}
+
+	immediate = {
+		capital_county = { set_county_rite = root.rite }
 	}
 }
 
@@ -34,15 +98,25 @@ faith_conversion.0002 = {
 		if = {
 			limit = {
 				NOR = {
-					has_character_flag = converted_by_heresy_0010_event
-					has_character_flag = converted_by_heresy_0011_event
+					has_character_flag = recently_converted_by_heresy
 					has_character_flag = converted_by_heresy_decision
 					has_character_flag = new_heresiarch
 				}
 			}
 			remove_trait = heresiarch
 		}
-		remove_trait = excommunicated
+		if = {
+			limit = {
+				has_trait = excommunicated
+				NAND = {
+					exists = faith.religious_head_title
+					scope:old_faith.religious_head_title ?= faith.religious_head_title
+					faith = { faith_has_sacraments_central_trigger = yes }
+				}
+			}
+			remove_trait = excommunicated
+		}
+		clear_excommunication_tracking_effect = yes
 		remove_character_modifier = recent_excommunication
 		remove_character_modifier = excommunication_recently_lifted
 		remove_character_modifier = vow_of_poverty_modifier
@@ -52,26 +126,29 @@ faith_conversion.0002 = {
 		remove_character_modifier = defiant_high_queen_conversion_boost_modifier
 		remove_character_modifier = fp1_jomsvikings_caused_faith_crisis_modifier
 		remove_character_modifier = fp2_opportunistic_schismatic_modifier
-		remove_character_modifier = fp2_friend_of_the_old_ways_modifier
 		remove_character_modifier = bp2_yearly_0641_hof_modifier
 		remove_character_modifier = bp2_yearly_0641_realm_priest_modifier
 		remove_character_modifier = next_free_ho_hire_modifier
-		# If you championed the old ways but then reform regardless, get booted down to friend.
 		if = {
 			limit = {
-				faith.religion = scope:old_faith.religion
+				faith = faith:basque_pagan
+				rite != faith:basque_pagan.main_rite
 				has_character_modifier = fp2_champion_of_the_old_ways_modifier
 			}
 			remove_character_modifier = fp2_champion_of_the_old_ways_modifier
 			add_character_modifier = fp2_friend_of_the_old_ways_modifier
 		}
-		else = { remove_character_modifier = fp2_champion_of_the_old_ways_modifier }
+		else_if = {
+			limit = { faith != faith:basque_pagan }
+			remove_character_modifier = fp2_friend_of_the_old_ways_modifier
+			remove_character_modifier = fp2_champion_of_the_old_ways_modifier
+		}
 		# Reset patron deities.
 		if = {
 			limit = {
-				faith = {
+				rite = {
 					OR = {
-						has_doctrine = tenet_bhakti
+						rite_has_tenet = tenet_bhakti
 						religion != scope:old_faith.religion
 					}
 				}
@@ -119,11 +196,22 @@ faith_conversion.0002 = {
 	}
 }
 
-
 scripted_trigger faith_conversion_0003_valid_character = {
 	faith = scope:old_faith
+	# If conversion is within the same religion, check the rite is the same
+	trigger_if = {
+		limit = { scope:new_faith.religion = scope:old_faith.religion }
+		rite = scope:old_rite
+	}
 	is_alive = yes
 	is_ai = yes
+	is_immortal = no
+	# A relative's conversion must not drag along characters the rest of the conversion systems protect
+	NOR = {
+		has_character_flag = ai_will_not_convert
+		this = faith.religious_head
+		rite.head_of_rite ?= this
+	}
 }
 
 # Fired when you convert to a new faith. Convert close family.
@@ -131,57 +219,46 @@ faith_conversion.0003 = {
 	hidden = yes
 
 	immediate = {
+		faith = { save_scope_as = new_faith }
+		rite = { save_scope_as = new_rite }
 		every_spouse = {
 			limit = {
 				faith_conversion_0003_valid_character = yes
 				is_landed = no
 				is_immortal = no
 			}
-			set_character_faith = root.faith
+			set_character_rite = root.rite
 		}
-
-		every_child = {
+		every_close_family_member = {
 			limit = {
 				faith_conversion_0003_valid_character = yes
-				target_is_liege_or_above = root #If they have travelled outside of your realm/control, they will not be converted.
-				# Children are converted regardless of Landed status, assuming they are Landed within your realm.
-				is_immortal = no			
-			}
-			set_character_faith_with_conversion = root.faith #Also converts their spouse, children, and parents if applicable.
-		}
-
-		if = {
-			limit = {
-				exists = mother
-			}
-			mother = {
-				if = {
-					limit = {
-						faith_conversion_0003_valid_character = yes
-						target_is_liege_or_above = root #If they have travelled outside of your realm/control, they will not be converted.
-						is_landed = no #If inside your realm but landed, follow normal vassal conversion rules.
-						is_immortal = no				
+				OR = {
+					# A minor fostered outside the realm keeps their guardian's rite
+					AND = {
+						is_child_of = root
+						OR = {
+							is_adult = no
+							is_landed = no
+						}
+						trigger_if = {
+							limit = {
+								is_adult = no
+								any_relation = {
+									type = guardian
+								}
+							}
+							any_relation = {
+								type = guardian
+								count = all
+								target_is_liege_or_above = root
+							}
+						}
 					}
-					set_character_faith = root.faith
+					# Cascade travels down the hierarchy, not up to a parent or sibling
+					target_is_liege_or_above = root
 				}
 			}
-		}
-
-		if = {
-			limit = {
-				exists = father
-			}
-			father = {
-				if = {
-					limit = {
-						faith_conversion_0003_valid_character = yes
-						target_is_liege_or_above = root #If they have travelled outside of your realm/control, they will not be converted.
-						is_landed = no #If inside your realm but landed, follow normal vassal conversion rules.
-						is_immortal = no					
-					}
-					set_character_faith = root.faith
-				}
-			}
+			set_character_rite = root.rite
 		}
 	}
 }
@@ -192,8 +269,8 @@ faith_conversion.0004 = {
 	trigger = {
 		government_has_flag = government_is_theocracy
 		is_landed = yes
-		faith = {
-			has_doctrine = doctrine_theocracy_lay_clergy
+		rite = {
+			rite_has_doctrine = doctrine_theocracy_lay_clergy
 		}
 	}
 
@@ -247,7 +324,7 @@ faith_conversion.1001 = {
 			triggered_desc = {
 				trigger = {
 					has_trait = zealous
-					faith = { has_doctrine = tenet_carnal_exaltation }
+					rite = { rite_has_tenet = tenet_carnal_exaltation }
 					is_male = yes
 				}
 				desc = faith_conversion.1001.desc.zealous.carnal_male
@@ -255,7 +332,7 @@ faith_conversion.1001 = {
 			triggered_desc = {
 				trigger = {
 					has_trait = zealous
-					faith = { has_doctrine = tenet_carnal_exaltation }
+					rite = { rite_has_tenet = tenet_carnal_exaltation }
 					is_female = yes
 				}
 				desc = faith_conversion.1001.desc.zealous.carnal_female
@@ -269,7 +346,7 @@ faith_conversion.1001 = {
 				desc = faith_conversion.1001.desc.cynical
 			}
 			triggered_desc = {
-				trigger = { faith = { has_doctrine_parameter = reincarnation_events_active } }
+				trigger = { rite = { rite_has_parameter = reincarnation_events_active } }
 				desc = faith_conversion.1001.desc.reincarnation
 			}
 			triggered_desc = {
@@ -338,6 +415,12 @@ faith_conversion.1001 = {
 	}
 
 	immediate = {
+		#AUDIO CE3 - "become heretic" stinger when the converting player is a heresiarch (heresy leader). Player-only via this event's is_ai=no trigger.
+		if = {
+			limit = { has_trait = heresiarch }
+			play_sound_effect = "event:/DLC/CE3/SFX/Stingers/ce3_mx_sting_becomeHeretic"
+		}
+
 		faith = {
 			save_scope_as = new_faith
 		}
@@ -357,11 +440,11 @@ faith_conversion.1001 = {
 			save_scope_as = template_priest
 		}
 		# If necessary, make them celibate.
-		hidden_effect = {
+		hidden_effect_new_object = {
 			if = {
 				limit = {
 					NOT = {
-						scope:new_faith = { has_doctrine_parameter = clergy_can_marry } # scoping directly to the character was firing null character errors
+						scope:new_faith = { main_rite = { rite_has_parameter = clergy_can_marry } } # scoping directly to the character was firing null character errors
 					}
 				}
 				scope:template_priest = {
@@ -377,17 +460,19 @@ faith_conversion.1001 = {
 			}
 			#Please dress properly!
 		}
-		if = {
-			limit = {
-				scope:template_priest = { should_be_naked_trigger = yes }
+		hidden_effect = {
+			if = {
+				limit = {
+					scope:template_priest = { should_be_naked_trigger = yes }
+				}
+				scope:template_priest = {
+					add_character_flag = is_naked
+				}
 			}
-			scope:template_priest = {
-				add_character_flag = is_naked
-			}
-		}
-		else = {
-			scope:template_priest = {
-				add_character_flag = need_priest_outfit
+			else = {
+				scope:template_priest = {
+					add_character_flag = need_priest_outfit
+				}
 			}
 		}
 	}
