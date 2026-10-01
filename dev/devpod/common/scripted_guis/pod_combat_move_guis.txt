@@ -1,0 +1,1786 @@
+﻿######################################################
+######   POD COMBAT SCRIPTED GUIS
+######################################################
+# Combat-window and loadout-editor SGUIs.
+# root = clicking/viewing player; scope:story = POD_combat_move for per-move calls.
+
+
+######################################################
+###### COMBAT-WINDOW ACTION SGUIS
+######################################################
+
+pod_combat_execute_move = {
+	scope = character
+	# root = clicking player; actor = control character. Checks control and costs separately.
+	saved_scopes = { story actor }
+
+	is_shown = {
+		exists = scope:story
+		pod_combat_is_active_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
+	}
+
+	is_valid = {
+		# Rejects unavailable commands before evaluating the per-move validator against the current workspace.
+		trigger_if = {
+			limit = { pod_combat_is_active_trigger = yes }
+			trigger_if = {
+				limit = {
+					NOT = { pod_combat_is_over_trigger = yes }
+					pod_combat_is_my_turn_trigger = yes
+				}
+				trigger_if = {
+					# KO blocks move commands only. End Turn must remain usable
+					limit = { NOT = { pod_combat_my_slot_is_ko_trigger = yes } }
+					trigger_if = {
+						limit = {
+							exists = scope:story
+							exists = scope:actor
+						}
+						# The validator splices ACTOR into scope switches, so pass the saved
+						# combatant scope, while control above stays on the clicking player.
+						POD_can_execute_combat_move_trigger = {
+							STORY = scope:story
+							ACTOR = scope:actor
+						}
+					}
+					trigger_else = { always = no }
+				}
+				trigger_else = { always = no }
+			}
+			trigger_else = { always = no }
+		}
+		trigger_else = { always = no }
+	}
+
+	effect = {
+		POD_execute_combat_move = { STORY = scope:story }
+		pod_combat_save_workspace_effect = yes
+	}
+}
+
+# Render-only via IsValidTooltip; never bind IsValid or Execute to this SGUI.
+# Order: turn ownership, resources, move state.
+# LOCKSTEP: mirror player-facing blocks in pod_combat_move_dynamic_gates_trigger
+# and its wrappers. Window-lifetime, AI-only and scope-resolution gates need no text.
+pod_combat_move_usability_tt = {
+	scope = character
+	# Required scopes match pod_combat_execute_move: root = client, actor = driven combatant.
+	saved_scopes = { story actor }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		# Show turn-level failures alone; per-move checks would read another actor's workspace.
+		# Check is_over first: victory leaves both the window and the player's turn latch live.
+		trigger_if = {
+			limit = { pod_combat_is_over_trigger = yes }
+			custom_tooltip = { text = pod_combat_usable_fight_over_tt  always = no }
+		}
+		trigger_else_if = {
+			limit = { NOT = { pod_combat_is_my_turn_trigger = yes } }
+			custom_tooltip = { text = pod_combat_usable_not_your_turn_tt  always = no }
+		}
+		trigger_else_if = {
+			limit = { pod_combat_my_slot_is_ko_trigger = yes }
+			custom_tooltip = { text = pod_combat_usable_actor_down_tt  always = no }
+		}
+		trigger_else = {
+			# Has_variable checks do not protect optional reads.
+			trigger_if = {
+				limit = { scope:story = { has_variable = ap_cost } }
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_ap_trigger = { COST = scope:story.var:ap_cost } } }
+					custom_tooltip = { text = pod_combat_usable_need_ap_tt  always = no }
+				}
+			}
+
+			# Check energy on the controlled charactor. PoD already has its own splat-specific failure text;
+			# the inverted limit suppresses successful checks.
+			trigger_if = {
+				limit = { scope:story = { has_variable = energy_cost } }
+				trigger_if = {
+					limit = {
+						NOT = {
+							scope:actor = {
+								POD_has_enough_splat_agnostic_energy_reserves = { AMOUNT = scope:story.var:energy_cost }
+							}
+						}
+					}
+					scope:actor = {
+						POD_has_enough_splat_agnostic_energy_reserves = { AMOUNT = scope:story.var:energy_cost }
+					}
+				}
+			}
+
+			# CK3 currencies are PC-only, matching the live gates' player-turn limits.
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = gold_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_gold_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_gold_tt  always = no }
+				}
+			}
+
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = piety_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_piety_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_piety_tt  always = no }
+				}
+			}
+
+			trigger_if = {
+				limit = {
+					scope:story = { has_variable = prestige_cost }
+					pod_combat_is_player_turn_trigger = yes
+				}
+				trigger_if = {
+					limit = { NOT = { pod_combat_can_afford_move_prestige_trigger = { STORY = scope:story } } }
+					custom_tooltip = { text = pod_combat_usable_need_prestige_tt  always = no }
+				}
+			}
+
+			# LOCKSTEP with pod_combat_actor_has_used_move_trigger: non-round means whole fight.
+			trigger_if = {
+				limit = { scope:story = { has_variable = once_per } }
+				trigger_if = {
+					limit = { pod_combat_actor_has_used_move_trigger = { STORY = scope:story  ACTOR = scope:actor } }
+					trigger_if = {
+						limit = { scope:story = { var:once_per = flag:round } }
+						custom_tooltip = { text = pod_combat_usable_used_this_round_tt  always = no }
+					}
+					trigger_else = {
+						custom_tooltip = { text = pod_combat_usable_used_this_combat_tt  always = no }
+					}
+				}
+			}
+
+			# Targeting - one presence gate covering all three arms.
+			trigger_if = {
+				limit = { scope:story = { has_variable = targeting } }
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_enemy }
+						NOT = { pod_combat_player_has_enemy_target_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_enemy_tt  always = no }
+				}
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_ally }
+						NOT = { pod_combat_player_has_ally_target_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_ally_tt  always = no }
+				}
+				trigger_if = {
+					limit = {
+						pod_combat_is_player_turn_trigger = yes
+						scope:story = { var:targeting = flag:single_pc }
+						NOT = { pod_combat_pc_slot_alive_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_targeting_need_pc_alive_tt  always = no }
+				}
+			}
+
+			# The stat card already has the condition; guards both fields before dispatch.
+			trigger_if = {
+				limit = { scope:story = { has_variable = cond_mode  has_variable = cond_predicate } }
+				trigger_if = {
+					limit = {
+						scope:story = { var:cond_mode = flag:gate }
+						NOT = {
+							pod_combat_move_condition_met_trigger = {
+								STORY = scope:story ACTOR = scope:actor PREDICATE = scope:story.var:cond_predicate
+							}
+						}
+					}
+					custom_tooltip = { text = pod_combat_usable_condition_unmet_tt  always = no }
+				}
+			}
+
+			# The heal and redundancy checks carry their own presence guards
+			trigger_if = {
+				limit = {
+					pod_combat_move_is_self_only_heal_trigger = { STORY = scope:story }
+					NOT = { pod_combat_self_heal_has_effect_trigger = { STORY = scope:story } }
+				}
+				custom_tooltip = { text = pod_combat_cant_heal_already_full_desc  always = no }
+			}
+
+			trigger_if = {
+				limit = {
+					NOT = { pod_combat_move_has_independent_payload_trigger = { STORY = scope:story } }
+					NOT = { pod_combat_move_payload_useful_trigger = { STORY = scope:story } }
+				}
+				custom_tooltip = { text = pod_combat_move_redundant_tt  always = no }
+			}
+
+			trigger_if = {
+				limit = { scope:story = { has_variable = summons_combatant } }
+				trigger_if = {
+					limit = { pod_combat_duel_bans_summons_trigger = yes }
+					custom_tooltip = { text = pod_combat_cant_summon_duel_barred_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						var:pod_combat_session ?= { has_variable = pod_combat_current_actor_team }
+						NOT = { pod_combat_summon_capacity_available_trigger = { STORY = scope:story } }
+					}
+					custom_tooltip = { text = pod_combat_cant_summon_team_full_tt  always = no }
+				}
+				trigger_else = { always = yes }
+			}
+
+			# Fallback for a missed unlock bake; detailed requirements stay in the editor.
+			trigger_if = {
+				limit = { NOT = { pod_combat_actor_has_baked_unlock_trigger = { STORY = scope:story ACTOR = scope:actor } } }
+				custom_tooltip = { text = pod_combat_usable_not_unlocked_tt  always = no }
+			}
+		}
+	}
+}
+
+# Closing the editor clears pod_combat_config_open and its temporary row list.
+pod_combat_close_skills = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		remove_variable = pod_combat_config_open
+		# Discard editor-session story refs; rebuild on next open.
+		clear_variable_list = pod_combat_sheet_rows
+	}
+}
+
+# End Turn commits the controlled slot before processing AI turns.
+pod_combat_end_turn = {
+	scope = character
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+	}
+
+	is_valid = {
+		pod_combat_is_active_trigger = yes
+		# Check the clicking player's turn control, independently of auto-advance mode.
+		pod_combat_is_my_turn_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
+	}
+
+	effect = {
+		pod_combat_process_group_turns_effect = yes
+	}
+}
+
+pod_combat_end_combat = {
+	scope = character
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_over_trigger = yes
+	}
+
+	is_valid = {
+		pod_combat_is_active_trigger = yes
+		pod_combat_is_over_trigger = yes
+	}
+
+	effect = {
+		pod_combat_end_combat_effect = yes
+	}
+}
+
+# Auto-resolve remains available during AI turns.
+pod_combat_auto_resolve = {
+	scope = character
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+	}
+
+	is_valid = {
+		pod_combat_is_active_trigger = yes
+		NOT = { pod_combat_is_over_trigger = yes }
+	}
+
+	effect = {
+		pod_combat_auto_resolve_effect = yes
+	}
+}
+
+# Help button. Fires the combat-system overview event.
+pod_combat_help = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		trigger_event = pod_combat.0001
+	}
+}
+
+# Per-player auto-advance preference; apply changes to the current fight immediately.
+# Presence means manual stepping; absence means auto-advance.
+pod_combat_toggle_auto_advance = {
+	scope = character
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+	}
+
+	is_valid = {
+		pod_combat_is_active_trigger = yes
+	}
+
+	effect = {
+		if = {
+			limit = { has_variable = pod_combat_manual_step_pref }
+			remove_variable = pod_combat_manual_step_pref
+		}
+		else = {
+			set_variable = { name = pod_combat_manual_step_pref value = yes }
+		}
+		# Re-seed the live fight's step_mode from the now-updated pref.
+		if = {
+			limit = { has_variable = pod_combat_manual_step_pref }
+			var:pod_combat_session ?= { set_variable = { name = pod_combat_step_mode value = yes } }
+		}
+		else = {
+			var:pod_combat_session ?= { remove_variable = pod_combat_step_mode }
+		}
+	}
+}
+
+# Advance does not commit the controlled slot or save its workspace.
+# Only pod_combat_process_group_turns_effect owns that.
+# Respects current mode so a toggle to auto takes effect on the next click.
+pod_combat_advance_turn = {
+	scope = character
+
+	is_shown = {
+		pod_combat_is_active_trigger = yes
+	}
+
+	is_valid = {
+		pod_combat_can_advance_trigger = yes
+	}
+
+	effect = {
+		if = {
+			limit = { var:pod_combat_session ?= { has_variable = pod_combat_step_mode } }
+			pod_combat_advance_one_ai_turn_effect = yes
+			if = {
+				limit = { pod_combat_pc_has_acted_this_round_trigger = yes }
+				pod_combat_after_step_settle_effect = yes
+			}
+			else = {
+				pod_combat_after_pre_pc_step_settle_effect = yes
+			}
+		}
+		else = {
+			# Keep pre-/post-controlled-turn routes separate: re-running setup on a live
+			# turn would reset AP and clear round buffs.
+			if = {
+				limit = { pod_combat_pc_has_acted_this_round_trigger = yes }
+				pod_combat_run_remaining_ai_turns_effect = yes
+				if = {
+					limit = {
+						NOT = { pod_combat_current_actor_is_controlled_trigger = yes }
+						NOT = { pod_combat_is_over_trigger = yes }
+					}
+					pod_combat_group_end_round_effect = yes
+				}
+			}
+			else = {
+				pod_combat_run_pre_pc_ai_turns_effect = yes
+			}
+		}
+	}
+}
+
+
+######################################################
+###### LOADOUT-EDITOR SGUIS
+######################################################
+
+# is_shown supplies the equipped checkbox state; unequipping remains allowed at capacity.
+pod_combat_loadout_toggle = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		is_target_in_variable_list = {
+			name   = pod_combat_loadout
+			target = scope:story
+		}
+	}
+
+	is_valid = {
+		exists = scope:story
+		OR = {
+			# Equipped -> unequip depends ONLY on current loadout membership.
+			is_target_in_variable_list = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+			# Not equipped -> require the move be UNLOCKED and its category have room.
+			AND = {
+				# Use the unlock trigger: can_execute_decision implicitly requires a ruler
+				# and rejects unlanded players.
+				pod_combat_actor_unlocks_move_trigger = { STORY = scope:story ACTOR = root }
+				pod_combat_loadout_room_left_trigger = yes
+				# Cap check per combat_category. custom_description surfaces a friendly
+				# "Attack slots full: 4/4" tooltip; the trigger_if chain keeps it singular.
+				trigger_if = {
+					limit = { scope:story = { var:combat_category = flag:ATK } }
+					custom_description = {
+						text = pod_combat_loadout_atk_full_tt
+						pod_combat_atk_slots_free_trigger = yes
+					}
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:DEF } }
+					custom_description = {
+						text = pod_combat_loadout_def_full_tt
+						pod_combat_def_slots_free_trigger = yes
+					}
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:CTL } }
+					custom_description = {
+						text = pod_combat_loadout_ctl_full_tt
+						pod_combat_ctl_slots_free_trigger = yes
+					}
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:PWR } }
+					custom_description = {
+						text = pod_combat_loadout_pwr_full_tt
+						pod_combat_pwr_slots_free_trigger = yes
+					}
+				}
+				trigger_else = {
+					# Required terminator for the trigger_else_if chain.
+					# always = no = don't equip an unknown-category move.
+					always = no
+				}
+			}
+		}
+	}
+
+	effect = {
+		if = {
+			limit = {
+				is_target_in_variable_list = {
+					name   = pod_combat_loadout
+					target = scope:story
+				}
+			}
+			remove_list_variable = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+		}
+		else = {
+			add_to_variable_list = {
+				name   = pod_combat_loadout
+				target = scope:story
+			}
+		}
+		# Keep the loadout-count display cache in step with the change so the pip
+		# strips stay correct without re-walking the loadout per frame.
+		pod_combat_refresh_loadout_counts_effect = yes
+		# Equipping under the sheet's equipped-only filter changes the row
+		# set itself, so rebuild; other filters are equip-agnostic.
+		if = {
+			limit = {
+				has_variable = pod_combat_sheet_view
+				has_variable = pod_combat_sheet_f_equipped
+			}
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Row-capacity gate uses baked unlocks. Do not bind toggle.IsValid here:
+# its live unlock trigger is too expensive per row/frame.
+pod_combat_loadout_room = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		# Equipped rows stay enabled: clicking one unequips, which no cap blocks.
+		trigger_if = {
+			limit = {
+				exists = scope:story
+				NOT = {
+					is_target_in_variable_list = {
+						name   = pod_combat_loadout
+						target = scope:story
+					}
+				}
+			}
+			pod_combat_loadout_room_left_trigger = yes
+
+			trigger_if = {
+				limit = { scope:story = { has_variable = combat_category } }
+				trigger_if = {
+					limit = { scope:story = { var:combat_category = flag:ATK } }
+					pod_combat_atk_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:DEF } }
+					pod_combat_def_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:CTL } }
+					pod_combat_ctl_slots_free_trigger = yes
+				}
+				trigger_else_if = {
+					limit = { scope:story = { var:combat_category = flag:PWR } }
+					pod_combat_pwr_slots_free_trigger = yes
+				}
+				trigger_else = { always = no }
+			}
+			trigger_else = { always = no }
+		}
+	}
+}
+
+# Render-only capacity text for unlocked, unequipped rows.
+# Locked rows show unlock requirements; equipped rows can always be removed.
+pod_combat_loadout_block_tt = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = { always = yes }
+
+	is_valid = {
+		trigger_if = {
+			limit = {
+				exists = scope:story
+				NOT = {
+					is_target_in_variable_list = {
+						name   = pod_combat_loadout
+						target = scope:story
+					}
+				}
+				root = {
+					is_target_in_variable_list = {
+						name   = pod_combat_unlocked_moves
+						target = scope:story
+					}
+				}
+			}
+			# Category first; the independent total cap matters when caps are retuned.
+			trigger_if = {
+				limit = { scope:story = { has_variable = combat_category } }
+				trigger_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:ATK }
+						NOT = { pod_combat_atk_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_atk_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:DEF }
+						NOT = { pod_combat_def_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_def_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:CTL }
+						NOT = { pod_combat_ctl_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_ctl_full_tt  always = no }
+				}
+				trigger_else_if = {
+					limit = {
+						scope:story = { var:combat_category = flag:PWR }
+						NOT = { pod_combat_pwr_slots_free_trigger = yes }
+					}
+					custom_tooltip = { text = pod_combat_loadout_pwr_full_tt  always = no }
+				}
+				trigger_else = {
+					# Required terminator (CK3 rejects an open trigger_else_if chain at
+					# load). Nothing to say: this row's category has room.
+					always = yes
+				}
+			}
+			trigger_if = {
+				limit = { NOT = { pod_combat_loadout_room_left_trigger = yes } }
+				custom_tooltip = { text = pod_combat_loadout_total_full_tt  always = no }
+			}
+		}
+	}
+}
+
+# Per-row visibility uses editor-open baked unlocks. Show-all adds own-splat moves;
+# show-other-splats adds the full catalogue. Neither changes equip eligibility.
+pod_combat_loadout_option = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		OR = {
+			root = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = scope:story } }
+			AND = {
+				has_variable = pod_combat_show_all_moves
+				OR = {
+					has_variable = pod_combat_show_other_splats
+					scope:story = {
+						pod_combat_move_group_matches_actor_trigger = { ACTOR = root }
+					}
+				}
+			}
+		}
+	}
+
+	is_valid = {
+		exists = scope:story
+		root = { is_target_in_variable_list = { name = pod_combat_unlocked_moves target = scope:story } }
+	}
+}
+
+pod_combat_loadout_show_all_moves = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_show_all_moves }
+		# Its checkbox goes away with show-all, so drop the flag with it -
+		# otherwise the next show-all silently reopens at the full catalogue.
+		if = {
+			limit = { NOT = { has_variable = pod_combat_show_all_moves } }
+			remove_variable = pod_combat_show_other_splats
+		}
+		# Sheet view filters at list-build time, so a filter flip must rebuild.
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Only available and read while show-all is enabled.
+pod_combat_loadout_show_other_splats = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_show_other_splats }
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Exclusive presence flags keep GUI view bindings to IsSet checks.
+# Store character-side because script uses them for rebuilds and visibility.
+pod_combat_pool_view_detailed = {
+	scope = character
+
+	is_shown = {
+		NOT = { has_variable = pod_combat_loadout_compact_view }
+		NOT = { has_variable = pod_combat_sheet_view }
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		remove_variable = pod_combat_loadout_compact_view
+		remove_variable = pod_combat_sheet_view
+	}
+}
+
+pod_combat_pool_view_compact = {
+	scope = character
+
+	is_shown = { has_variable = pod_combat_loadout_compact_view }
+	is_valid = { always = yes }
+
+	effect = {
+		set_variable = { name = pod_combat_loadout_compact_view value = yes }
+		remove_variable = pod_combat_sheet_view
+	}
+}
+
+pod_combat_pool_view_sheet = {
+	scope = character
+
+	is_shown = { has_variable = pod_combat_sheet_view }
+	is_valid = { always = yes }
+
+	effect = {
+		set_variable = { name = pod_combat_sheet_view value = yes }
+		remove_variable = pod_combat_loadout_compact_view
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+
+######################################################
+###### MOVE-SHEET SORT + FILTER SGUIS
+
+# is_shown supplies active-column state; the effect sets/flips sorting.
+
+pod_combat_sheet_sort_ap = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:ap
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = ap }
+	}
+}
+
+pod_combat_sheet_sort_energy = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:energy
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = energy }
+	}
+}
+
+pod_combat_sheet_sort_damage = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:damage
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = damage }
+	}
+}
+
+pod_combat_sheet_sort_heal = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:heal
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = heal }
+	}
+}
+
+pod_combat_sheet_sort_morale = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:morale
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = morale }
+	}
+}
+
+pod_combat_sheet_sort_dot = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:dot
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = dot }
+	}
+}
+
+pod_combat_sheet_sort_apswing = {
+	scope = character
+
+	is_shown = {
+		has_variable = pod_combat_sheet_sort
+		var:pod_combat_sheet_sort = flag:apswing
+	}
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_set_sort_effect = { SORT = apswing }
+	}
+}
+
+# Filter-popup checkboxes (sheet-only presence filters).
+
+pod_combat_sheet_filter_equipped = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_equipped }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_damage = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_damage }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_heal = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_heal }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_energy = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_energy }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_agg = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_agg }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_elemental = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_elemental }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_filter_conditional = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_sheet_f_conditional }
+		pod_combat_sheet_rebuild_effect = yes
+	}
+}
+
+pod_combat_sheet_reset = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_sheet_reset_effect = yes
+	}
+}
+
+
+######################################################
+###### CATEGORY-FILTER SGUIS
+######################################################
+# No category flags = all; otherwise match selected categories.
+# Sheet mode requires rebuilding after each filter change.
+
+pod_combat_toggle_filter_atk = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_filter_atk }
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+pod_combat_toggle_filter_def = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_filter_def }
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+pod_combat_toggle_filter_ctl = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_filter_ctl }
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+pod_combat_toggle_filter_pwr = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		pod_combat_toggle_pc_flag_effect = { FLAG = pod_combat_filter_pwr }
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Clear-all-filters button. Wipes the four category-filter flags
+# (a separate axis from show_all_moves, which bypasses the unlock gate).
+pod_combat_clear_filters = {
+	scope = character
+
+	is_shown = { always = yes }
+	is_valid = { always = yes }
+
+	effect = {
+		remove_variable = pod_combat_filter_atk
+		remove_variable = pod_combat_filter_def
+		remove_variable = pod_combat_filter_ctl
+		remove_variable = pod_combat_filter_pwr
+		if = {
+			limit = { has_variable = pod_combat_sheet_view }
+			pod_combat_sheet_rebuild_effect = yes
+		}
+	}
+}
+
+# Pure category-match checks for the editor's per-section row grouping.
+# These ignore the filter flags; the combined filter+match lives in
+# pod_combat_loadout_category_match.
+pod_combat_is_atk_move = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		scope:story = { var:combat_category = flag:ATK }
+	}
+}
+
+pod_combat_is_def_move = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		scope:story = { var:combat_category = flag:DEF }
+	}
+}
+
+pod_combat_is_ctl_move = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		scope:story = { var:combat_category = flag:CTL }
+	}
+}
+
+pod_combat_is_pwr_move = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		scope:story = { var:combat_category = flag:PWR }
+	}
+}
+
+# Combined filter check: yes if no filter is active, or the move's
+# combat_category matches an active filter.
+pod_combat_loadout_category_match = {
+	scope = character
+	saved_scopes = { story }
+
+	is_shown = {
+		exists = scope:story
+		OR = {
+			# No filter active - show everything.
+			AND = {
+				NOT = { has_variable = pod_combat_filter_atk }
+				NOT = { has_variable = pod_combat_filter_def }
+				NOT = { has_variable = pod_combat_filter_ctl }
+				NOT = { has_variable = pod_combat_filter_pwr }
+			}
+			# Or filter active and matches.
+			AND = {
+				has_variable = pod_combat_filter_atk
+				scope:story = { var:combat_category = flag:ATK }
+			}
+			AND = {
+				has_variable = pod_combat_filter_def
+				scope:story = { var:combat_category = flag:DEF }
+			}
+			AND = {
+				has_variable = pod_combat_filter_ctl
+				scope:story = { var:combat_category = flag:CTL }
+			}
+			AND = {
+				has_variable = pod_combat_filter_pwr
+				scope:story = { var:combat_category = flag:PWR }
+			}
+		}
+	}
+}
+
+
+######################################################
+###### MOVE STAT BLOCK (BuildTooltip-rendered)
+######################################################
+# PODCombatMoveEffect binds the move as scope:story. AP cost is in the title.
+# New attributes need pod_combat_desc_<attr> in POD_combat_static_l_english.yml
+# and a presence-gated custom_tooltip here, in the matching dispatch group.
+# Loc format: #medium;outline prefix and $EFFECT_LIST_BULLET$ suffix.
+pod_combat_move_desc = {
+	scope = character
+	# Only the combat-log hover passes nohide; other callers leave it unset.
+	saved_scopes = { story nohide }
+	effect = {
+		# Ended log entries can pass an invalid story; guard all tooltip branches together.
+		if = {
+			limit = { exists = scope:story }
+		# Costs must stay in customizable localization: function-argument strings
+		# cannot contain # formatting or nested [X] substitutions. Suppress empty Costs lines.
+		if = {
+			limit = {
+				scope:story = {
+					OR = {
+						has_variable = energy_cost
+						has_variable = gold_cost
+						has_variable = piety_cost
+						has_variable = prestige_cost
+						has_variable = stress_cost
+					}
+				}
+			}
+			custom_tooltip = pod_combat_desc_costs
+		}
+		# Phase 4 PC-only resource gains (steal_gold transfers, gain_dread adds).
+		if = {
+			limit = { scope:story = { has_variable = steal_gold } }
+			custom_tooltip = pod_combat_desc_steal_gold
+		}
+		if = {
+			limit = { scope:story = { has_variable = gain_dread } }
+			custom_tooltip = pod_combat_desc_gain_dread
+		}
+
+		# State-condition gate requirement (cond_mode = flag:gate). One Requires:
+		# line, dispatched per predicate.
+		if = {
+			limit = { scope:story = { has_variable = cond_mode  var:cond_mode = flag:gate } }
+			if = { limit = { scope:story = { var:cond_predicate = flag:first_round } } custom_tooltip = pod_combat_desc_cond_first_round }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:round_min } } custom_tooltip = pod_combat_desc_cond_round_min }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:undamaged  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_undamaged_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:undamaged  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_undamaged_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:hp_missing  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_hp_missing_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:hp_missing  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_hp_missing_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:full_morale  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_full_morale_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:full_morale  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_full_morale_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:morale_missing  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_morale_missing_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:morale_missing  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_morale_missing_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_guard  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_guard_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_guard  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_guard_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_dodge  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_dodge_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_dodge  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_dodge_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_stealth  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_stealth_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_stealth  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_stealth_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:prestige_level_min  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_prestige_level_min_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:prestige_level_min  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_prestige_level_min_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:piety_level_min  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_piety_level_min_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:piety_level_min  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_piety_level_min_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:dread_min  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_dread_min_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:dread_min  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_dread_min_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:relation_positive } } custom_tooltip = pod_combat_desc_cond_relation_positive }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:relation_negative } } custom_tooltip = pod_combat_desc_cond_relation_negative }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:outnumbered } } custom_tooltip = pod_combat_desc_cond_outnumbered }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:ally_knocked_out } } custom_tooltip = pod_combat_desc_cond_ally_knocked_out }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:alive_enemies_min } } custom_tooltip = pod_combat_desc_cond_alive_enemies_min }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:alive_enemies_max } } custom_tooltip = pod_combat_desc_cond_alive_enemies_max }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:alive_allies_min } } custom_tooltip = pod_combat_desc_cond_alive_allies_min }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:alive_allies_max } } custom_tooltip = pod_combat_desc_cond_alive_allies_max }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_weapon_artifact  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_weapon_artifact_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_weapon_artifact  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_weapon_artifact_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_armor_artifact  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_armor_artifact_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_armor_artifact  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_armor_artifact_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_trait  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_trait_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_trait  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_trait_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_modifier  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_modifier_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_modifier  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_modifier_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_perk  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_has_perk_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:has_perk  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_has_perk_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:target_known_secret } } custom_tooltip = pod_combat_desc_cond_target_known_secret }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:fera_form } } custom_tooltip = pod_combat_desc_cond_fera_form }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:wyrm_servant var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_wyrm_servant_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:wyrm_servant var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_wyrm_servant_target }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:is_fera  var:cond_target = flag:user } } custom_tooltip = pod_combat_desc_cond_is_fera_user }
+			else_if = { limit = { scope:story = { var:cond_predicate = flag:is_fera  var:cond_target = flag:target } } custom_tooltip = pod_combat_desc_cond_is_fera_target }
+
+		}
+
+		# raw_text evaluates hidden branches; guard optional once_per reads.
+		if = {
+			limit = { scope:story = { has_variable = once_per } }
+			if = {
+				limit = { scope:story = { var:once_per = flag:round } }
+				custom_tooltip = pod_combat_desc_once_per_round
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_once_per_combat
+			}
+		}
+
+
+		# HP damage. Most-specific first: drain variants, then plain.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					has_variable = drain
+					pod_combat_move_class_is_elemental_trigger = yes
+				}
+			}
+			custom_tooltip = pod_combat_desc_hp_damage_elemental_drain
+		}
+		else_if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					has_variable = drain
+				}
+			}
+			custom_tooltip = pod_combat_desc_hp_damage_basic_drain
+		}
+		else_if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					pod_combat_move_class_is_elemental_trigger = yes
+				}
+			}
+			custom_tooltip = pod_combat_desc_hp_damage_elemental
+		}
+		else_if = {
+			limit = { scope:story = { has_variable = hp_damage } }
+			custom_tooltip = pod_combat_desc_hp_damage_basic
+		}
+
+		# Morale / self damage
+		if = {
+			limit = { scope:story = { has_variable = morale_damage } }
+			if = {
+				limit = {
+					scope:story = {
+						has_variable = morale_damage_condition
+						var:morale_damage_condition = flag:on_hp_damage
+					}
+				}
+				custom_tooltip = pod_combat_desc_morale_damage_on_hp_damage
+			}
+			else_if = {
+				limit = {
+					scope:story = {
+						has_variable = morale_damage_condition
+						var:morale_damage_condition = flag:on_contact
+					}
+				}
+				custom_tooltip = pod_combat_desc_morale_damage_on_contact
+			}
+			else_if = {
+				limit = {
+					scope:story = {
+						has_variable = morale_damage_condition
+						var:morale_damage_condition = flag:on_miss
+					}
+				}
+				custom_tooltip = pod_combat_desc_morale_damage_on_miss
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_morale_damage
+			}
+		}
+		if = {
+			limit = { scope:story = { has_variable = self_damage } }
+			if = {
+				limit = {
+					scope:story = {
+						has_variable = self_damage_condition
+						var:self_damage_condition = flag:on_hp_damage
+					}
+				}
+				custom_tooltip = pod_combat_desc_self_damage_on_hp_damage
+			}
+			else_if = {
+				limit = {
+					scope:story = {
+						has_variable = self_damage_condition
+						var:self_damage_condition = flag:on_contact
+					}
+				}
+				custom_tooltip = pod_combat_desc_self_damage_on_contact
+			}
+			else_if = {
+				limit = {
+					scope:story = {
+						has_variable = self_damage_condition
+						var:self_damage_condition = flag:on_miss
+					}
+				}
+				custom_tooltip = pod_combat_desc_self_damage_on_miss
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_self_damage
+			}
+		}
+
+		# Standalone healing; drains are included in the damage line.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_heal
+					NOT = { has_variable = drain }
+				}
+			}
+			custom_tooltip = pod_combat_desc_hp_heal
+		}
+		# Standalone drain (no hp_damage to inline onto)
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = drain
+					NOT = { has_variable = hp_damage }
+				}
+			}
+			custom_tooltip = pod_combat_desc_drain
+		}
+		if = {
+			limit = { scope:story = { has_variable = morale_heal } }
+			custom_tooltip = pod_combat_desc_morale_heal
+		}
+		# Restore display scales the agnostic amount to the viewer's resource.
+		if = {
+			limit = { scope:story = { has_variable = energy_gain } }
+			custom_tooltip = pod_combat_desc_energy_gain
+		}
+
+		# Missing capability flags describe damage moves only.
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = requires_hit_roll }
+				}
+			}
+			custom_tooltip = pod_combat_desc_always_hits
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_guard }
+				}
+			}
+			custom_tooltip = pod_combat_desc_bypass_guard
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_stance }
+				}
+			}
+			custom_tooltip = pod_combat_desc_undodgeable
+		}
+		if = {
+			limit = {
+				scope:story = {
+					has_variable = hp_damage
+					NOT = { has_variable = checks_spirit_gate }
+				}
+			}
+			custom_tooltip = pod_combat_desc_hits_spirits
+		}
+		# Viewer-relative weapon display. Save pod_weapon before tooltips that read it;
+		# match pod_combat_actor_is_armed_trigger so the armed branch always has a scope.
+		if = {
+			limit = { scope:story = { has_variable = uses_weapon } }
+			if = {
+				limit = { pod_combat_actor_is_armed_trigger = yes }
+				random_equipped_character_artifact = {
+					limit = {
+						artifact_slot_type = primary_armament
+						prev = { can_benefit_from_artifact = prev }
+					}
+					save_scope_as = pod_weapon
+				}
+				if = {
+					limit = { scope:pod_weapon = { POD_weapon_artifact_has_override_trigger = yes } }
+					custom_tooltip = pod_combat_desc_weapon_empowered
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_uses_weapon_armed
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_uses_weapon
+			}
+		}
+
+		# Strip flags consume stances before damage; Undodgeable only ignores them.
+		if = {
+			limit = { scope:story = { has_variable = bypass_dodge } }
+			custom_tooltip = pod_combat_desc_bypass_dodge
+		}
+		if = {
+			limit = { scope:story = { has_variable = bypass_stealth } }
+			custom_tooltip = pod_combat_desc_bypass_stealth
+		}
+
+		# Match runtime buff recipients: ally targets use ally wording; all others use self.
+		# Debuffs always use target wording.
+		if = {
+			limit = { scope:story = { has_variable = soak_buff_round_tier } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_soak_buff_round_other
+			}
+			else = { custom_tooltip = pod_combat_desc_soak_buff_round }
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_buff_combat_tier } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_soak_buff_combat_other
+			}
+			else = { custom_tooltip = pod_combat_desc_soak_buff_combat }
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_debuff_round_tier } }
+			custom_tooltip = pod_combat_desc_soak_debuff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = soak_debuff_combat_tier } }
+			custom_tooltip = pod_combat_desc_soak_debuff_combat
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_buff_round_tier } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_hit_buff_round_other
+			}
+			else = { custom_tooltip = pod_combat_desc_hit_buff_round }
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_buff_combat_tier } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_hit_buff_combat_other
+			}
+			else = { custom_tooltip = pod_combat_desc_hit_buff_combat }
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_debuff_round_tier } }
+			custom_tooltip = pod_combat_desc_hit_debuff_round
+		}
+		if = {
+			limit = { scope:story = { has_variable = hit_debuff_combat_tier } }
+			custom_tooltip = pod_combat_desc_hit_debuff_combat
+		}
+
+		if = {
+			limit = { scope:story = { has_variable = set_guard } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_set_guard_other
+			}
+			else = { custom_tooltip = pod_combat_desc_set_guard }
+		}
+		if = {
+			limit = { scope:story = { has_variable = dodge } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_dodge_other
+			}
+			else = { custom_tooltip = pod_combat_desc_dodge }
+		}
+		if = {
+			limit = { scope:story = { has_variable = stealth } }
+			if = {
+				limit = { scope:story = { pod_combat_move_targets_ally_trigger = yes } }
+				custom_tooltip = pod_combat_desc_stealth_other
+			}
+			else = { custom_tooltip = pod_combat_desc_stealth }
+		}
+		if = {
+			limit = { scope:story = { has_variable = remove_guard } }
+			custom_tooltip = pod_combat_desc_remove_guard
+		}
+
+		# Match retaliation arming: explicit amount > hp_damage > 1;
+		# kind: morale > retaliate_agg > move element > superficial.
+		# Elemental classification guards damage_type reads.
+		if = {
+			limit = { scope:story = { has_variable = retaliate_if_hit } }
+			if = {
+				limit = { scope:story = { has_variable = retaliate_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_morale } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_morale
+				}
+				else_if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_agg
+				}
+				else_if = {
+					limit = { scope:story = { pod_combat_move_class_is_elemental_trigger = yes } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_elemental
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_explicit_sup
+				}
+			}
+			else_if = {
+				limit = { scope:story = { has_variable = hp_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_reuse_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_hit_reuse_sup
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_retaliate_if_hit
+			}
+		}
+		if = {
+			limit = { scope:story = { has_variable = retaliate_if_missed } }
+			if = {
+				limit = { scope:story = { has_variable = retaliate_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_morale } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_morale
+				}
+				else_if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_agg
+				}
+				else_if = {
+					limit = { scope:story = { pod_combat_move_class_is_elemental_trigger = yes } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_elemental
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_explicit_sup
+				}
+			}
+			else_if = {
+				limit = { scope:story = { has_variable = hp_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_reuse_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_missed_reuse_sup
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_retaliate_if_missed
+			}
+		}
+		if = {
+			limit = { scope:story = { has_variable = retaliate_if_attacked } }
+			if = {
+				limit = { scope:story = { has_variable = retaliate_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_morale } }
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_explicit_morale
+				}
+				else_if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_explicit_agg
+				}
+				else_if = {
+					limit = { scope:story = { pod_combat_move_class_is_elemental_trigger = yes } }
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_explicit_elemental
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_explicit_sup
+				}
+			}
+			else_if = {
+				limit = { scope:story = { has_variable = hp_damage } }
+				if = {
+					limit = { scope:story = { has_variable = retaliate_agg } }
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_reuse_agg
+				}
+				else = {
+					custom_tooltip = pod_combat_desc_retaliate_if_attacked_reuse_sup
+				}
+			}
+			else = {
+				custom_tooltip = pod_combat_desc_retaliate_if_attacked
+			}
+		}
+
+		# AP / initiative parametric
+		if = {
+			limit = { scope:story = { has_variable = ap_gain } }
+			custom_tooltip = pod_combat_desc_ap_gain
+		}
+		if = {
+			limit = { scope:story = { has_variable = ap_drain } }
+			custom_tooltip = pod_combat_desc_ap_drain
+		}
+		if = {
+			limit = { scope:story = { has_variable = initiative_debuff } }
+			custom_tooltip = pod_combat_desc_initiative_debuff
+		}
+		if = {
+			limit = { scope:story = { has_variable = dot_rounds } }
+			custom_tooltip = pod_combat_desc_dot
+		}
+		if = {
+			limit = { scope:story = { has_variable = mind_control } }
+			custom_tooltip = pod_combat_desc_mind_control
+		}
+		if = {
+			limit = { scope:story = { has_variable = summons_combatant } }
+			custom_tooltip = pod_combat_desc_summon
+		}
+		if = {
+			limit = { scope:story = { has_variable = marker_modifier } }
+			custom_tooltip = pod_combat_desc_marker_modifier
+		}
+		# Strip before application, matching execution order
+		# (12b-marker runs before 12c).
+		if = {
+			limit = { scope:story = { has_variable = remove_marker } }
+			if = {
+				limit = { scope:story = { var:remove_marker_target = flag:target } }
+				custom_tooltip = pod_combat_desc_remove_marker_target
+			}
+			else = { custom_tooltip = pod_combat_desc_remove_marker }
+		}
+
+		# Render every bonus clause from its own story.
+		if = {
+			limit = { scope:story = { has_variable_list = bonus_clauses } }
+			# Iterate on the move, emit on the viewer for perk/weapon reads.
+			# Bind each clause as pod_clause; rebinding story persists beyond the loop.
+			scope:story = {
+				every_in_list = {
+					variable = bonus_clauses
+					save_scope_as = pod_clause
+					root = { pod_combat_card_clause_line_effect = yes }
+				}
+			}
+		}
+		}
+	}
+}
+###### Saved loadout slots
+# Literal-slot wrappers for the parametric helpers in pod_combat_move_init_effects.txt.
+pod_combat_save_loadout_slot_1 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_equipped_count >= 1
+	}
+	effect = { pod_combat_save_loadout_slot_effect = { SLOT = 1 } }
+}
+
+pod_combat_load_loadout_slot_1 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_1_count >= 1
+	}
+	effect = { pod_combat_load_loadout_slot_effect = { SLOT = 1 } }
+}
+
+pod_combat_clear_loadout_slot_1 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_1_count >= 1
+	}
+	effect = { pod_combat_clear_loadout_slot_effect = { SLOT = 1 } }
+}
+
+pod_combat_save_loadout_slot_2 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_equipped_count >= 1
+	}
+	effect = { pod_combat_save_loadout_slot_effect = { SLOT = 2 } }
+}
+
+pod_combat_load_loadout_slot_2 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_2_count >= 1
+	}
+	effect = { pod_combat_load_loadout_slot_effect = { SLOT = 2 } }
+}
+
+pod_combat_clear_loadout_slot_2 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_2_count >= 1
+	}
+	effect = { pod_combat_clear_loadout_slot_effect = { SLOT = 2 } }
+}
+
+pod_combat_save_loadout_slot_3 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_equipped_count >= 1
+	}
+	effect = { pod_combat_save_loadout_slot_effect = { SLOT = 3 } }
+}
+
+pod_combat_load_loadout_slot_3 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_3_count >= 1
+	}
+	effect = { pod_combat_load_loadout_slot_effect = { SLOT = 3 } }
+}
+
+pod_combat_clear_loadout_slot_3 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_3_count >= 1
+	}
+	effect = { pod_combat_clear_loadout_slot_effect = { SLOT = 3 } }
+}
+
+pod_combat_save_loadout_slot_4 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_equipped_count >= 1
+	}
+	effect = { pod_combat_save_loadout_slot_effect = { SLOT = 4 } }
+}
+
+pod_combat_load_loadout_slot_4 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_4_count >= 1
+	}
+	effect = { pod_combat_load_loadout_slot_effect = { SLOT = 4 } }
+}
+
+pod_combat_clear_loadout_slot_4 = {
+	scope = character
+	is_shown = { has_variable = pod_combat_config_open }
+	is_valid = {
+		has_variable = pod_combat_config_open
+		pod_combat_saved_loadout_4_count >= 1
+	}
+	effect = { pod_combat_clear_loadout_slot_effect = { SLOT = 4 } }
+}

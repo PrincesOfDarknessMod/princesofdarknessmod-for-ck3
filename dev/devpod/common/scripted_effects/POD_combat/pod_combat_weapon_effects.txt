@@ -1,21 +1,13 @@
 ﻿######################################################
 ######   POD COMBAT WEAPON OVERRIDES
 ######################################################
-# The uses_weapon path: a move that swings the actor's own weapon lets the
-# equipped artifact retype its damage, add to it, or make it undodgeable. The
-# move may carry the static uses_weapon flag or be granted the swing for this
-# action only by the uses_weapon conditional bonus - pod_combat_move_swings_
-# weapon_trigger answers for both, so nothing below distinguishes them.
-# Everything here is a per-action host transient seeded in execution section 2c
-# and torn down in section 17 - the move stories are a SHARED global catalogue,
-# so nothing per-combatant may be stamped on them.
-# Phase contract: COMBAT_REFERENCE.info section 2.
+# Weapon overrides for static and conditional uses_weapon moves. Profiles live
+# on the fight for execution phases 2c-17; shared move stories must not hold
+# per-combatant state. See COMBAT_REFERENCE.info section 2.
 
 # Host scope, once per action. $STORY$ = the move story.
-# Unconditional set-or-clear: these must never survive into the next action,
-# so every path clears first and only an armed weapon-move re-sets. A
-# conditional swing whose condition failed therefore clears too, rather than
-# inheriting the previous action's profile.
+# Clear before testing eligibility so a failed conditional swing cannot reuse
+# the previous action's profile.
 pod_combat_seed_actor_weapon_profile_effect = {
 	var:pod_combat_session ?= { remove_variable = pod_combat_weapon_class }
 	var:pod_combat_session ?= { remove_variable = pod_combat_weapon_bonus_damage }
@@ -30,9 +22,8 @@ pod_combat_seed_actor_weapon_profile_effect = {
 			var:pod_combat_session ?= { has_variable = pod_combat_actor_char }
 			var:pod_combat_session.var:pod_combat_actor_char ?= { pod_combat_actor_is_armed_trigger = yes }
 		}
-		# One primary_armament slot exists, so the random_ pick is deterministic.
-		# Re-read on every armed weapon action and consumed immediately below,
-		# so a nested reaction cannot act on the outer actor's weapon.
+		# Refresh the scope each action so nested reactions cannot reuse
+		# another actor's weapon.
 		var:pod_combat_session.var:pod_combat_actor_char ?= {
 			random_equipped_character_artifact = {
 				limit = {
@@ -43,14 +34,12 @@ pod_combat_seed_actor_weapon_profile_effect = {
 			}
 		}
 
-		# Retype replaces the default class only. An authored element or
-		# `aggravated` is the move's own identity - a lightning katana neither
-		# overwrites a silvered bolt nor downgrades an aggravated strike.
+		# Weapon retype applies only to the superficial damage; move elements
+		# and aggravated take precedence.
 		if = {
 			limit = {
-				# trigger_if, not an OR of has_variable / var reads: OR does not
-				# short-circuit, so the var read would still fire (and log) on a
-				# move that has no damage_type at all.
+				# Keep the damage_type read nested: OR evaluates it even when
+				# the variable is absent.
 				$STORY$ = {
 					trigger_if = {
 						limit = { has_variable = damage_type }
@@ -59,16 +48,10 @@ pod_combat_seed_actor_weapon_profile_effect = {
 					trigger_else = { always = yes }
 				}
 			}
-			# Literal if-chain, never a var copy - flag values degrade to plain
-			# 'value' through scope-value copies.
-			# The armament answers first; carried kit only fills a gap - a quiver of
-			# silvered arrows makes a plain bow strike silver (and, since nothing
-			# filters the fallback by slot or weapon type, a plain sword too - an
-			# accepted quirk, see docs/WEAPON_OVERRIDE_OPTIONS_REFERENCE.md). Only
-			# the CLASS falls back like this; bonus damage, undodgeable and the rest
-			# are read strictly off the armament. Each branch re-derives its source
-			# immediately before reading it, so a stale saved scope from a previous
-			# action can never be read.
+			# Only damage class may fall back to another equipped artifact, without a
+			# weapon-type or slot filter. Other overrides come from
+			# primary_armament. Resolve each source immediately before reading
+			# it to avoid stale saved scopes.
 			if = {
 				limit = { scope:pod_combat_weapon = { has_variable = artifact_weapon_damage_class } }
 				pod_combat_read_weapon_class_effect = { SOURCE = scope:pod_combat_weapon }
@@ -103,8 +86,7 @@ pod_combat_seed_actor_weapon_profile_effect = {
 			limit = { scope:pod_combat_weapon = { has_variable = artifact_weapon_undodgeable } }
 			var:pod_combat_session ?= { set_variable = pod_combat_weapon_undodgeable }
 		}
-		# Recovery riders, consumed once per action in §9c once the damage
-		# results are final. Numeric copies, so no flag-degradation concern.
+		# Recovery riders apply once in phase 9c, after damage resolves.
 		if = {
 			limit = { scope:pod_combat_weapon = { has_variable = artifact_weapon_heal_on_damage } }
 			var:pod_combat_session ?= { set_variable = { name = pod_combat_weapon_heal_on_damage value = scope:pod_combat_weapon.var:artifact_weapon_heal_on_damage } }
@@ -113,8 +95,7 @@ pod_combat_seed_actor_weapon_profile_effect = {
 			limit = { scope:pod_combat_weapon = { has_variable = artifact_weapon_energy_on_damage } }
 			var:pod_combat_session ?= { set_variable = { name = pod_combat_weapon_energy_on_damage value = scope:pod_combat_weapon.var:artifact_weapon_energy_on_damage } }
 		}
-		# Read at the dispatch site rather than here: the soak roll happens
-		# inside PoD's wound call, which can only reach the ACTOR character.
+		# The damage effect copies this penalty onto the actor for PoD's wound effect.
 		if = {
 			limit = { scope:pod_combat_weapon = { has_variable = artifact_weapon_soak_penalty } }
 			var:pod_combat_session ?= { set_variable = { name = pod_combat_weapon_soak_penalty value = scope:pod_combat_weapon.var:artifact_weapon_soak_penalty } }
@@ -122,12 +103,9 @@ pod_combat_seed_actor_weapon_profile_effect = {
 	}
 }
 
-# Writes the FIGHT's pod_combat_weapon_class from $SOURCE$'s damage class.
-# Literal if-chain, never a var copy - flag values degrade to plain 'value'
-# through scope-value copies. Callers guarantee $SOURCE$ carries the var.
-#
-# Caller scope is the host, so the whole chain sits in one session block; every
-# limit reads $SOURCE$, an absolute scope, so it resolves the same from in here.
+# Host scope. $SOURCE$ must be an artifact scope carrying
+# artifact_weapon_damage_class. Write the actual flags; lifting a flag variable
+# through a scope value loses its type.
 pod_combat_read_weapon_class_effect = {
 	var:pod_combat_session ?= {
 		if = { limit = { $SOURCE$ = { var:artifact_weapon_damage_class = flag:fire } }      set_variable = { name = pod_combat_weapon_class value = flag:fire } }
@@ -153,11 +131,8 @@ pod_combat_clear_actor_weapon_profile_effect = {
 	var:pod_combat_session ?= { remove_variable = pod_combat_weapon_soak_penalty }
 }
 
-# Re-stamps $KIND_VAR$ on the CURRENT scope from the weapon retype, so the
-# payloads seeded during this action (retaliation kind, DoT kind, the
-# team_all caster share) match the hit that produced them. Self-guarding:
-# a no-op when no retype is live. Literal if-chain for the same reason as
-# pod_combat_seed_kind_from_class_effect.
+# $KIND_VAR$ is written on the current scope from the active weapon profile.
+# No retype leaves it unchanged. Literal flags avoid scope-value degradation.
 pod_combat_override_kind_from_weapon_effect = {
 	if = {
 		limit = { scope:combat_host.var:pod_combat_session ?= { has_variable = pod_combat_weapon_class } }
