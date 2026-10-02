@@ -21,7 +21,7 @@ Notice: This Mod is Princes of Darkness Mod Team material and is not official Wo
 
 Both White Wolf and Paradox Interactive have explicitly granted permission for this Mod. The Dark Pack license was expanded with this particular Mod in mind:
 
-"Mods to Paradox Interactive games: any mods you create using World of Darkness IP shall be governed by the Paradox Mod policy, which you can find here https://steamcommunity.com/sharedfiles/filedetails/?id=2216659254&searchtext=
+"Mods to Paradox Interactive games: any mods you create using World of Darkness IP shall be governed by the Paradox Mod policy, which you can find here https://www.paradoxinteractive.com/games/world-of-darkness/community/dark-pack-agreement and https://forum.paradoxplaza.com/forum/threads/updated-14-06-18-rules-for-user-made-mods-and-edits-of-pds-games.708039/
 
 This is the successor mod to Princes of Darkness for Crusader Kings II. Same team has developed both mods.
 
