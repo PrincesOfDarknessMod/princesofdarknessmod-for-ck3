@@ -1,0 +1,148 @@
+﻿##############################################################################################
+# POD COMBAT - MID-FIGHT DELIRIUM
+# Refresh at turn boundaries and after shapeshift interactions; discipline init runs only once per seat.
+# Only leaders inflict Delirium, matching the initial discipline battery's caster selection.
+# Existing modifiers identify afflicted victims and are removed by normal discipline cleanup.
+# Combat pauses daily skill updates, so modifier changes require explicit skill recalculation.
+# See COMBAT_REFERENCE.info section 7.
+##############################################################################################
+
+# Caller: character holding pod_combat_session.
+# Hide modifier effects from duel-start tooltip previews reached through finalize.
+pod_combat_refresh_delirium_effect = {
+	# Use a private host alias; AI callers still need host and combat_host afterward.
+	save_scope_as = pod_delirium_host
+	hidden_effect = {
+		# Nest the pointer read under has_variable: trigger-context ?= does not skip absent scopes.
+		if = {
+			limit = { has_variable = pod_combat_session }
+			if = {
+				limit = {
+					var:pod_combat_session ?= {
+						has_variable = pod_combat_active
+						NOT = { has_variable = pod_combat_is_over }
+					}
+				}
+				# Reset readiness each call; saved caster scopes can survive from an earlier call.
+				save_scope_value_as = { name = pod_delirium_player_ready value = 0 }
+				save_scope_value_as = { name = pod_delirium_enemy_ready  value = 0 }
+				if = {
+					limit = {
+						var:pod_combat_session ?= { has_variable = pod_combat_pc_slot }
+						var:pod_combat_session.var:pod_combat_pc_slot ?= { has_variable = slot_char }
+					}
+					var:pod_combat_session.var:pod_combat_pc_slot.var:slot_char = {
+						save_scope_as = pod_delirium_player_caster
+						if = {
+							limit = { pod_combat_delirium_caster_ready_trigger = yes }
+							save_scope_value_as = { name = pod_delirium_player_ready value = 1 }
+						}
+						# Recalculate prowess even for forms that inflict no Delirium.
+						if = {
+							limit = { is_alive = yes }
+							force_character_skill_recalculation = yes
+						}
+					}
+				}
+				if = {
+					limit = {
+						var:pod_combat_session ?= { has_variable = pod_combat_enemy_leader_slot }
+						var:pod_combat_session.var:pod_combat_enemy_leader_slot ?= { has_variable = slot_char }
+					}
+					var:pod_combat_session.var:pod_combat_enemy_leader_slot.var:slot_char = {
+						save_scope_as = pod_delirium_enemy_caster
+						if = {
+							limit = { pod_combat_delirium_caster_ready_trigger = yes }
+							save_scope_value_as = { name = pod_delirium_enemy_ready value = 1 }
+						}
+						if = {
+							limit = { is_alive = yes }
+							force_character_skill_recalculation = yes
+						}
+					}
+				}
+				# Early-out: with neither leader in an inducing form the roster walk below would
+				# call PoD's effect once per combatant to learn nothing.
+				if = {
+					limit = {
+						OR = {
+							scope:pod_delirium_player_ready = 1
+							scope:pod_delirium_enemy_ready = 1
+						}
+					}
+					var:pod_combat_session ?= {
+						every_in_list = {
+							variable = pod_combat_active_slots
+							limit = { pod_combat_slot_delirium_candidate_trigger = yes }
+							# The var:slot_char switch is the last statement of each branch and
+							# nothing follows the chain, which keeps the iteration scope clean.
+							if = {
+								limit = {
+									pod_combat_slot_is_enemy_trigger = yes
+									scope:pod_delirium_player_ready = 1
+								}
+								var:slot_char = { pod_combat_apply_delirium_to_victim_effect = { CASTER = scope:pod_delirium_player_caster } }
+							}
+							else_if = {
+								limit = {
+									pod_combat_slot_is_player_team_trigger = yes
+									scope:pod_delirium_enemy_ready = 1
+								}
+								var:slot_char = { pod_combat_apply_delirium_to_victim_effect = { CASTER = scope:pod_delirium_enemy_caster } }
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+# Victim scope. $CASTER$ must be a saved leader scope; var: chains would re-resolve on the victim.
+# PoD's effect owns immunity, bypass perks and severity.
+pod_combat_apply_delirium_to_victim_effect = {
+	POD_fera_delirium_effect = { FERA = $CASTER$ }
+	# Candidates had no Delirium, so this modifier proves a new application and prevents repeat logs.
+	if = {
+		limit = { pod_combat_char_has_any_delirium_trigger = yes }
+		force_character_skill_recalculation = yes
+		save_scope_as = pod_delirium_victim
+		# Push from the host: the logger overwrites combat_host with its caller.
+		scope:pod_delirium_host = {
+			pod_combat_push_system_log_named_effect = { MESSAGE_KEY = delirium_struck  CHARACTER = scope:pod_delirium_victim }
+		}
+	}
+}
+
+# Changed-character scope, after the shapeshift interaction resolves its final form.
+# Hook the interaction because the shared warform effect also runs outside combat and excludes primal forms.
+POD_combat_on_form_change_effect = {
+	# Suppress tooltip output for all callers.
+	hidden_effect = {
+		if = {
+			limit = {
+				pod_combat_is_seated_trigger = yes
+				NOT = { pod_combat_is_over_trigger = yes }
+			}
+			# The shifter's own recalc. The refresh below only reaches the two leaders, and a
+			# non-leader who shifts still changed their own prowess.
+			force_character_skill_recalculation = yes
+			# Portrait form cache: re-stamp on the click, so the shifter's portraits resolve
+			# against the new form at their next refresh rather than at the next chokepoint.
+			pod_combat_write_char_form_cache_effect = yes
+			save_scope_as = pod_form_change_char
+			# Log the shift before its Delirium consequences.
+			pod_combat_push_system_log_named_effect = { MESSAGE_KEY = form_shifted  CHARACTER = scope:pod_form_change_char }
+			pod_combat_refresh_delirium_effect = yes
+			# Live-turn repair. Only the body currently holding a controlled turn has a
+			# workspace worth repairing; anyone else is picked up by the next boundary call.
+			if = {
+				limit = { pod_combat_char_is_live_control_actor_trigger = yes }
+				pod_combat_stash_side_live_stats_effect = { SIDE = actor }
+				# Reload only the target; a full load would overwrite live actor AP, energy and tiers.
+				pod_combat_reload_selected_target_effect = yes
+				pod_combat_recalc_pc_hit_chance_effect = yes
+			}
+		}
+	}
+}
