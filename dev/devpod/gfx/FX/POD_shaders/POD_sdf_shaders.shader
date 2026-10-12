@@ -145,8 +145,11 @@ PixelShader =
 				float2 wx = float2(1.7, 9.2);
 				float2 wy = float2(8.3, 2.8);
 
-				float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(-5, 5);
-
+				#if defined(DIAGONAL)
+					float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(-5, 5);
+				#else
+					float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(0, 5);
+				#endif
 				p += lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(offset));
 
 				rot(vx, TTIME/1000.0);
@@ -237,7 +240,11 @@ PixelShader =
 				float3 col = float3(1.0,1.0,1.0);
 				
 				float d = df(Input.UV0,TextureSize);
-				p += -0.025*TTIME*float2(-1.0, 1.0);
+				#if defined(DIAGONAL)
+					p += -0.025*TTIME*float2(-1.0, 1.0);
+				#else
+					p += -0.025*TTIME*float2(0.0, 1.0);
+				#endif
 				
 				float2 v;
 				float2 w;
@@ -475,8 +482,9 @@ PixelShader =
 
 			float warp(float2 p, float df) {
 				#ifdef SDF
-					float2 off = (1.75 + 0.5*cos(GuiTime*TAU/60.0))*float2(-5, 5);
-					float2 op = p + lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(df));
+					// float2 off = (1.75 + 0.5*cos(GuiTime*TAU/60.0))*float2(-5, 5);
+					// float2 op = p + lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(df));
+					float2 op = p + lerp(float2(0.0,0.0), float2(0.0,0.75), 0.5 + 0.5*cos(df*10.));
 				#else
 					float2 op = p;
 				#endif
@@ -508,12 +516,12 @@ PixelShader =
 				
 				float height = 0.35*tanh_approx(rs*h)/rs;
 				
-				if (sdf <= 0.0) {
-					return -height;
-				}
-				else {
+				// if (sdf <= 0.0) {
+				// 	return -height;
+				// }
+				// else {
 					return height;
-				}
+				//}
 			}
 
 			float3 normal(float2 p, float2 global_uv) {
@@ -530,18 +538,12 @@ PixelShader =
 				#ifdef SDF
 					float sdf = -df(global_uv);
 					
-					float3 bordernormal = normalize( cross( n, float3(-1.0,0.0,-1.0) ) );
-					float3 innernormal = normalize( float3(-n.x,n.y,-n.z) );
+					float3 bordernormal = normalize( cross( n, float3(0.0,0.0,1.0) ) );
 					
 					float mixValueBorder = smoothstep( 0.0, 0.5, sdf );
 					mixValueBorder = clamp(mixValueBorder, 0.0, 1.0);
 					
-					float mixValueInner = smoothstep( 0.0, 0.5, sdf );
-					
-					float3 border = normalize( lerp( n, bordernormal, mixValueBorder ) );
-					float3 inner  = normalize( lerp( n, innernormal, mixValueInner ) );
-					
-					return border;
+					return normalize( lerp( n, bordernormal, mixValueBorder ) );
 					
 				#else
 					return normalize(n);
