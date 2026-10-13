@@ -145,8 +145,11 @@ PixelShader =
 				float2 wx = float2(1.7, 9.2);
 				float2 wy = float2(8.3, 2.8);
 
-				float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(-5, 5);
-
+				#if defined(DIAGONAL)
+					float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(-5, 5);
+				#else
+					float2 off = (1.75 + 0.5*cos(TTIME/60.0))*float2(0, 5);
+				#endif
 				p += lerp(float2(0.0,0.0), off, 0.5 + 0.5*tanh(offset));
 
 				rot(vx, TTIME/1000.0);
@@ -237,7 +240,11 @@ PixelShader =
 				float3 col = float3(1.0,1.0,1.0);
 				
 				float d = df(Input.UV0,TextureSize);
-				p += -0.025*TTIME*float2(-1.0, 1.0);
+				#if defined(DIAGONAL)
+					p += -0.025*TTIME*float2(-1.0, 1.0);
+				#else
+					p += -0.025*TTIME*float2(0.0, 1.0);
+				#endif
 				
 				float2 v;
 				float2 w;
