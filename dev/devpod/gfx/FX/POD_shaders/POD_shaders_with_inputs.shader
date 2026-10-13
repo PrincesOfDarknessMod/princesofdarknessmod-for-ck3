@@ -495,7 +495,12 @@ PixelShader =
 			{
 				float2 fragCoord = Input.UV0 * SpriteSize.xy;
 				float2 U = fragCoord / SpriteSize.y;
-				float T = mod(GuiTime * SPEED * TAO, TAO);
+				#if defined(STATIC)
+					float time = 0.0;
+				#else
+					float time = GuiTime;
+				#endif
+				float T = mod(time * SPEED * TAO, TAO);
 				float H = clamp(.5 * sin(T) * sin(T / 2.) * exp(-T / 4.) + .5, 0., 1.);
 				//float H = iTime * 0.1;
 				float n = N(U, H * 5., .1) * 1.15;
@@ -1389,6 +1394,20 @@ Effect PODVeinsAlphaDisabled
 	VertexShader = "VS_Default"
 	PixelShader = "PS_PODVeins"
 	Defines = { "ALPHA" "DISABLED" }
+}
+
+Effect PODVeinsAlphaStatic
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "ALPHA" "STATIC" }
+}
+
+Effect PODVeinsAlphaStaticDisabled
+{
+	VertexShader = "VS_Default"
+	PixelShader = "PS_PODVeins"
+	Defines = { "ALPHA" "STATIC" "DISABLED" }
 }
 
 Effect PODGiger
