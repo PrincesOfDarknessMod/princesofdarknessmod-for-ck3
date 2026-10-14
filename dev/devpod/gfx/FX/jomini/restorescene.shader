@@ -153,6 +153,17 @@ PixelShader =
 			}
 
 
+			float3 ApplyOutputDither( float3 Color, float2 PixelCoord )
+			{
+				// Interleaved gradient noise, remapped to a triangular distribution so the error stays zero mean.
+				float Noise = frac( 52.9829189 * frac( dot( PixelCoord, float2( 0.06711056, 0.00583715 ) ) ) );
+				float Offset = Noise * 2.0 - 1.0;
+				Offset = sign( Offset ) * ( 1.0 - sqrt( max( 0.0, 1.0 - abs( Offset ) ) ) );
+
+				// ToneMap already applied ToGamma, so one output LSB is 1/255 in this space.
+				return Color + Offset * ( 1.0 / 255.0 );
+			}
+
 			PDX_MAIN
 			{
 				float4 color = PdxTex2DLod0( MainScene, Input.uv );
@@ -207,6 +218,8 @@ PixelShader =
 			#else
 				color = RestoreScene( saturate(color.rgb) );
 			#endif
+
+				color.rgb = ApplyOutputDither( color.rgb, Input.uv / InvScreenResolution );
 			
 			#ifdef PDX_DEBUG_TONEMAP_CURVE
 				float2 uvScale = float2( ddx(Input.uv.x), ddy(Input.uv.y) );
