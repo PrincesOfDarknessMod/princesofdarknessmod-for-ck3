@@ -1276,6 +1276,11 @@ PixelShader =
 
 				Diffuse.a = PdxMeshApplyOpacity( Diffuse.a, Input.Position.xy, PdxMeshGetOpacity( Input.InstanceIndex ) );
 
+				#ifdef DITHERED_OPACITY
+					DitheredOpacity( Diffuse.a, Input.Position.xz );
+					Diffuse.a = 1.0f;
+				#endif
+
 				// CfV (godherja)
 				GH_SPortraitEffect PortraitEffect = GH_ScanMarkerDecals(DecalCount, true, false, false);
 
