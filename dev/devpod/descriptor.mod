@@ -1,6 +1,6 @@
-version="1.20.1.2"
+version="1.21.0"
 tags={
 	"Total Conversion"
 }
 name="Development Princes of Darkness"
-supported_version="1.20.1.2"
+supported_version="1.21.0"
