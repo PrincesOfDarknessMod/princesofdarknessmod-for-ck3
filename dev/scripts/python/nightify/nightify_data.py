@@ -55,6 +55,7 @@ do_not_nightify = [
 	"event_scenes/fp4_condemned_village.dds",
 	"event_scenes/fp4_funeral_pyre.dds",
 	"event_scenes/fp4_physician_tribal.dds",
+	"event_scenes/gdp_carnival_background.dds",
 	"event_scenes/mpo_campfire_steppe.dds",
 	"event_scenes/mpo_raid_burning_asian.dds",
 	"event_scenes/study_physician.dds",
@@ -157,6 +158,7 @@ nightify_illustrations = {
 	"event_scenes/ep3_holysite_orthodox.dds":				"event_scenes/ep3_holysite_orthodox_night.dds",
 	"event_scenes/ep3_medi_estate.dds":						"event_scenes/ep3_medi_estate_night.dds",
 	"event_scenes/ep3_medi_market.dds":						"event_scenes/ep3_medi_market_night.dds",
+	"event_scenes/ep3_medi_market_crowd.dds":				"event_scenes/ep3_medi_market_night.dds",
 	"event_scenes/ep3_medi_study.dds":						"event_scenes/ep3_medi_study_night.dds",
 	"event_scenes/ep3_relaxing_room.dds":					"event_scenes/ep3_relaxing_room_night.dds",
 	"event_scenes/forest_pine.dds":							"event_scenes/forest_pine_night.dds",
@@ -183,10 +185,29 @@ nightify_illustrations = {
 	"event_scenes/fp4_study_physician_mena.dds":			"event_scenes/fp4_study_physician_mena_night.dds",
 	"event_scenes/gallows.dds":								"event_scenes/gallows_night.dds",
 	"event_scenes/garden.dds":								"event_scenes/garden_night.dds",
+	"event_scenes/gdp_artisans_street_asia.dds":			"event_scenes/gdp_artisans_street_asia_night.dds",
+	"event_scenes/gdp_artisans_street_asia_crowd.dds":		"event_scenes/gdp_artisans_street_asia_night.dds",
+	"event_scenes/gdp_artisans_street_india.dds":			"event_scenes/gdp_artisans_street_india_night.dds",
+	"event_scenes/gdp_artisans_street_india_crowd.dds":		"event_scenes/gdp_artisans_street_india_night.dds",
+	"event_scenes/gdp_artisans_street_mena.dds":			"event_scenes/gdp_artisans_street_mena_night.dds",
+	"event_scenes/gdp_artisans_street_mena_crowd.dds":		"event_scenes/gdp_artisans_street_mena_night.dds",
+	"event_scenes/gdp_artisans_street_western.dds":			"event_scenes/gdp_artisans_street_western_night.dds",
+	"event_scenes/gdp_artisans_street_western_crowd.dds":	"event_scenes/gdp_artisans_street_western_night.dds",
+	"event_scenes/gdp_carpentry_workshop.dds":				"event_scenes/gdp_carpentry_workshop_night.dds",
+	"event_scenes/gdp_italian_market.dds":					"event_scenes/gdp_italian_market_night.dds",
+	"event_scenes/gdp_italian_market_crowd.dds":			"event_scenes/gdp_italian_market_night.dds",
+	"event_scenes/gdp_jewish_temple.dds":					"event_scenes/gdp_jewish_temple_night.dds",
+	"event_scenes/gdp_mena_merchant_domicile.dds":			"event_scenes/gdp_mena_merchant_domicile_night.dds",
+	"event_scenes/gdp_merchant_domicile.dds":				"event_scenes/gdp_merchant_domicile_night.dds",
+	"event_scenes/gdp_smithy_workshop.dds":					"event_scenes/gdp_smithy_workshop_night.dds",
+	"event_scenes/gdp_tannery.dds":							"event_scenes/gdp_tannery_night.dds",
 	"event_scenes/genericcamp.dds":							"event_scenes/genericcamp_night.dds",
 	"event_scenes/market_east.dds":							"event_scenes/market_east_night.dds",
+	"event_scenes/market_east_crowd.dds":					"event_scenes/market_east_night.dds",
 	"event_scenes/market_tribal.dds":						"event_scenes/market_tribal_night.dds",
+	"event_scenes/market_tribal_crowd.dds":					"event_scenes/market_tribal_night.dds",
 	"event_scenes/market_west.dds":							"event_scenes/market_west_night.dds",
+	"event_scenes/market_west_crowd.dds":					"event_scenes/market_west_night.dds",
 	"event_scenes/mosque.dds":								"event_scenes/mosque_night.dds",
 	"event_scenes/mpo_camp_steppe.dds":						"event_scenes/mpo_camp_steppe_night.dds",
 	"event_scenes/mpo_city_steppe.dds":						"event_scenes/mpo_city_steppe_night.dds",
@@ -225,6 +246,7 @@ nightify_illustrations = {
 	"event_scenes/tgp_japanese_city.dds":					"event_scenes/tgp_japanese_city_night.dds",
 	"event_scenes/tgp_kitchen_asia.dds":					"event_scenes/tgp_kitchen_asia_night.dds",
 	"event_scenes/tgp_market_asia.dds":						"event_scenes/tgp_market_asia_night.dds",
+	"event_scenes/tgp_market_asia_crowd.dds":				"event_scenes/tgp_market_asia_night.dds",
 	"event_scenes/tgp_overflowing_river.dds":				"event_scenes/tgp_overflowing_river_night.dds",
 	"event_scenes/tgp_physician_asia.dds":					"event_scenes/tgp_physician_asia_night.dds",
 	"event_scenes/tgp_relaxing_room_asia.dds":				"event_scenes/tgp_relaxing_room_asia_night.dds",
@@ -371,6 +393,10 @@ nightify_environments = {
 	"event_scenes/fp3_throneroom_night.dds":						"POD_environment_event_night_light",
 	"event_scenes/fp4_legendary_battlefield_night.dds":				"POD_environment_event_night_light",
 	"event_scenes/gallows_night.dds":								"POD_environment_event_night_light",
+	"event_scenes/gdp_artisans_street_western_night.dds":			"POD_environment_event_night_light",
+	"event_scenes/gdp_carpentry_workshop_night.dds":				"POD_environment_event_night_light",
+	"event_scenes/gdp_jewish_temple_night.dds":						"POD_environment_event_night_light",
+	"event_scenes/gdp_merchant_domicile_night.dds":					"POD_environment_event_night_light",
 	"event_scenes/genericcamp_night.dds":							"POD_environment_event_night_light",
 	"event_scenes/market_east_night.dds":							"POD_environment_event_night_light",
 	"event_scenes/market_tribal_night.dds":							"POD_environment_event_night_light",
@@ -481,6 +507,12 @@ nightify_environments = {
 	"event_scenes/fp4_legendary_oasis_night.dds":				"POD_environment_event_night_deepblue",
 	"event_scenes/fp4_legendary_spring_night.dds":				"POD_environment_event_night_deepblue",
 	"event_scenes/garden_night.dds":							"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_artisans_street_asia_night.dds":			"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_artisans_street_india_night.dds":			"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_artisans_street_mena_night.dds":			"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_italian_market_night.dds":				"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_mena_merchant_domicile_night.dds":		"POD_environment_event_night_deepblue",
+	"event_scenes/gdp_tannery_night.dds":						"POD_environment_event_night_deepblue",
 	"event_scenes/mpo_city_steppe_night.dds":					"POD_environment_event_night_deepblue",
 	"event_scenes/mpo_hunt_steppe_night.dds":					"POD_environment_event_night_deepblue",
 	"event_scenes/mpo_rural_village_asian_night.dds":			"POD_environment_event_night_deepblue",
@@ -547,6 +579,8 @@ nightify_environments = {
 	"activity_backgrounds/contest_bg_horseracing_night.dds":	"POD_environment_event_night_purple",
 	
 	# Pale with Rimlight
+	"event_scenes/fp2_corridor_night.dds":				"environment_event_fp2_corridor_night",
+	"event_scenes/gdp_smithy_workshop_night.dds":		"environment_event_fp2_corridor_night",
 	"event_scenes/tgp_study_japan_night.dds":			"environment_event_fp2_corridor_night",
 	"event_scenes/tgp_temple_asia_night.dds":			"environment_event_fp2_corridor_night",
 	"event_scenes/tgp_wedding_bedroom_asia_night.dds":	"environment_event_fp2_corridor_night",
@@ -573,8 +607,6 @@ nightify_environments = {
 
 	"event_scenes/feast.dds":				"environment_event_feast",
 	"event_scenes/pod_wyld_reaches.dds":	"environment_event_feast",
-
-	"event_scenes/fp2_corridor_night.dds":	"environment_event_fp2_corridor_night",
 
 	"event_scenes/pod_coa_tremere.dds":		"environment_event_study_physician",
 
@@ -666,7 +698,7 @@ gruesome_festival_sbg = """
 	background = {
 		trigger = {
 			scope:activity.activity_location = {
-				POD_is_colosseum_location_trigger = yes
+				POD_is_colosseum_location = yes
 			}
 		}
 		reference = "gfx/interface/illustrations/activity_backgrounds/activity_colosseum.dds"
