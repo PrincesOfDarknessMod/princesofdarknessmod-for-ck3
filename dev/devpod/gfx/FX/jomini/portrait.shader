@@ -243,6 +243,29 @@ PixelShader =
 {
 	Code
 	[[
+		void CalculatePortraitLightingFromIBL( SMaterialProperties MaterialProps, SLightingProperties LightingProps, PdxTextureSamplerCube EnvironmentMap, out float3 DiffuseIBLOut, out float3 SpecularIBLOut )
+		{
+			float3 RotatedDiffuseCubemapUV = mul( CastTo3x3( LightingProps._CubemapYRotation ), MaterialProps._Normal );
+			float3 DiffuseRad = PdxTexCubeLod( EnvironmentMap, RotatedDiffuseCubemapUV, ( PDX_NumMips - 1 - PDX_MipOffset ) ).rgb * LightingProps._CubemapIntensity;
+			DiffuseIBLOut = DiffuseRad * MaterialProps._DiffuseColor;
+
+			float3 ReflectionVector = reflect( -LightingProps._ToCameraDir, MaterialProps._Normal );
+			float3 DominantReflectionVector = GetSpecularDominantDir( MaterialProps._Normal, ReflectionVector, MaterialProps._Roughness );
+
+			float NdotV = saturate( dot( MaterialProps._Normal, LightingProps._ToCameraDir ) ) + 1e-5;
+			float Grazing = saturate( 1.0f - MaterialProps._PerceptualRoughness );
+			float3 F90 = lerp( MaterialProps._SpecularColor, vec3( 1.0f ), Grazing * 0.2f );
+			float3 SpecularReflection = F_Schlick( MaterialProps._SpecularColor, F90, NdotV );
+			float SpecularFade = GetReductionInMicrofacets( MaterialProps._Roughness );
+
+			float MipLevel = BurleyToMipSimple( MaterialProps._PerceptualRoughness );
+			float3 RotatedSpecularCubemapUV = mul( CastTo3x3( LightingProps._CubemapYRotation ), DominantReflectionVector );
+			float3 SpecularRad = PdxTexCubeLod( EnvironmentMap, RotatedSpecularCubemapUV, MipLevel ).rgb * LightingProps._CubemapIntensity;
+
+			float Horizon = min( 1.0f + dot( DominantReflectionVector, MaterialProps._Normal ), 1.0f );
+			SpecularIBLOut = SpecularRad * SpecularFade * SpecularReflection * ( Horizon * Horizon );
+		}
+
 		void DebugReturn( inout float3 Out, SMaterialProperties MaterialProps, SLightingProperties LightingProps, PdxTextureSamplerCube EnvironmentMap, float3 ScatteringColor, float ScatteringMask, float3 DiffuseTranslucency )
 		{
 			#if defined( PDX_DEBUG_PORTRAIT_SCATTERING_MASK )
@@ -284,7 +307,7 @@ PixelShader =
 			
 			float3 DiffuseIBL;
 			float3 SpecularIBL;
-			CalculateLightingFromIBL( MaterialProps, LightingProps, EnvironmentMap, DiffuseIBL, SpecularIBL );
+			CalculatePortraitLightingFromIBL( MaterialProps, LightingProps, EnvironmentMap, DiffuseIBL, SpecularIBL );
 			
 			float3 DiffuseLight = vec3(0.0);
 			float3 SpecularLight = vec3(0.0);
@@ -1163,7 +1186,7 @@ Effect portrait_hairShadow
 	VertexShader = "VertexPdxMeshStandardShadow"
 	PixelShader = "PixelPdxMeshStandardShadow"
 	RasterizerState = "ShadowRasterizerState"
-	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_hair_double_sided
@@ -1207,7 +1230,7 @@ Effect portrait_hair_opaqueShadow
 	VertexShader = "VertexPdxMeshStandardShadow"
 	PixelShader = "PixelPdxMeshStandardShadow"
 	RasterizerState = "ShadowRasterizerState"
-	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_attachment_alpha
@@ -1247,7 +1270,7 @@ Effect portrait_anisotropic_hairShadow
 	VertexShader = "VertexPdxMeshStandardShadow"
 	PixelShader = "PixelPdxMeshStandardShadow"
 	RasterizerState = "ShadowRasterizerState"
-	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" "PDX_MESH_BLENDSHAPES" }
 }
 
 Effect portrait_anisotropic_hair_no_flow
@@ -1264,7 +1287,7 @@ Effect portrait_anisotropic_hair_no_flowShadow
 	VertexShader = "VertexPdxMeshStandardShadow"
 	PixelShader = "PixelPdxMeshStandardShadow"
 	RasterizerState = "ShadowRasterizerState"
-	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" }
+	Defines = { "PDXMESH_DISABLE_DITHERED_OPACITY" "PDX_MESH_BLENDSHAPES" }
 }
 
 # CfV HAIR-BLEND
